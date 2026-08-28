@@ -141,6 +141,10 @@ function launch() {
     ...env, opts.claude,
     ...(opts.resume ? ['--resume', opts.resume] : ['--session-id', opts.sessionId]),
     '--settings', path.join(opts.state, 'settings.json'), ...opts.extra));
+  // v0.9 addendum: a client bigger than the window (a browser viewer, or anyone who
+  // attaches) gets tmux's `·` padding around the TUI, which reads as a broken screen.
+  // Window option on OUR window only — the host's global config is never written.
+  tmux('set-option', '-w', '-t', CLAUDE_PANE, 'fill-character', ' ');
   if (opts.retiredLayout) console.log(`${opts.retiredLayout} is retired in v0.14 — the host uses the same client as everyone (ignored)`);
   console.log(`\nclaude-jam up. session ${opts.sessionId}\n` +
     `  tmux: ${opts.tmux} (windows: daemon, claude) — detached; \`tmux attach -t ${opts.tmux}\` for the raw TUI`);
