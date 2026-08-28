@@ -1,0 +1,13 @@
+#!/bin/bash
+# claude-jam launcher.  jam host [...]  |  jam join <ws-url> --name X --token Y
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  host) exec node "$DIR/host.mjs" "$@" ;;
+  join) exec node "$DIR/client.mjs" "$@" ;;
+  *)
+    echo "usage: jam host [--port N] [--name X] [--cwd DIR] [--tmux NAME] [--token V] [-- <claude args>]"
+    echo "       jam join <ws-url> --name X [--token Y] [--basic]   (no token = knock, the host accepts you)"
+    exit 2 ;;
+esac

@@ -1,0 +1,5 @@
+node_modules/
+jam-uploads/
+jam-downloads/
+jam-session-*.jsonl
+*.log

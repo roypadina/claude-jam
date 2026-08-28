@@ -1,0 +1,496 @@
+#!/usr/bin/env node
+// claude-jam ink client (v0.6, extended by v0.7 mirror / v0.10 tool collapse / v0.10b
+// newline keys / v0.10c onboarding). Reached through client.mjs; `--basic` picks
+// client-basic.mjs.
+//
+// The socket and every piece of state live in `store`, plain JS — React owns none of it, so a
+// frame arriving before the first render just lands in the array and shows up when ink mounts.
+// ink only renders: <Static> for the transcript (append-only, so history is never re-drawn and
+// scrollback stays the terminal's own), then the live region (mirror frame / in-progress tool
+// lines), a status row, and the input row.
+//
+// Visual rules are v0.5/v0.5.1 verbatim; what changed is who does the wrapping. A <Static>
+// item is laid out with no width constraint (ink renders it in its own container), so the
+// hanging indent needs an explicit width on the text Box — with one, ink wraps and aligns the
+// continuation to the text column by itself and lib.mjs's wrapText is not needed here.
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
+import React from 'react';
+import { Box, Text, Static, render as inkRender } from 'ink';
+import TextInput from 'ink-text-input';
+import { parseClientLine, joinLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS } from './lib.mjs';
+
+const h = React.createElement;
+
+const argv = process.argv.slice(2);
+const url = argv.find((a) => a.startsWith('ws'));
+const flag = (n) => { const i = argv.indexOf(`--${n}`); return i < 0 ? undefined : argv[i + 1]; };
+const NAME = flag('name');
+const TOKEN = flag('token');
+const IS_HOST = argv.includes('--host');
+// No --token is normal now: the host may run knock-only, and then you wait to be accepted.
+if (!url || !NAME) {
+  console.error('usage: node client.mjs <ws-url> --name <Name> [--token <token>] [--host] [--basic]');
+  process.exit(2);
+}
+
+// Claude Code's palette, in 256 colours: tmux pales the raw 8 into mud, and the warm greys
+// have no 8-colour equivalent at all. Only errors are a plain red-ish accent. ink's own
+// `ansi256(n)` colour form emits exactly the same bytes the readline client wrote by hand.
+const C = {
+  accent: 'ansi256(208)', // claude's orange: its label, the spinner, the prompt caret
+  dim: 'ansi256(245)',    // warm grey: tools, system lines, the status row
+  dimmer: 'ansi256(240)', // one step back again: tool results
+  me: 'ansi256(114)',     // your own name, regardless of what userColor(name) would hash to
+  chat: 'ansi256(213)',   // human-only chat: magenta, unmissable, no other element uses it
+  err: 'ansi256(203)',
+};
+const fg256 = (n) => `ansi256(${n})`; // everybody else's stable per-name color (userColor)
+const SPIN = ['✻', '✼', '✽', '✼']; // claude's own working glyph cycle
+const NO_WRAP_W = 4096; // wider than any terminal: ink leaves the line alone, the terminal
+// soft-wraps it, and an invite command stays one selectable run instead of gaining a newline.
+const OVERLAY_ROWS = 3; // chat/knock lines shown over the mirror while it is on
+
+// ------------------------------------------------------------------- state ----
+// One store, no React. `entries` is append-only: <Static> renders each item exactly once.
+const store = {
+  entries: [],
+  labelW: labelWidth([]), // width of the `[Name]` column, recomputed on roster change
+  roster: [],
+  status: { busy: false, waiting: false },
+  typing: new Map(), // name -> last typing ms
+  cont: [], // pending lines of a multi-line message (trailing `\`, Shift+Enter, Alt+Enter)
+  session: null, // welcome's session block; .join only ever set for the host
+  mirror: false, // v0.7: showing the host's real screen instead of the transcript
+  frame: null, // latest {rows, w, h} screen frame
+  deferred: [], // entries that arrived while the mirror was up; flushed back on the way out
+  tools: [], // v0.10: this turn's ⚙/⎿ lines, still collapsible
+  toolsExpanded: false, // `/tools on` — never collapse
+  lastTools: [], // the last completed turn's full tool log, for `/tools`
+  listeners: new Set(),
+};
+const touch = () => { for (const l of store.listeners) l(); };
+
+const seen = new Set(); // dedupe replayed history across reconnects
+let ws = null;
+let backoff = 1000;
+let boot = null; // daemon boot id: event ids restart at 1 when it changes
+let lastTypingSent = 0;
+let seq = 0; // <Static> keys
+let block = null; // current open message block (nextBlock in lib.mjs)
+let lastTurn = null; // turnKey of the last emitted block, so blocks get a blank line between
+let app = null; // ink instance, once mounted
+
+// Leaving is unmount-then-print: ink clears its own two rows on unmount, so anything written
+// afterwards is guaranteed to survive on screen instead of being erased by the next redraw.
+// Deferred by a tick because `/quit` calls this from inside a React event handler, and
+// unmounting the reconciler mid-commit wedges it instead of exiting.
+function leave(code, text) {
+  setImmediate(() => {
+    try { app?.unmount(); } catch { /* never mounted, or already gone */ }
+    if (text) process.stdout.write(`${text}\n`);
+    process.exit(code);
+  });
+}
+
+// ------------------------------------------------------------- key filter ----
+// v0.7 / v0.10b: F2 and the Shift/Alt+Enter spellings are pulled out of the byte stream
+// BEFORE ink sees it, or ink's input machinery turns them into `[13;2u` in the text field.
+// ink reads from the PassThrough below and never touches the real tty except through the
+// setRawMode proxy, so raw mode, Ctrl-C and unmount all keep working.
+const keys = new EventEmitter();
+const inkStdin = new PassThrough();
+inkStdin.isTTY = true;
+inkStdin.setRawMode = (on) => { try { process.stdin.setRawMode?.(on); } catch { /* not a tty */ } return inkStdin; };
+inkStdin.ref = () => inkStdin;
+inkStdin.unref = () => inkStdin;
+{
+  const dec = new StringDecoder('utf8'); // a chunk can land mid-codepoint
+  let hold = '';
+  process.stdin.on('data', (buf) => {
+    const r = extractKeys(hold + dec.write(buf));
+    hold = r.hold;
+    for (const k of r.keys) keys.emit(k);
+    if (r.text) inkStdin.write(r.text);
+  });
+  process.stdin.resume();
+}
+
+// ---------------------------------------------------------------- emitting ----
+// Say/agent-text/chat are speech: no glyph, just `[Name]  text`. Tools, knocks, system lines
+// and errors keep a one-column glyph. `kind` picks the message block (nextBlock in lib.mjs)
+// this event belongs to; callers that pass no kind (system, knock, error) are untracked —
+// they neither force a blank line nor break an open agent turn's gluing.
+function blockKey(kind) {
+  block = nextBlock(kind, block);
+  return `${block.kind}:${block.seq}`;
+}
+
+// One transcript line: `[Label]` padded to one column, then a glyph column (one character for
+// tools/knocks/system/errors, blank for speech), then the text. Each entry freezes the label
+// width and the terminal width it was built at, because <Static> never re-renders it.
+// `bare` skips the label/glyph gutter entirely (the onboarding block draws its own box).
+function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.dim, text = '', textColor, md = false, wrap = true, bare = false }) {
+  // Blank line between blocks: the rhythm that makes a transcript readable. Tools and their
+  // results glue to their turn's block, so they do not get one of their own.
+  const gap = !!turnKey && lastTurn !== null && turnKey !== lastTurn;
+  if (turnKey) lastTurn = turnKey;
+  const entry = {
+    key: ++seq, gap, label, color, glyph, glyphColor, md, wrap, bare,
+    text: String(text), textColor,
+    labelW: store.labelW, cols: process.stdout.columns || 80,
+  };
+  // While the mirror is up the transcript is not on screen, so new lines wait in `deferred`
+  // (the last few show as an overlay) and are flushed into the transcript, in order, when
+  // the guest flips back. A NEW array, never a push: <Static> memoizes its slice on the
+  // items reference, so an in-place mutation is silently dropped and the line never renders.
+  if (store.mirror) store.deferred = [...store.deferred, entry];
+  else store.entries = [...store.entries, entry];
+  touch();
+}
+
+const sys = (text) => emit({ glyph: '*', text, textColor: C.dim });
+const err = (text) => emit({ glyph: '!', glyphColor: C.err, text, textColor: C.err });
+
+// The host's invite lines, wherever they are shown (welcome, /join, a /token reply).
+function logJoin() {
+  for (const l of joinLines(store.session?.join, store.session?.view)) {
+    emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
+  }
+}
+
+// v0.10c: what a client prints on connect and on `/help`. Dim, gutter-less, ≤10 rows.
+function logOnboarding() {
+  for (const l of onboardingLines(NAME, IS_HOST)) emit({ text: l, textColor: C.dim, wrap: false, bare: true });
+}
+
+// ---------------------------------------------------- v0.10: tool collapse ----
+const emitTool = (t) => (t.kind === 'tool-result'
+  ? emit({ turnKey: blockKey('agent'), glyph: '⎿', glyphColor: C.dimmer, text: t.text, textColor: C.dimmer })
+  : emit({ turnKey: blockKey('agent'), glyph: '⚙', text: t.text, textColor: C.dim }));
+
+// The turn ended (busy went false, or claude started talking again): fold this turn's tool
+// lines into one summary, or — for a single tool call — print them inline as they always were.
+function flushTools() {
+  if (!store.tools.length) return;
+  const tools = store.tools;
+  store.tools = [];
+  store.lastTools = tools;
+  const summary = toolTurnSummary(tools);
+  if (summary) emit({ turnKey: blockKey('agent'), glyph: '⚙', text: summary, textColor: C.dim });
+  else for (const t of tools) emitTool(t);
+}
+
+function render(ev) {
+  switch (ev.t) {
+    case 'say': {
+      // Self is always green; everybody else gets a stable color hashed from their name, so
+      // it survives reconnects and roster churn instead of depending on join order.
+      const c = ev.from === NAME ? C.me : fg256(userColor(ev.from));
+      return emit({ turnKey: blockKey('say'), label: `[${ev.from}]`, color: c, text: ev.text, textColor: c });
+    }
+    // Human-only: the agent never sees it, so it renders unmissable — label, prefix and text
+    // all in the one color nothing else uses.
+    case 'chat': return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat });
+    case 'agent': {
+      if (ev.kind === 'tool' || ev.kind === 'tool-result') {
+        // Collapse mode (default): the turn's tool lines live in the live region until the
+        // turn ends. `/tools on` prints them straight into the transcript, as v0.6 did.
+        if (store.toolsExpanded) return emitTool({ kind: ev.kind, text: ev.text });
+        store.tools = [...store.tools, { kind: ev.kind, text: ev.text }];
+        return touch();
+      }
+      flushTools(); // a new text block ends the tool run before it
+      return emit({ turnKey: blockKey('agent'), label: '[Claude]', color: C.accent, text: ev.text, md: true });
+    }
+    case 'roster': {
+      store.roster = ev.roster;
+      store.labelW = labelWidth(ev.roster); // the column follows the longest name in the room
+      if (ev.joined) sys(`${ev.joined} joined`);
+      if (ev.left) sys(`${ev.left} left`);
+      return touch();
+    }
+    case 'typing': if (ev.from !== NAME) { store.typing.set(ev.from, Date.now()); touch(); } return;
+    case 'status':
+      store.status = { busy: ev.busy, waiting: ev.waiting };
+      if (!ev.busy) flushTools(); // the turn is over: collapse what it ran
+      return touch();
+    // v0.7: the host's real screen. Live state, never transcript — the newest frame replaces
+    // the previous one and nothing is kept.
+    case 'screen': store.frame = { rows: ev.rows || [], w: ev.w, h: ev.h }; return touch();
+    // Knocks: `state` means it is about us waiting, `name` means somebody wants in.
+    case 'knock': {
+      if (ev.state === 'pending') return sys('waiting for host approval…');
+      if (ev.state === 'denied') return leave(1, '! the host denied your request');
+      if (ev.state === 'expired') return leave(1, '! nobody approved your request in time');
+      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
+    }
+    case 'token': {
+      if (store.session) { store.session.join = ev.join; store.session.view = ev.view; }
+      return logJoin();
+    }
+    case 'error': return err(ev.text);
+    default: return;
+  }
+}
+
+// ------------------------------------------------------------------ socket ----
+function connect() {
+  ws = new WebSocket(url);
+  ws.addEventListener('open', () => {
+    backoff = 1000;
+    ws.send(JSON.stringify({ t: 'hello', name: NAME, token: TOKEN, host: IS_HOST || undefined }));
+    // A reconnect while watching the mirror re-subscribes: the daemon knows nothing about
+    // the socket that died.
+    if (store.mirror) ws.send(JSON.stringify({ t: 'mirror', on: true }));
+  });
+  ws.addEventListener('message', (m) => {
+    let ev;
+    try { ev = JSON.parse(m.data); } catch { return; }
+    if (ev.t === 'welcome') {
+      store.session = ev.session;
+      store.roster = ev.roster;
+      store.labelW = labelWidth(ev.roster); // set before the replay, so history aligns
+      sys(`jam ${ev.session.id} — host ${ev.session.hostName}, cwd ${ev.session.cwd}`);
+      if (IS_HOST) logJoin();
+      logOnboarding(); // above the first messages; the replay comes after it
+      // A restarted daemon reissues ids from 1, so old ids in `seen` would swallow
+      // everything it sends. Drop them whenever the boot id changes.
+      if (ev.session?.boot !== boot) { boot = ev.session?.boot; seen.clear(); }
+      for (const hist of ev.history || []) if (!seen.has(hist.id)) { seen.add(hist.id); render(hist); }
+      sys(`here: ${store.roster.join(', ')}`);
+      return;
+    }
+    // Screen frames are a live view at 4/s: they must never enter the dedupe set (it would
+    // grow without bound) and there is nothing to dedupe — only the newest one matters.
+    if (ev.t !== 'screen' && ev.id != null) { if (seen.has(ev.id)) return; seen.add(ev.id); }
+    render(ev);
+  });
+  ws.addEventListener('close', (e) => {
+    // 4400/4401 bad name or token, 4403 denied, 4408 knock expired, 4409 name taken,
+    // 4429 too many knocks — none of them get better by retrying.
+    // `leave` is deferred a tick, so this must return: otherwise the retry below is scheduled
+    // and a "disconnected, retrying" line lands on top of the rejection first.
+    if (e.code >= 4400 && e.code <= 4429) return leave(1, `! rejected: ${e.reason || 'auth'}`);
+    store.status = { busy: false, waiting: false }; // nothing is known while the socket is down
+    sys(`disconnected, retrying in ${backoff / 1000}s`);
+    setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, 10000);
+  });
+  ws.addEventListener('error', () => { /* close handler does the retry */ });
+}
+
+const sendMsg = (o) => { if (ws?.readyState === 1) ws.send(JSON.stringify(o)); else err('not connected'); };
+
+// v0.7: flip between the transcript and the host's real screen. F2 and `/mirror` are the
+// same call; leaving flushes everything that arrived while the mirror was up.
+function toggleMirror(on) {
+  const next = on ?? !store.mirror;
+  if (next === store.mirror) return;
+  store.mirror = next;
+  sendMsg({ t: 'mirror', on: next });
+  if (next) {
+    store.frame = null;
+    sys('mirror on — the host\'s real screen. F2 or /mirror goes back to the transcript.');
+  } else {
+    store.entries = [...store.entries, ...store.deferred];
+    store.deferred = [];
+    sys('mirror off — back to the transcript.');
+  }
+  touch();
+}
+
+// One submitted input row. Identical dispatch to the readline client, including the
+// continuation buffer: a trailing `\` collects, the first line without one flushes.
+function submit(raw) {
+  const a = parseClientLine(raw);
+  if (a.kind === 'continue') { store.cont.push(a.text); return touch(); }
+  const act = store.cont.length ? parseClientLine([...store.cont, raw].join('\n')) : a;
+  store.cont = [];
+  switch (act.kind) {
+    case 'say': sendMsg({ t: 'say', text: act.text }); break;
+    case 'chat': sendMsg({ t: 'chat', text: act.text }); break;
+    case 'who': sys(`here: ${store.roster.join(', ')}`); break;
+    case 'help': logOnboarding(); break;
+    case 'mirror': toggleMirror(); break;
+    case 'tools':
+      if (act.op) {
+        store.toolsExpanded = act.op === 'on';
+        if (store.toolsExpanded && store.tools.length) { const t = store.tools; store.tools = []; for (const x of t) emitTool(x); }
+        sys(`tool lines ${store.toolsExpanded ? 'always expanded' : 'collapsed to one summary line per turn'}`);
+      } else if (store.lastTools.length) {
+        sys(`last turn's tools (${store.lastTools.filter((t) => t.kind === 'tool').length}):`);
+        for (const t of store.lastTools) emitTool(t);
+      } else sys('no completed tool calls yet');
+      break;
+    case 'join':
+      if (!IS_HOST) err('host only');
+      else if (!store.session) sys('not connected yet');
+      else logJoin();
+      break;
+    case 'accept':
+    case 'deny':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'admit', name: act.name || undefined, ok: act.kind === 'accept' });
+      break;
+    case 'token':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'token', op: act.op, value: act.value });
+      break;
+    case 'quit': return leave(0);
+    case 'error': err(act.text); break;
+    default: break;
+  }
+  touch();
+}
+
+// --------------------------------------------------------------- rendering ----
+function useStore() {
+  const [, bump] = React.useState(0);
+  React.useEffect(() => {
+    const l = () => bump((v) => v + 1);
+    store.listeners.add(l);
+    return () => { store.listeners.delete(l); };
+  }, []);
+  return store;
+}
+
+function Entry({ e }) {
+  const gutter = e.labelW + 2 + (e.glyph ? 1 : 0); // '[Label]' + pad + space [+ glyph] + space
+  const body = e.md ? e.text.split('\n').map(mdLite).join('\n') : e.text;
+  // The block gap is a row of the entry itself, so it flushes with it and can never end up
+  // separated from the line it belongs to. A single space, not '': ink measures an empty
+  // Text as zero rows and the blank line disappears.
+  const gap = e.gap ? h(Text, null, ' ') : null;
+  if (e.bare) {
+    return h(Box, { flexDirection: 'column' }, gap,
+      h(Box, { width: NO_WRAP_W, flexShrink: 0 }, h(Text, { color: e.textColor }, body)));
+  }
+  return h(Box, { flexDirection: 'column' }, gap,
+    h(Box, null,
+      h(Box, { width: gutter, flexShrink: 0 },
+        h(Text, { color: e.color, wrap: 'truncate' }, e.label),
+        e.glyph
+          ? h(Text, { color: e.glyphColor }, `${' '.repeat(Math.max(0, e.labelW - e.label.length) + 1)}${e.glyph}`)
+          : null),
+      // wrap:false keeps a join command or a URL on one logical line: an oversized Box means
+      // ink adds no newline of its own and the terminal's soft wrap leaves it selectable.
+      h(Box, e.wrap ? { width: Math.max(24, e.cols - gutter - 1) } : { width: NO_WRAP_W, flexShrink: 0 },
+        h(Text, { color: e.textColor }, body))));
+}
+
+// v0.7: the host pane's own cells. Each row is printed verbatim (SGR intact, truncated
+// ANSI-aware by ink) — no colors of our own, or they would fight the captured ones.
+function Mirror({ frame }) {
+  const cols = process.stdout.columns || 80;
+  if (!frame) return h(Text, { color: C.dim }, 'waiting for the host\'s screen…');
+  const fit = fitFrame(frame, cols, process.stdout.rows);
+  const hints = [
+    fit.wider ? `host pane is ${frame.w} cols wide, yours is ${cols}` : '',
+    fit.croppedRows ? `${fit.croppedRows} row(s) above cut off` : '',
+  ].filter(Boolean).join(' · ');
+  return h(Box, { flexDirection: 'column' },
+    fit.rows.map((r, i) => h(Text, { key: i, wrap: 'truncate' }, r === '' ? ' ' : r)),
+    hints ? h(Text, { color: C.dim }, `— mirror: ${hints}`) : null);
+}
+
+function StatusBar({ status, typing, spin, mirror }) {
+  const now = Date.now();
+  const who = [...typing.entries()].filter(([, at]) => now - at < 4000).map(([n]) => n);
+  const right = who.length ? `${who.join(', ')} ${who.length > 1 ? 'are' : 'is'} typing…` : '';
+  return h(Box, { minHeight: 1 },
+    h(Box, { flexGrow: 1 },
+      mirror ? h(Text, { color: C.dim }, '[mirror] ') : null,
+      status.busy ? h(Text, { color: C.accent }, `${SPIN[spin]} claude is working…`) : null,
+      status.busy && status.waiting ? h(Text, { color: C.dim }, ' · ') : null,
+      status.waiting ? h(Text, { color: C.dim }, '⚠ waiting for host permission') : null),
+    right ? h(Text, { color: C.dim }, right) : null);
+}
+
+function App() {
+  const s = useStore();
+  const [input, setInput] = React.useState('');
+  const [spin, setSpin] = React.useState(0);
+
+  // The spinner runs ONLY while busy, and unref'd, so an idle client neither redraws nor
+  // holds the loop open.
+  React.useEffect(() => {
+    if (!s.status.busy) { setSpin(0); return; }
+    const t = setInterval(() => setSpin((i) => (i + 1) % SPIN.length), 220);
+    t.unref?.();
+    return () => clearInterval(t);
+  }, [s.status.busy]);
+
+  // Typing indicators expire on their own; this only needs to redraw the status row.
+  React.useEffect(() => {
+    const t = setInterval(() => {
+      const before = s.typing.size;
+      for (const [n, at] of s.typing) if (Date.now() - at >= 4000) s.typing.delete(n);
+      if (s.typing.size !== before) touch();
+    }, 1000);
+    t.unref?.();
+    return () => clearInterval(t);
+  }, [s]);
+
+  // v0.10b: Shift+Enter / Alt+Enter push the row into the pending buffer instead of
+  // submitting it — exactly where a trailing `\` puts it, so submit() needs no new path.
+  // v0.7: F2 is the mirror toggle. Both come from the key filter above, never from ink.
+  React.useEffect(() => {
+    const onNewline = () => { store.cont.push(input); setInput(''); touch(); };
+    const onMirror = () => toggleMirror();
+    keys.on('newline', onNewline);
+    keys.on('mirror', onMirror);
+    return () => { keys.off('newline', onNewline); keys.off('mirror', onMirror); };
+  }, [input]);
+
+  const onChange = (v) => {
+    setInput(v);
+    const now = Date.now();
+    if (v && now - lastTypingSent > 1500) { lastTypingSent = now; sendMsg({ t: 'typing' }); }
+  };
+
+  // Live region, in order: the mirror frame (or the in-progress turn's tool lines), the
+  // 3-row overlay of what arrived while the mirror is up, the status row, the pending lines
+  // of a multi-line message, and the input row.
+  const liveTools = s.mirror || s.toolsExpanded ? [] : s.tools.slice(-LIVE_TOOL_ROWS);
+  return h(Box, { flexDirection: 'column' },
+    h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
+    s.mirror ? h(Mirror, { frame: s.frame }) : null,
+    liveTools.length
+      // Index keys on purpose: this region is redrawn every render (never <Static>), and two
+      // identical tool lines in one turn are perfectly normal.
+      ? h(Box, { flexDirection: 'column' }, liveTools.map((t, i) => h(Entry, {
+        key: `live-${i}`,
+        e: {
+          gap: false, label: '', color: C.dim, glyph: t.kind === 'tool-result' ? '⎿' : '⚙',
+          glyphColor: t.kind === 'tool-result' ? C.dimmer : C.dim, md: false, wrap: true, bare: false,
+          text: t.text, textColor: t.kind === 'tool-result' ? C.dimmer : C.dim,
+          labelW: s.labelW, cols: process.stdout.columns || 80,
+        },
+      })))
+      : null,
+    s.mirror && s.deferred.length
+      ? h(Box, { flexDirection: 'column' },
+        s.deferred.slice(-OVERLAY_ROWS).map((e) => h(Entry, { key: `ov-${e.key}`, e: { ...e, gap: false } })))
+      : null,
+    h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror }),
+    s.cont.length
+      ? h(Box, { flexDirection: 'column' },
+        s.cont.map((l, i) => h(Text, { key: `cont-${i}`, color: C.dim }, l === '' ? ' ' : l)))
+      : null,
+    h(Box, null,
+      h(Text, { color: C.me }, NAME),
+      s.cont.length ? h(Text, { color: C.dim }, ' …') : null,
+      h(Text, { color: C.accent }, ' ❯ '),
+      h(TextInput, { value: input, onChange, onSubmit: (v) => { setInput(''); submit(v); } })));
+}
+
+// Ctrl-C in the terminal is ink's own (exitOnCtrlC): it unmounts, waitUntilExit resolves and
+// the exit below runs. These are for a signal from outside, where ink sees nothing.
+process.on('SIGINT', () => leave(0));
+process.on('SIGTERM', () => leave(0));
+app = inkRender(h(App), { patchConsole: false, stdin: inkStdin });
+connect();
+await app.waitUntilExit();
+process.exit(0);
