@@ -343,10 +343,10 @@ function togglePassthrough(on) {
   if (next && !IS_HOST) return err('F3 TUI control is the host\'s — ask them, or send a /command for approval');
   store.passthrough = next;
   if (next) toggleMirror(true);
-  toTranscript++;
-  sys(next ? 'TUI control ON — every key goes to claude\'s screen. F3 hands it back.'
+  // Ordinary system line: it shows in the chat strip now and lands in the transcript in the
+  // order it happened. The status and input rows are what actually announce TUI control.
+  sys(next ? 'TUI control ON — every key goes to claude\'s screen (Ctrl-C too). F3 hands it back.'
     : 'TUI control off — typing goes to the jam again.');
-  toTranscript--;
   touch();
 }
 
@@ -363,9 +363,7 @@ function toggleMirror(on) {
   } else {
     store.entries = [...store.entries, ...store.deferred];
     store.deferred = [];
-    toTranscript++;
     sys('transcript — F2 goes back to the live TUI');
-    toTranscript--;
   }
   touch();
 }
@@ -512,6 +510,17 @@ function App() {
     t.unref?.();
     return () => clearInterval(t);
   }, [s.status.busy]);
+
+  // v0.14: raw mode is held by ink's TextInput, and passthrough hides the input row — so
+  // unmounting it put the tty back into canonical mode, where the terminal echoed every key
+  // and released nothing until Enter (observed: `zz^[` printed into the client's own row
+  // while claude got nothing). Passthrough holds raw mode itself. This effect runs after the
+  // unmount's cleanup in the same commit, so it wins; F3 back remounts TextInput, which
+  // takes over again.
+  React.useEffect(() => {
+    if (!s.passthrough) return;
+    try { process.stdin.setRawMode?.(true); } catch { /* not a tty */ }
+  }, [s.passthrough]);
 
   // Typing indicators expire on their own; this only needs to redraw the status row.
   React.useEffect(() => {
