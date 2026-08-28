@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-// Knock approval inside the claude window: `tmux display-popup` runs this, it shows who is
-// knocking, reads ONE key and posts the verdict back to the daemon.
-// usage: popup.mjs <name> <ip> <ttl-seconds> <port>   (hook secret via JAM_HOOK_SECRET)
+// Approval inside the claude window: `tmux display-popup` runs this, it shows who wants
+// what — someone knocking to join, or (v0.14) a guest asking to run one of claude's own
+// commands — reads ONE key and posts the verdict back to the daemon.
+// usage: popup.mjs <name> <ip> <ttl-seconds> <port> [knock|cmd] [detail]
+//        (hook secret via JAM_HOOK_SECRET)
 //
 // Rule one, same as hooks.sh: never affect the daemon or the TUI. Every failure exits 0
-// quietly, and an unanswered popup leaves the knock pending so `/accept` in a client works.
+// quietly, and an unanswered popup leaves the request pending so a client command still works.
 import { request } from 'node:http';
-import { popupKey } from './lib.mjs';
+import { popupKey, popupPrompt } from './lib.mjs';
 
-const [name, ip, ttlS, port] = process.argv.slice(2);
+const [name, ip, ttlS, port, kind = 'knock', detail = ''] = process.argv.slice(2);
 const secret = process.env.JAM_HOOK_SECRET || '';
 
 // A stack trace here would be painted over the host's TUI. There is nothing worth
@@ -18,8 +20,8 @@ process.on('uncaughtException', () => process.exit(0));
 const C = { yellow: '\x1b[33m', dim: '\x1b[2m', off: '\x1b[0m' };
 const say = (s) => { try { process.stdout.write(s); } catch { /* popup already closed */ } };
 
-say(`\n  ${C.yellow}⚑ ${name} wants to join${C.off} ${C.dim}(${ip})${C.off}\n\n` +
-  `  [a]ccept · [d]eny · [i]gnore/Esc\n`);
+say(`\n  ${C.yellow}${popupPrompt(kind, name, ip, detail)}${C.off}\n\n` +
+  `  [${kind === 'cmd' ? 'a]llow' : 'a]ccept'} · [d]eny · [i]gnore/Esc\n`);
 
 const done = () => process.exit(0);
 let answered = false;
@@ -29,7 +31,7 @@ let answered = false;
 const ttl = setTimeout(done, (Number(ttlS) || 120) * 1000);
 
 function post(ok) {
-  const body = JSON.stringify({ name, ok });
+  const body = JSON.stringify({ kind, name, ok });
   const req = request({
     host: '127.0.0.1', port: Number(port), path: '/admit', method: 'POST',
     headers: {
@@ -58,7 +60,7 @@ process.stdin.once('data', (buf) => {
   const k = popupKey(buf.toString('utf8')[0]);
   if (!k) return done();
   answered = true;
-  say(`\n  ${k.ok ? 'accepting' : 'denying'} ${name}…\n`);
+  say(`\n  ${k.ok ? (kind === 'cmd' ? 'allowing' : 'accepting') : 'denying'} ${name}…\n`);
   post(k.ok);
 });
 process.stdin.on('end', () => { if (!answered) done(); });

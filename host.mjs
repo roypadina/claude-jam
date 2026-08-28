@@ -509,20 +509,28 @@ function stopPopup() {
   try { child.kill('SIGTERM'); } catch { /* already gone */ }
 }
 
-// Called on every change to `pending`: keeps the status line honest and opens the next popup.
+// Called on every change to `pending` or `cmdRequests`: keeps the status line honest and
+// opens the next popup. v0.14: the host normally sits in the client, not in tmux, so this is
+// the path for anyone who IS attached — `hostClients()` is empty otherwise and the request
+// waits for a client command instead.
 function pumpPopups() {
   refreshStatusRight();
   if (opts.noPopup || popupProc) return;
-  const next = [...pending.values()].find((p) => !p.popped);
+  const next = [...pending.values()].map((p) => ({ ...p, kind: 'knock' }))
+    .concat([...cmdRequests.values()].map((r) => ({ ...r, kind: 'cmd', ip: '' })))
+    .find((p) => !p.popped);
   if (!next) return;
-  next.popped = true;
-  // The /accept line logged with the knock itself is still the way in.
+  // `popped` lives on the record itself, so a request whose popup was ignored waits for a
+  // client command instead of popping again.
+  (next.kind === 'cmd' ? [...cmdRequests.values()] : [...pending.values()])
+    .find((p) => p.name === next.name && !p.popped).popped = true;
+  // The /accept or /allow-cmd line logged with the request itself is still the way in.
   const client = hostClients()[0];
-  if (!client) return console.log(`[knock] no client attached — no popup for ${next.name}`);
+  if (!client) return console.log(`[${next.kind}] no client attached — no popup for ${next.name}`);
   const child = spawn(TMUX, buildPopupArgs({
     session: opts.tmux, client, node: process.execPath, script: path.join(HERE, 'popup.mjs'),
     name: next.name, ip: next.ip, ttlS: Math.round(KNOCK_TTL / 1000), port: opts.port,
-    secret: opts.hookSecret,
+    secret: opts.hookSecret, kind: next.kind, detail: next.text || '',
   }), { stdio: ['ignore', 'ignore', 'pipe'] });
   popupProc = child;
   let err = '';
@@ -590,9 +598,10 @@ function onRequest(req, res) {
     req.on('end', () => {
       let m;
       try { m = JSON.parse(body); } catch { return reply(400, { error: 'bad JSON' }); }
-      // Exactly the path a host client's `admit` frame takes. A knock that expired or was
-      // already answered in a client is a 404, and the popup exits silently.
-      const err = admit(m?.name, m?.ok === true);
+      // Exactly the path a host client's `admit`/`cmd` frame takes. A request that expired
+      // or was already answered in a client is a 404, and the popup exits silently. A popup
+      // cannot grant STANDING approval (`always`) — one key, one command.
+      const err = m?.kind === 'cmd' ? answerCmd(m?.name, m?.ok === true) : admit(m?.name, m?.ok === true);
       reply(err ? 404 : 200, err ? { error: err } : { ok: true });
     });
     return;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, RESERVED_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, RESERVED_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -349,7 +349,12 @@ test('buildPopupArgs: argv is passed through verbatim, secret only in the env', 
   // showing that window, and a ttyd viewer's grouped session qualifies (v0.9).
   assert.deepEqual(args, ['display-popup', '-t', 'jam', '-c', '/dev/ttys028', '-w', '64', '-h', '7',
     '-e', 'JAM_HOOK_SECRET=s3cret', '-E',
-    '/usr/bin/node', '/dir/popup.mjs', 'Dana K', '100.86.8.97', '120', '7777']);
+    '/usr/bin/node', '/dir/popup.mjs', 'Dana K', '100.86.8.97', '120', '7777', 'knock', '']);
+  // v0.14: the same popup answers a guest's command request; kind + detail trail the argv.
+  assert.deepEqual(buildPopupArgs({
+    session: 'jam', node: '/n', script: '/s', name: 'Dana', ip: '', ttlS: 120, port: 7777,
+    secret: 's', kind: 'cmd', detail: '/compact',
+  }).slice(-4), ['120', '7777', 'cmd', '/compact']);
   // No client known (nothing attached): the flag is left off rather than passed empty.
   assert.equal(buildPopupArgs({ session: 'jam', node: '/n', script: '/s', name: 'D', ip: '1', ttlS: 1, port: 1, secret: 's' })
     .includes('-c'), false);
@@ -363,6 +368,15 @@ test('statusRightWaiting: the waiting badge, null once nobody waits', () => {
   assert.equal(statusRightWaiting(1), '⚑ 1 waiting');
   assert.equal(statusRightWaiting(3), '⚑ 3 waiting');
   assert.equal(statusRightWaiting(0), null);
+});
+
+test('popupPrompt: one line, and it names what is actually being asked', () => {
+  assert.equal(popupPrompt('knock', 'Dana', '100.86.8.97'), '⚑ Dana wants to join (100.86.8.97)');
+  assert.equal(popupPrompt('knock', 'Dana', ''), '⚑ Dana wants to join');
+  assert.equal(popupPrompt('cmd', 'Dana', '', '/compact'), '⌘ Dana wants to run /compact');
+  for (const p of [popupPrompt('knock', 'Dana', '1.2.3.4'), popupPrompt('cmd', 'Dana', '', '/model')]) {
+    assert.equal(p.includes('\n'), false, p); // a popup is 7 rows, 4 of them frame
+  }
 });
 
 test('popupKey: only a and d answer, everything else leaves the knock pending', () => {
