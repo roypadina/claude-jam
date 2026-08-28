@@ -4,9 +4,10 @@
 // captured — the transcript block layout, the human-only chat line, the STATUS BAR row (its
 // own row: animated spinner left, typing indicator right, prompt row untouched), and the
 // host's own chat surface.
-// Extended for v0.9 (the claude window is one pane, the host chats in a `chat` window),
-// v0.10 (tool collapse + /tools), v0.10b (Shift/Alt+Enter newlines) and v0.10c (the
-// onboarding block + /help), plus the mirror view driven by a real F2 keypress.
+// Extended for v0.10 (tool collapse + /tools), v0.10b (Shift/Alt+Enter newlines), v0.10c
+// (the onboarding block + /help) and v0.14 — where the mirror of the real TUI is the DEFAULT
+// view, F2 is the transcript, the chat strip carries what the mirror cannot show, and the
+// host's tmux session sits detached with the claude window alone in it.
 // Needs a jam daemon already running with a token (see README).
 // usage: node scripts/smoke-ink.mjs <ws-url> <token> <host-tmux-session>
 import { spawnSync } from 'node:child_process';
@@ -26,6 +27,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmux = (...a) => spawnSync(TMUX, a, { encoding: 'utf8' });
 const pane = (target) => (tmux('capture-pane', '-p', '-t', target).stdout || '').replace(/\n+$/, '');
 const rows = (target) => pane(target).split('\n');
+// Scrollback: v0.14 prints the connect block above a full-screen mirror, so the welcome and
+// onboarding lines are usually off the visible rows by the time a step looks for them.
+const back = (target) => (tmux('capture-pane', '-p', '-S', '-400', '-t', target).stdout || '').replace(/\n+$/, '');
 const SPIN = ['✻', '✼', '✽'];
 
 let failed = 0;
@@ -74,20 +78,26 @@ const eli = peer('Eli');
 let spinFrames = [];
 
 try {
-  await step('the ink client boots on a real pty: welcome block, then a clean `Dana ❯` row', async () => {
-    await until('welcome', () => /jam [0-9a-f-]{36} — host /.test(pane(PEER_SESSION)));
-    const last = rows(PEER_SESSION).at(-1);
+  await step('v0.14: the client opens on the LIVE TUI, with a clean `Dana ❯` row under it', async () => {
+    // The connect block is printed above the frame, which then fills the screen — so the
+    // welcome line lives in the scrollback, not necessarily on the visible rows.
+    await until('welcome', () => /jam [0-9a-f-]{36} — host /.test(back(PEER_SESSION)));
+    const all = await until('the mirrored TUI plus the live-view chip', () => {
+      const r = rows(PEER_SESSION);
+      return r.some((l) => /Claude Code v|⏵⏵|❯/.test(l)) && r.some((l) => /⧉ live TUI/.test(l)) ? r : null;
+    });
+    const last = all.at(-1);
     if (!/^Dana ❯/.test(last)) throw new Error(`last row is ${JSON.stringify(last)}, want the prompt`);
     if (/typing|working|waiting/.test(last)) throw new Error(`status text leaked into the prompt row: ${JSON.stringify(last)}`);
+    console.log(`      chip row: ${JSON.stringify(all.find((l) => /⧉ live TUI/.test(l)))}`);
   });
 
   await step('v0.10c: the onboarding block is printed on connect, above the history', async () => {
     // Scrollback, not the visible screen: on a daemon with history to replay the block is
     // printed first and can be scrolled off by the time the roster line lands.
-    const back = () => (tmux('capture-pane', '-p', '-S', '-400', '-t', PEER_SESSION).stdout || '').replace(/\n+$/, '');
     const p = await until('the onboarding box and the roster line',
-      () => (/── claude-jam ─/.test(back()) && /here: /.test(back()) ? back() : null));
-    for (const want of ['/c <text>', 'F2 or /mirror', 'Shift+Enter or \\', 'just ask claude', 'attributed [Dana]']) {
+      () => (/── claude-jam ─/.test(back(PEER_SESSION)) && /here: /.test(back(PEER_SESSION)) ? back(PEER_SESSION) : null));
+    for (const want of ['/c <text>', 'F2', 'Shift+Enter or \\', 'just ask claude', 'attributed [Dana]']) {
       if (!p.includes(want)) throw new Error(`onboarding block is missing ${JSON.stringify(want)}`);
     }
     const all = p.split('\n');
@@ -97,9 +107,26 @@ try {
     console.log(`      rows ${head}..${here}: ${all.slice(head, head + 2).map((l) => JSON.stringify(l.trim())).join('  /  ')}`);
   });
 
+  await step('v0.14: F2 flips to the transcript view (where the middle of this run happens)', async () => {
+    key('F2');
+    const all = await until('the transcript chip', () => {
+      const r = rows(PEER_SESSION);
+      return r.some((l) => /≡ transcript/.test(l)) ? r : null;
+    }, 10000);
+    // The mirror's frame is part of the live region, so flipping away erases it: no TUI
+    // chrome may be left on screen.
+    if (all.some((l) => /⏵⏵ bypass permissions|Claude Code v/.test(l))) {
+      throw new Error('the mirrored TUI is still on screen in transcript view');
+    }
+    if (!/^Dana ❯/.test(all.at(-1))) throw new Error(`prompt row is ${JSON.stringify(all.at(-1))}`);
+    console.log(`      chip row: ${JSON.stringify(all.find((l) => /≡ transcript/.test(l)))}`);
+  });
+
   await step('a second friend joins and is announced', async () => {
     await eli.want('welcome', (f) => f.t === 'welcome');
-    await until('Eli joined', () => /Eli joined/.test(pane(PEER_SESSION)));
+    // Scrollback: the notice arrives while the mirror is up, shows in the chat strip, and is
+    // flushed into the transcript on F2 — by which point it can already have scrolled.
+    await until('Eli joined', () => /Eli joined/.test(back(PEER_SESSION)));
   });
 
   await step('/c chat renders as [Eli] [humans-only] … in its own block', async () => {
@@ -239,44 +266,65 @@ try {
     console.log(`      onboarding boxes on screen: ${(pane(PEER_SESSION).match(/── claude-jam ─/g) || []).length}`);
   });
 
-  await step('v0.7: F2 flips Dana into the mirror of the real claude TUI, F2 flips back', async () => {
+  await step('v0.14: F2 goes back to the live TUI, and the chat strip carries what it cannot show', async () => {
     key('F2');
     // Proof it is the real TUI and not Dana's own transcript: only claude's own screen
     // renders an injected message as `❯ [Eli]: …` behind its prompt glyph.
     const mirrored = await until('the host screen in Dana\'s pane', () => {
       const all = rows(PEER_SESSION);
-      return all.some((l) => /❯ \[Eli\]: /.test(l)) && all.some((l) => /\[mirror\]/.test(l)) ? all : null;
+      return all.some((l) => /❯ \[Eli\]: /.test(l)) && all.some((l) => /⧉ live TUI/.test(l)) ? all : null;
     }, 15000);
     if (!/^Dana ❯/.test(mirrored.at(-1))) throw new Error(`prompt row is ${JSON.stringify(mirrored.at(-1))}`);
     console.log(`      mirrored TUI row: ${JSON.stringify(mirrored.find((l) => /❯ \[Eli\]: /.test(l)).trim().slice(0, 70))}`);
-    show('Dana — MIRROR view (the real TUI, streamed)', PEER_SESSION);
-    // A chat line arriving while the mirror is up shows in the 3-row overlay, then lands in
-    // the transcript when the mirror goes away.
-    eli.send({ t: 'chat', text: 'overlay while mirroring' });
-    await until('the overlay strip', () => /overlay while mirroring/.test(pane(PEER_SESSION)), 10000);
+    show('Dana — default LIVE TUI view (the real screen, streamed)', PEER_SESSION);
+    // A humans-only line is invisible in the mirror (claude never sees it), so it shows in
+    // the 3-row strip just above the status row, then lands in the transcript on the way back.
+    eli.send({ t: 'chat', text: 'strip while mirroring' });
+    const strip = await until('the chat strip', () => {
+      const r = rows(PEER_SESSION);
+      const i = r.findIndex((l) => /strip while mirroring/.test(l));
+      return i >= 0 ? { r, i } : null;
+    }, 10000);
+    // Strip rows sit between the frame and the status row, never in the prompt row.
+    if (strip.i >= strip.r.length - 1) throw new Error('the strip line landed in the prompt row');
+    console.log(`      strip row ${strip.i}/${strip.r.length}: ${JSON.stringify(strip.r[strip.i].trim().slice(0, 60))}`);
     key('F2');
-    await until('back in the transcript', () => /mirror off/.test(pane(PEER_SESSION)), 10000);
-    const back = rows(PEER_SESSION);
+    await until('back in the transcript', () => /transcript — F2 goes back/.test(pane(PEER_SESSION)), 10000);
+    const after = rows(PEER_SESSION);
     // The live region is the status + prompt rows again: no mirrored TUI row left in it.
-    if (back.slice(-4).some((l) => /❯ \[Eli\]: /.test(l))) throw new Error('still mirroring');
-    if (!/overlay while mirroring/.test(back.join('\n'))) throw new Error('the overlay line never reached the transcript');
+    if (after.slice(-4).some((l) => /❯ \[Eli\]: /.test(l))) throw new Error('still mirroring');
+    if (!/strip while mirroring/.test(after.join('\n'))) throw new Error('the strip line never reached the transcript');
   });
 
-  await step('v0.9: the claude window is ONE pane and the host chats in its own window', async () => {
+  await step('v0.14: two windows, the claude window alone with the TUI, tmux detached', async () => {
     const panes = (tmux('list-panes', '-t', `${hostSession}:claude`).stdout || '').trim().split('\n').length;
-    if (panes !== 1) throw new Error(`${panes} panes in the claude window — a viewer would see the chat strip`);
+    if (panes !== 1) throw new Error(`${panes} panes in the claude window — a viewer would see host chrome`);
     const wins = (tmux('list-windows', '-t', hostSession, '-F', '#{window_name}').stdout || '').trim().split('\n');
-    if (!wins.includes('chat')) throw new Error(`windows are ${wins.join(',')}`);
-    const all = rows(`${hostSession}:chat`);
-    if (!/^Host ❯/.test(all.at(-1))) throw new Error(`last row of the chat window is ${JSON.stringify(all.at(-1))}`);
-    if (!all.some((l) => /\[Eli\]|\[Claude\]|\[humans-only\]/.test(l))) {
-      throw new Error('no transcript reached the host chat window');
-    }
-    console.log(`      windows: ${wins.join(', ')} · claude panes: ${panes}`);
+    // The v0.9 host-chat window retired with the unified view: the host runs the same client.
+    if (wins.includes('chat')) throw new Error(`the retired chat window is back: ${wins.join(',')}`);
+    if (wins.join(',') !== 'daemon,claude') throw new Error(`windows are ${wins.join(',')}`);
+    const clients = (tmux('list-clients', '-t', hostSession, '-F', '#{client_name}').stdout || '').trim();
+    if (clients) throw new Error(`something is attached to ${hostSession}: ${clients}`);
+    // And the padding fix, so a client bigger than the window sees blanks, not '·'.
+    const fill = (tmux('show-options', '-w', '-t', `${hostSession}:claude`, 'fill-character').stdout || '').trim();
+    if (fill !== 'fill-character " "') throw new Error(`fill-character is ${JSON.stringify(fill)}`);
+    console.log(`      windows: ${wins.join(', ')} · claude panes: ${panes} · attached clients: none · ${fill}`);
+  });
+
+  await step('v0.14: a guest\'s /command goes to the host for approval, not into the TUI', async () => {
+    line('/compact');
+    await until('the local "sent to the host" line',
+      () => /\/compact — sent to the host for approval/.test(pane(PEER_SESSION)), 8000);
+    // Nobody approves it here (this daemon has no host client), so it must still be pending
+    // in the daemon log and NOT in the pane.
+    const log = (tmux('capture-pane', '-p', '-S', '-400', '-t', `${hostSession}:daemon`).stdout || '');
+    const asked = await until('the daemon asking the host',
+      () => /\[cmd\] Dana wants \/compact[^\n]*/.exec(log + (tmux('capture-pane', '-p', '-S', '-400', '-t', `${hostSession}:daemon`).stdout || ''))?.[0], 8000);
+    console.log(`      ${asked.trim()}`);
+    if (/❯ \/compact/.test(pane(`${hostSession}:claude`))) throw new Error('an unapproved command reached the pane');
   });
 
   show('Dana — 120x40 ink client', PEER_SESSION);
-  show('Host — chat window', `${hostSession}:chat`);
 } finally {
   tmux('kill-session', '-t', PEER_SESSION); // exact name, only the session this script created
 }
