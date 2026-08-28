@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, RESERVED_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, RESERVED_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -321,6 +321,24 @@ test('joinLines: invite first, view second, the knock hint when there is no toke
   assert.deepEqual(joinLines(join, null), [`invite: ${join}`]);
   assert.deepEqual(joinLines(null, view), [NO_TOKEN_HINT, `view: ${view}`]);
   assert.deepEqual(joinLines(null, null), [NO_TOKEN_HINT]);
+});
+
+test('inviteLines: tunnel pair first, LAN below — the one list every surface prints', () => {
+  const info = {
+    join: buildJoinLine('10.0.0.2', 7777, 'smoketoken'),
+    view: buildViewUrl('10.0.0.2', 7778, 'smoketoken'),
+    tunnelJoin: buildTunnelJoinLine('rand1.trycloudflare.com', 'smoketoken'),
+    tunnelView: buildTunnelViewUrl('rand2.trycloudflare.com', 'smoketoken'),
+  };
+  assert.deepEqual(inviteLines(info), [
+    `tunnel invite: ${info.tunnelJoin}`, `tunnel view: ${info.tunnelView}`,
+    `invite: ${info.join}`, `view: ${info.view}`,
+  ]);
+  // No tunnel: exactly what joinLines gave before, so nothing regresses for a LAN host.
+  assert.deepEqual(inviteLines({ join: info.join, view: info.view }), joinLines(info.join, info.view));
+  // Knock-only, no view, no tunnel — and a client that has no session block yet.
+  assert.deepEqual(inviteLines({}), [NO_TOKEN_HINT]);
+  assert.deepEqual(inviteLines(), [NO_TOKEN_HINT]);
 });
 
 test('buildTokenFile: absent values stay explicit nulls', () => {

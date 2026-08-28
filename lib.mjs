@@ -702,6 +702,14 @@ export function tunnelJoinLines(tunnelJoin, tunnelView) {
   return lines;
 }
 
+// Everything the host can hand out, in the order it is always shown: the tunnel lines first
+// (they are what you send someone who is not on your tailnet), the LAN/Tailscale ones below.
+// One helper for the daemon console, the host client's welcome, `/join` and every `/token`
+// reply, so those four can never drift — the client used to drop the tunnel lines entirely.
+export function inviteLines(info = {}) {
+  return [...tunnelJoinLines(info.tunnelJoin, info.tunnelView), ...joinLines(info.join, info.view)];
+}
+
 export function buildSettings(hooksPath) {
   const cmd = (arg) => ({ hooks: [{ type: 'command', command: `${hooksPath} ${arg}` }] });
   return {

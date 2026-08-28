@@ -19,7 +19,7 @@ import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
 import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
-import { parseClientLine, joinLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS } from './lib.mjs';
 
 const h = React.createElement;
 
@@ -169,10 +169,11 @@ function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.d
 const sys = (text) => emit({ glyph: '*', text, textColor: C.dim, strip: true });
 const err = (text) => emit({ glyph: '!', glyphColor: C.err, text, textColor: C.err, strip: true });
 
-// The host's invite lines, wherever they are shown (welcome, /join, a /token reply).
+// The host's invite lines, wherever they are shown (welcome, /join, a /token reply) —
+// including the `--tunnel` pair, which used to reach only the daemon log and token.json.
 function logJoin() {
-  for (const l of joinLines(store.session?.join, store.session?.view)) {
-    emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
+  for (const l of inviteLines(store.session || {})) {
+    emit({ glyph: '*', text: l, textColor: C.dim, wrap: false, strip: true });
   }
 }
 
@@ -252,7 +253,9 @@ function render(ev) {
         strip: true,
       });
     case 'token': {
-      if (store.session) { store.session.join = ev.join; store.session.view = ev.view; }
+      // Every invite string the daemon knows, tunnel pair included: a `/token` rotation
+      // changes the credential inside all four.
+      if (store.session) Object.assign(store.session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin, tunnelView: ev.tunnelView });
       return logJoin();
     }
     // v0.14: something happened to the session everybody should know about — a slash command

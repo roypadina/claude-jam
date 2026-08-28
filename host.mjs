@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -215,12 +215,12 @@ function joinInfo() {
   };
 }
 
-// What the host is told wherever the invite lines would go. Tunnel lines first — they're
-// what you'd copy to a remote friend — the LAN/Tailscale ones stay printed below.
+// What the host is told wherever the invite lines would go — the same list, in the same
+// order, that a host client prints on connect and on `/join`.
 function printJoin() {
-  const { join, view, tunnelJoin, tunnelView } = joinInfo();
-  const lines = [...tunnelJoinLines(tunnelJoin, tunnelView), ...joinLines(join, view)].map((l) => `  ${l}`).join('\n');
-  console.log(join || tunnelJoin ? `\nSend this to a friend:\n${lines}\n` : `\n${lines}\n`);
+  const info = joinInfo();
+  const lines = inviteLines(info).map((l) => `  ${l}`).join('\n');
+  console.log(info.join || info.tunnelJoin ? `\nSend this to a friend:\n${lines}\n` : `\n${lines}\n`);
 }
 
 // claude reads this back through hooks.sh, so the host can just ask the agent for the

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // claude-jam terminal client. No dependencies: global WebSocket + readline.
 import readline from 'node:readline';
-import { parseClientLine, joinLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const url = argv.find((a) => a.startsWith('ws'));
@@ -117,7 +117,7 @@ const sys = (text) => emit({ glyph: '*', text, textColor: C.dim });
 
 // The host's invite lines, wherever they are shown (welcome, /join, a /token reply).
 function logJoin() {
-  for (const l of joinLines(session?.join, session?.view)) emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
+  for (const l of inviteLines(session || {})) emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
 }
 
 // v0.10c: the onboarding block, on connect and on `/help`. Same text as the ink client, minus
@@ -167,7 +167,8 @@ function render(ev) {
       return emit({ glyph: '⌘', glyphColor: C.accent,
         text: `${ev.name} wants to run ${ev.cmd} — /allow-cmd ${ev.name} · /allow-cmd ${ev.name} always · /deny-cmd ${ev.name}` });
     case 'token': {
-      if (session) { session.join = ev.join; session.view = ev.view; }
+      // Tunnel pair included (v0.14): a rotation changes the credential inside all four.
+      if (session) Object.assign(session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin, tunnelView: ev.tunnelView });
       return logJoin();
     }
     // v0.14: a slash command ran in the TUI, or a guest's request was approved.
