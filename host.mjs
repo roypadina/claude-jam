@@ -799,7 +799,10 @@ function onSocket(ws, req) {
       if (!s.ok) return sendError(ws, s.error);
       // Check after sanitize: trim() alone leaves a leading zero-width space in place,
       // which would sneak "/exit" past this guard.
-      if (s.text.startsWith('/')) return sendError(ws, 'slash commands run only in the host TUI');
+      // A message may not start with a slash: that is how a hand-rolled client would smuggle
+      // a command past the approval gate by having claude read it as text in the prompt.
+      // Commands go through {t:'slash'}, where the host+loopback rule and the hard list live.
+      if (s.text.startsWith('/')) return sendError(ws, 'a /command is not a message — send it as a command and the host will be asked');
       const text = neutralizePrefixes(s.text);
       broadcast({ t: 'say', from: me.name, text });
       status.busy = true; startTurn(); pushStatus();
