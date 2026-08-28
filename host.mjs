@@ -429,6 +429,7 @@ function pumpMirror() {
     t: 'screen', id: nextId++, ts: lastFrameAt, rows,
     w: Number(size[0]) || 80, h: Number(size[1]) || rows.length,
   };
+  keepWindowSize(ev.w, ev.h); // somebody attached and took the window's size with them
   for (const ws of mirrors) if (clients.has(ws)) send(ws, ev);
 }
 
@@ -443,11 +444,25 @@ let windowSize = { w: 0, h: 0 };
 function resizeClaudeWindow(w, h) {
   const want = mirrorSize(w, h); // the client sends its terminal size; mirrorSize takes the chrome off
   if (want.w === windowSize.w && want.h === windowSize.h) return;
-  const r = tmux('resize-window', '-t', CLAUDE_PANE, '-x', String(want.w), '-y', String(want.h));
-  if (r.status !== 0) return console.log(`resize-window failed: ${(r.stderr || '').trim()}`);
   windowSize = want;
-  console.log(`[resize] claude window → ${want.w}x${want.h}`);
+  applyWindowSize('resize');
+}
+
+function applyWindowSize(why) {
+  const r = tmux('resize-window', '-t', CLAUDE_PANE, '-x', String(windowSize.w), '-y', String(windowSize.h));
+  if (r.status !== 0) return console.log(`resize-window failed: ${(r.stderr || '').trim()}`);
+  console.log(`[${why}] claude window → ${windowSize.w}x${windowSize.h}`);
   lastFrame = null; // the next capture is a different shape; send it even if the text matches
+}
+
+// tmux sizes a shared window to the last client that used it, so anyone attaching to the raw
+// TUI (or a second browser viewer) reshapes the screen the host is mirroring — and it stays
+// that way after they leave. Put the host's size back, but only once nobody is attached:
+// while someone has the session open, the size is theirs.
+function keepWindowSize(w, h) {
+  if (!windowSize.w || (w === windowSize.w && h === windowSize.h)) return;
+  if (hostClients().length) return;
+  applyWindowSize('resize back');
 }
 
 function setMirror(ws, on) {
