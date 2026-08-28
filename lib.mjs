@@ -1,0 +1,607 @@
+// Pure helpers for claude-jam. No I/O here so test.mjs can import them freely.
+import { createHash, timingSafeEqual } from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
+
+// A bridged message looks like "[Dana]: hello". Used both to build and to detect.
+export const PREFIX_RE = /^\[([^\]]{1,24})\]: /;
+export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,23}$/;
+export const MAX_TEXT = 20000;
+
+// Shown wherever a join line would go while no token is set.
+export const NO_TOKEN_HINT = 'no token set — friends knock, you /accept';
+
+export function validName(name) {
+  return typeof name === 'string' && NAME_RE.test(name);
+}
+
+// A host-chosen token (`--token`, `/token set`). Narrow charset so it survives a shell
+// command line, a chat message and a URL without quoting.
+export const TOKEN_VALUE_RE = /^[A-Za-z0-9_-]{8,64}$/;
+export function validTokenValue(v) {
+  return typeof v === 'string' && TOKEN_VALUE_RE.test(v);
+}
+
+// Hash first so lengths always match, then compare without leaking the prefix length.
+// `current` is null when no token is set — then nothing matches, so everyone knocks.
+export function tokenMatches(given, current) {
+  if (typeof given !== 'string' || typeof current !== 'string' || !current) return false;
+  return timingSafeEqual(createHash('sha256').update(given).digest(),
+    createHash('sha256').update(current).digest());
+}
+
+// Attribution is by name, so two live participants cannot share one. Compared
+// case-insensitively: "[dana]" and "[Dana]" would read as the same person to the agent.
+export function nameTaken(name, taken) {
+  const n = String(name).toLowerCase();
+  return taken.some((t) => String(t).toLowerCase() === n);
+}
+
+// The friend-facing invite command, or null while no token is set — then the host sees
+// NO_TOKEN_HINT instead and friends get in by knocking.
+export function buildJoinLine(ip, port, token) {
+  return token ? `node client.mjs ws://${ip}:${port} --name <You> --token ${token}` : null;
+}
+
+// The read-only browser view of the real claude TUI (ttyd), basic auth baked into the URL
+// so one paste is enough. null while there is no view (no ttyd, or --no-view).
+export function buildViewUrl(ip, port, key) {
+  return key ? `http://jam:${key}@${ip}:${port}` : null;
+}
+
+// Everything the host can hand out, same order and wording wherever it is shown: the
+// daemon log, the host client's welcome, `/join` and every `/token` reply.
+export function joinLines(join, view) {
+  const lines = [join ? `invite: ${join}` : NO_TOKEN_HINT];
+  if (view) lines.push(`view: ${view}`);
+  return lines;
+}
+
+// ttyd's basic-auth password: the friend token when there is one, so a friend needs no
+// second secret; otherwise a key of our own, so the view is never open. `generate` is
+// injected to keep this pure — the caller owns the randomness.
+export function resolveViewKey(token, generate) {
+  return token || generate();
+}
+
+// What the daemon writes to `<state>/token.json` for hooks.sh to read back. Absent
+// values stay explicit nulls so the hook can tell "no token" from "not written yet".
+// tunnelJoin/tunnelView (v0.11) are null until --tunnel is given and cloudflared resolves.
+export function buildTokenFile(token, join, view, tunnelJoin, tunnelView) {
+  return {
+    token: token || null, join: join || null, viewUrl: view || null,
+    tunnelJoin: tunnelJoin || null, tunnelView: tunnelView || null,
+  };
+}
+
+// How a hello frame gets in. `admit:'token'` → straight to welcome, `admit:'knock'` →
+// pending until the host accepts. `host:true` is honoured only from loopback: that
+// connection is the client the launcher itself spawned, so it is trusted by construction
+// (and admitted even with no token set); anyone else claiming it is just a friend.
+export function classifyHello(hello, currentToken, isLoopback) {
+  const name = hello?.name;
+  if (!validName(name)) return { ok: false, code: 4400, error: 'bad name' };
+  const host = hello?.host === true && !!isLoopback;
+  const admit = host || tokenMatches(hello?.token, currentToken) ? 'token' : 'knock';
+  return { ok: true, name, host, admit };
+}
+
+// Session ids (both `claude --session-id` and `--resume`) are UUIDs. Loose check on
+// purpose: we only need to catch typos/garbage before shelling out to claude, not
+// enforce a specific UUID version.
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isUuid(id) {
+  return typeof id === 'string' && UUID_RE.test(id);
+}
+
+// Strip escape sequences and control chars, keep newlines and tabs. Used on human
+// input and on agent text before it is written to somebody else's terminal.
+export function stripControl(text) {
+  return String(text)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC
+    .replace(/\x1b[@-Z\\-_]|\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI / two-char escapes
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '') // C0 + DEL + 8-bit C1
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, ''); // zero-width / bidi
+}
+
+// Only the daemon may write "[Name]: ". A participant whose own text starts a line
+// that way would forge attribution the agent has been told to trust, so bend the
+// bracket to a lookalike that PREFIX_RE cannot match.
+export function neutralizePrefixes(text) {
+  return text.split('\n').map((l) => (PREFIX_RE.test(l) ? '\uff3b' + l.slice(1) : l)).join('\n');
+}
+
+// Strip escape sequences and control chars, keep newlines and tabs, cap length.
+export function sanitize(text) {
+  if (typeof text !== 'string') return { ok: false, error: 'text must be a string' };
+  let t = stripControl(text).trim();
+  if (!t) return { ok: false, error: 'empty message' };
+  if (t.length > MAX_TEXT) t = t.slice(0, MAX_TEXT);
+  return { ok: true, text: t };
+}
+
+// Wrapper tags Claude Code puts around slash-command plumbing. Same lists as
+// transcript.ts: STRIP_TAGS drop tag and contents, KEEP_INNER_TAGS keep the contents.
+const STRIP_TAGS = ['command-message', 'command-name', 'system-reminder',
+  'local-command-caveat', 'local-command-stdout', 'local-command-stderr'];
+const KEEP_INNER_TAGS = ['command-args'];
+
+export function clean(text) {
+  let t = text;
+  for (const tag of KEEP_INNER_TAGS) {
+    t = t.replace(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'g'), '$1');
+    t = t.replace(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)$`, 'g'), '$1');
+  }
+  for (const tag of STRIP_TAGS) {
+    t = t.replace(new RegExp(`<${tag}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${tag}>`, 'g'), '');
+    t = t.replace(new RegExp(`<${tag}(?:\\s[^>]*)?>[\\s\\S]*$`, 'g'), '');
+  }
+  return t.trim();
+}
+
+// One place that knows the Claude Code JSONL shape. Mirrors ClaudeCodeSessionManager's
+// transcript.ts. Returns a list of classified entries; unknown/broken lines return [].
+// A tool_result's content is a string or a list of text blocks. One line is all a chat log
+// can carry — the full output is right there in the host's TUI.
+export const TOOL_RESULT_MAX = 100;
+export function toolResultText(content) {
+  const raw = typeof content === 'string' ? content
+    : Array.isArray(content)
+      ? content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n')
+      : '';
+  const line = raw.split('\n').map((l) => l.trim()).find(Boolean) || '';
+  return line.length > TOOL_RESULT_MAX ? `${line.slice(0, TOOL_RESULT_MAX - 1)}…` : line;
+}
+
+export function parseJsonlLine(line) {
+  if (!line || !line.trim()) return [];
+  let obj;
+  try { obj = JSON.parse(line); } catch { return []; }
+  if (!obj || typeof obj !== 'object') return [];
+
+  if (obj.type === 'user') {
+    if (obj.isMeta) return [];
+    const c = obj.message?.content;
+    const texts = [];
+    const results = [];
+    if (typeof c === 'string') texts.push(c);
+    else if (Array.isArray(c)) {
+      for (const b of c) {
+        if (b?.type === 'text' && typeof b.text === 'string') texts.push(b.text);
+        // A tool_result rides in a *user* record but is the agent's own plumbing, never a
+        // human turn: it renders as a `⎿` line and the caller must keep it out of the
+        // busy/attribution logic (see onTranscript).
+        else if (b?.type === 'tool_result') {
+          const t = toolResultText(b.content);
+          if (t) results.push({ kind: 'tool-result', text: t });
+        }
+      }
+    }
+    const said = texts
+      .map(clean) // slash-command plumbing cleans to '' and drops out below
+      .filter(Boolean)
+      .map((text) => {
+        const m = PREFIX_RE.exec(text);
+        // Bridged messages were already broadcast when they were injected.
+        return m ? { kind: 'user', text, bridged: true, from: m[1] } : { kind: 'user', text, bridged: false };
+      });
+    return [...said, ...results];
+  }
+
+  if (obj.type === 'assistant') {
+    const blocks = obj.message?.content;
+    if (!Array.isArray(blocks)) return [];
+    const out = [];
+    for (const b of blocks) {
+      if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+        out.push({ kind: 'text', text: b.text.trim() });
+      } else if (b?.type === 'tool_use') {
+        const args = JSON.stringify(b.input ?? {});
+        out.push({ kind: 'tool', text: `${b.name ?? '?'}: ${args.slice(0, 120)}` });
+      }
+      // thinking and everything else: ignored.
+    }
+    return out;
+  }
+
+  return [];
+}
+
+// Turns one typed line into a client action. Multi-line continuation: a trailing
+// backslash means "keep collecting".
+export function parseClientLine(line) {
+  if (line.endsWith('\\')) return { kind: 'continue', text: line.slice(0, -1) };
+  const t = line.trim();
+  if (!t) return { kind: 'noop' };
+  if (t === '/quit' || t === '/exit') return { kind: 'quit' };
+  if (t === '/who') return { kind: 'who' };
+  // Host-only commands below. Whether the caller actually is the host is runtime state
+  // parseClientLine doesn't have, so client.mjs makes that call.
+  if (t === '/join') return { kind: 'join' };
+  if (t === '/accept' || t.startsWith('/accept ')) {
+    // No name = admit the only pending knocker; the daemon errors if there are several.
+    return { kind: 'accept', name: t.slice(7).trim() || null };
+  }
+  if (t === '/deny' || t.startsWith('/deny ')) {
+    const name = t.slice(5).trim();
+    return name ? { kind: 'deny', name } : { kind: 'error', text: 'usage: /deny <name>' };
+  }
+  if (t === '/token' || t.startsWith('/token ')) {
+    const [op, ...rest] = t.slice(6).trim().split(/\s+/);
+    if (op === 'new' || op === 'off') return { kind: 'token', op };
+    if (op === 'set') {
+      const value = rest.join(' ');
+      return validTokenValue(value) ? { kind: 'token', op: 'set', value }
+        : { kind: 'error', text: 'token must be 8-64 chars of [A-Za-z0-9_-]' };
+    }
+    return { kind: 'error', text: 'usage: /token new | set <value> | off' };
+  }
+  // v0.7: flip between the transcript and a live mirror of the host's real TUI. Same
+  // action as F2; the basic client has no mirror and says so.
+  if (t === '/mirror') return { kind: 'mirror' };
+  // v0.10c: reprint the onboarding block.
+  if (t === '/help') return { kind: 'help' };
+  // v0.10: `/tools` reprints the last completed turn's tool log; `on|off` switches
+  // always-expanded mode (off = collapse to one summary line, the default).
+  if (t === '/tools' || t.startsWith('/tools ')) {
+    const op = t.slice(6).trim();
+    if (!op) return { kind: 'tools', op: null };
+    if (op === 'on' || op === 'off') return { kind: 'tools', op };
+    return { kind: 'error', text: 'usage: /tools | /tools on | /tools off' };
+  }
+  if (t === '/c' || t.startsWith('/c ')) {
+    const text = t.slice(2).trim();
+    return text ? { kind: 'chat', text } : { kind: 'error', text: 'usage: /c <message>' };
+  }
+  if (t.startsWith('/')) return { kind: 'error', text: 'slash commands run only in the host TUI' };
+  return { kind: 'say', text: t };
+}
+
+// Which `claude` to spawn. PATH is not trustworthy: it can hold a wrapper shim from
+// another terminal app, and a shell alias (e.g. `claude --dangerously-skip-permissions`)
+// is invisible to a non-interactive spawn. `exists` is injected so this stays pure.
+export function resolveClaude(env = {}, exists = () => false) {
+  if (env.JAM_CLAUDE) return env.JAM_CLAUDE;
+  const local = path.join(env.HOME || os.homedir(), '.local', 'bin', 'claude');
+  return exists(local) ? local : 'claude';
+}
+
+// Which ttyd to run for the live view. Only the Homebrew path is probed — PATH can hold
+// a shim, and `--view-ttyd <path>` covers every other install. null = no live view.
+export const TTYD_DEFAULT = '/opt/homebrew/bin/ttyd';
+export function resolveTtyd(override, exists = () => false) {
+  if (override) return override;
+  return exists(TTYD_DEFAULT) ? TTYD_DEFAULT : null;
+}
+
+// ------------------------------------------------- v0.4: in-TUI knock approval ----
+
+// The tmux argv for one knock popup. `display-popup -E <cmd> <args…>` hands argv to the
+// command verbatim (no shell — verified on tmux 3.7c), so a name with a space needs no
+// quoting and a name could not smuggle a shell metacharacter even if NAME_RE allowed one.
+// The hook secret rides in the popup's env instead of argv.
+// `-c <client>` is not optional in practice (v0.9): a `-t <session>` target alone lets tmux
+// pick any client showing that window — and a ttyd viewer sits on a GROUPED session showing
+// the same window, so the popup was drawn on the guest's browser instead of the host's
+// terminal (observed on tmux 3.7c). The caller passes a client attached to the base session.
+export const POPUP_W = 64;
+export const POPUP_H = 7;
+export function buildPopupArgs({ session, client, node, script, name, ip, ttlS, port, secret }) {
+  return ['display-popup', '-t', session, ...(client ? ['-c', client] : []),
+    '-w', String(POPUP_W), '-h', String(POPUP_H),
+    '-e', `JAM_HOOK_SECRET=${secret}`, '-E',
+    node, script, name, String(ip), String(ttlS), String(port)];
+}
+
+// The jam session's status line while knocks are pending; null means "put the host's own
+// value back".
+export function statusRightWaiting(pendingCount) {
+  return pendingCount > 0 ? `⚑ ${pendingCount} waiting` : null;
+}
+
+// What one keypress in the popup means. Only `a` and `d` answer; `i`, Esc, Ctrl-C, a stray
+// arrow key — anything else leaves the knock pending for `/accept` in a client.
+export function popupKey(ch) {
+  const c = String(ch ?? '').toLowerCase();
+  if (c === 'a') return { ok: true };
+  if (c === 'd') return { ok: false };
+  return null;
+}
+
+// ------------------------------------------------ v0.4b: profile (--config-dir) ----
+
+// CLAUDE_CONFIG_DIR for the claude window: `~` expanded, made absolute, trailing slash
+// dropped — a trailing slash changes the keychain hash and forces a fresh login.
+export function normalizeConfigDir(dir, home = os.homedir()) {
+  const d = String(dir ?? '').trim();
+  if (!d) return null;
+  const abs = d === '~' ? home : d.startsWith('~/') ? path.join(home, d.slice(2)) : d;
+  return path.resolve(abs); // resolve also collapses '//' and drops the trailing slash
+}
+
+// `--config-dir` wins; otherwise inherit the profile the launcher itself was started with,
+// so `CLAUDE_CONFIG_DIR=… jam host` keeps running against that account.
+export function resolveConfigDir(flag, env = {}, home = os.homedir()) {
+  const raw = flag || env.CLAUDE_CONFIG_DIR;
+  return raw ? normalizeConfigDir(raw, home) : null;
+}
+
+// Where the transcript can be: always the default profile, plus the selected one when that
+// is somewhere else. On the host's own machine the two are usually symlinked together, so
+// the caller realpaths the hit and both globs settle on one identity.
+export function jsonlGlobs(sessionId, home = os.homedir(), configDir = null) {
+  const globs = [path.join(home, '.claude', 'projects', '*', `${sessionId}.jsonl`)];
+  const extra = configDir ? path.join(configDir, 'projects', '*', `${sessionId}.jsonl`) : null;
+  if (extra && extra !== globs[0]) globs.push(extra);
+  return globs;
+}
+
+// ------------------------------------- v0.5: client rendering (pure layout bits) ----
+
+// The label column. Every sender's `[Name]` is padded to one width so the glyph and the
+// text line up whoever is talking; `Claude` is always in it because the agent has no
+// roster entry. Recomputed on every roster change.
+export function labelWidth(names = []) {
+  return Math.max(...[...names, 'Claude'].map((n) => String(n).length + 2));
+}
+
+// Word-wrap to `width`. Explicit newlines stay newlines, leading spaces survive on the
+// first line (indented code reads wrong without them), and a word longer than the line
+// (a URL, a path) is cut at the margin instead of overflowing. No indent is added — the
+// caller owns that, because the first line carries the label and the rest do not.
+export function wrapText(text, width) {
+  const w = Math.max(8, Math.floor(width) || 8);
+  const out = [];
+  for (const para of String(text).replace(/\t/g, '  ').split('\n')) {
+    const words = para.split(' ').filter(Boolean);
+    if (!words.length) { out.push(''); continue; }
+    let line = /^ */.exec(para)[0];
+    let empty = true;
+    for (let word of words) {
+      while (word.length > w) {
+        if (!empty) { out.push(line); }
+        out.push(word.slice(0, w));
+        word = word.slice(w);
+        line = ''; empty = true;
+      }
+      if (empty) { line += word; empty = false; }
+      else if (line.length + 1 + word.length <= w) line += ` ${word}`;
+      else { out.push(line); line = word; }
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+// Markdown-lite for agent text: **bold** and `code`, markers dropped. Nothing else — full
+// markdown in a 9-row pane is noise, and a half-parsed table is worse than none.
+// ponytail: neither marker may straddle a newline (the ink client applies this per logical
+// line and lets ink wrap after; client-basic.mjs applies it per already-wrapped line, so
+// there a soft wrap breaks a span too). Wrap-aware styling means measuring visible width;
+// not worth it for two markers.
+export const MD = { boldOn: '\x1b[1m', boldOff: '\x1b[22m', codeOn: '\x1b[38;5;216m', codeOff: '\x1b[39m' };
+export function mdLite(text) {
+  return String(text)
+    .replace(/\*\*([^*\n]+)\*\*/g, `${MD.boldOn}$1${MD.boldOff}`)
+    .replace(/`([^`\n]+)`/g, `${MD.codeOn}$1${MD.codeOff}`);
+}
+
+// Tool results flood a turn (one grep over a repo is 40 of them). Show the first few, then
+// a single '…' line, then nothing until the next turn. `n` = how many already went out.
+export const TOOL_RESULT_CAP = 5;
+export function toolResultAction(n) {
+  return n < TOOL_RESULT_CAP ? 'show' : n === TOOL_RESULT_CAP ? 'ellipsis' : 'skip';
+}
+
+// Which tmux target is the claude TUI. `--split` layout: the top pane of the claude window —
+// `{top}` rather than `.0` so a host with `pane-base-index 1` still hits it. Default (v0.9):
+// the window itself, which has only the one pane, so a viewer sees nothing but claude.
+export function claudeTarget(session, split = false) {
+  return split ? `${session}:claude.{top}` : `${session}:claude`;
+}
+
+// ------------------------------------- v0.5.1: rendering feedback round -----------
+
+// Stable per-participant color: hash the name into a curated palette, not join order, so
+// colors survive reconnects and roster churn. Self overrides to green and [Claude] stays
+// orange in client.mjs — this pool never has to produce either. Blue/teal/cyan/purple/gold
+// family, readable on a dark background; excludes claude-orange 208, chat-magenta 213,
+// err-red 203, and the dim greys (240/245).
+export const COLOR_PALETTE = [39, 44, 78, 81, 110, 141, 178, 183];
+export function userColor(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return COLOR_PALETTE[h % COLOR_PALETTE.length];
+}
+
+// Which message block an event opens or continues, for the blank-line-between-blocks rule.
+// A human say and a /c chat always start a fresh block — even twice in a row from the same
+// sender — so every one of them gets its own blank line. An agent event (tool / tool-result
+// / text) continues the block only when the block already open is itself an agent turn,
+// gluing a turn's tool calls, results and final text into one; interrupted by a say/chat it
+// starts a new one. System/knock/error lines never call this, so they neither force a blank
+// line of their own nor break an agent turn's gluing.
+export function nextBlock(kind, current) {
+  if (kind === 'agent' && current?.kind === 'agent') return current;
+  return { kind, seq: (current?.seq ?? 0) + 1 };
+}
+
+// ------------------------------------------- v0.7: terminal mirror (screen frames) ----
+
+// One captured row on its way to somebody else's terminal. SGR colors are the whole point
+// of the mirror, so CSI sequences stay; what goes is everything that reaches outside the
+// rendered cells — OSC (window title, clipboard writes), DCS/APC/PM/SOS strings, and the
+// C0 controls that would move the guest's cursor out of the frame. A row that carries any
+// escape gets a reset appended, or its color bleeds into the row below it.
+export const FRAME_ROW_MAX = 2000;
+export function sanitizeFrameRow(row) {
+  const s = String(row)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '') // OSC (title, clipboard)
+    .replace(/\x1b[P^_X][^\x1b]*(?:\x1b\\)?/g, '') // DCS / PM / APC / SOS
+    // C0 except ESC (0x1b) and TAB (0x09), DEL, and the 8-bit C1 range.
+    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, '')
+    .slice(0, FRAME_ROW_MAX);
+  return s.includes('\x1b') ? `${s}\x1b[0m` : s;
+}
+
+// Bandwidth guard, all of it in one decision: nothing to send while the screen has not
+// changed, and never more than one frame per `minGap` (4/s at the default 250 ms).
+export const FRAME_MIN_GAP = 250;
+export function framesEqual(a, b) {
+  return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((r, i) => r === b[i]);
+}
+export function frameDecision({ rows, prev = null, now = 0, lastAt = 0, minGap = FRAME_MIN_GAP }) {
+  if (!Array.isArray(rows) || !rows.length) return 'skip';
+  if (framesEqual(prev, rows)) return 'skip';
+  if (!lastAt) return 'send'; // nothing sent yet: a joiner gets the screen at once
+  return now - lastAt < minGap ? 'wait' : 'send';
+}
+
+// What of a host frame fits this terminal. The newest content in a TUI is at the bottom, so
+// a guest with fewer rows keeps the LAST ones; width is left to the renderer (it truncates
+// ANSI-aware) and only reported here so the client can say the host is wider.
+export function fitFrame(frame, cols, terminalRows) {
+  const rows = frame?.rows || [];
+  const keep = Math.max(4, (Number(terminalRows) || 24) - 5);
+  return {
+    rows: rows.length > keep ? rows.slice(-keep) : rows,
+    croppedRows: Math.max(0, rows.length - keep),
+    wider: (Number(frame?.w) || 0) > (Number(cols) || 80),
+  };
+}
+
+// ------------------------------------------------------- v0.10: tool collapse ----
+
+// `Bash: {"command":…}` → `Bash`. The daemon builds that string in parseJsonlLine, so the
+// name is everything before the first colon.
+export function toolName(text) {
+  const m = /^([^:\s]{1,40}):/.exec(String(text ?? ''));
+  return m ? m[1] : '?';
+}
+
+// One turn's worth of ⚙/⎿ lines → the collapsed summary, or null when the turn had at most
+// one tool call and should stay inline exactly as it does today. Counts are in first-seen
+// order, so the summary reads in the order the turn actually ran its tools.
+export const LIVE_TOOL_ROWS = 4; // how many ⚙/⎿ lines the live region shows while busy
+export function toolTurnSummary(tools = []) {
+  const calls = tools.filter((t) => t?.kind === 'tool');
+  if (calls.length <= 1) return null;
+  const counts = new Map();
+  for (const c of calls) {
+    const n = toolName(c.text);
+    counts.set(n, (counts.get(n) || 0) + 1);
+  }
+  return `${calls.length} tools (${[...counts].map(([n, c]) => `${n} ×${c}`).join(', ')})`;
+}
+
+// ------------------------------------------- v0.10b: newline keys in the input ----
+
+// Key sequences the client handles itself, pulled out of the stdin byte stream before ink's
+// input machinery can turn them into garbage in the text field. Shift+Enter arrives as
+// CSI-u (kitty) or xterm's modifyOtherKeys form, Option/Alt+Enter as ESC CR; F2 has three
+// spellings depending on terminfo.
+export const KEY_SEQS = [
+  ['\x1b[13;2u', 'newline'], // Shift+Enter, kitty / CSI-u
+  ['\x1b[27;2;13~', 'newline'], // Shift+Enter, xterm modifyOtherKeys
+  ['\x1b\r', 'newline'], // Option/Alt+Enter
+  ['\x1b\n', 'newline'], // same, on terminals that send LF
+  ['\x1bOQ', 'mirror'], // F2, application mode
+  ['\x1b[12~', 'mirror'], // F2, vt220
+  ['\x1b[[B', 'mirror'], // F2, linux console
+];
+
+// Split a stdin chunk into recognised keys and the text that goes on to ink. A tail that
+// could still grow into one of the sequences is held back for the next chunk — except a
+// lone ESC, which is passed straight through so pressing Escape is never swallowed.
+// ponytail: that means a chunk split exactly after the ESC of a real sequence leaks its
+// bytes as text. Terminals write a sequence in one go, so it stays theoretical.
+export function extractKeys(chunk, seqs = KEY_SEQS) {
+  let s = String(chunk ?? '');
+  let text = '';
+  const keys = [];
+  scan: while (s) {
+    for (const [seq, name] of seqs) {
+      if (s.startsWith(seq)) { keys.push(name); s = s.slice(seq.length); continue scan; }
+    }
+    if (s.length > 1 && seqs.some(([seq]) => seq.startsWith(s))) return { keys, text, hold: s };
+    text += s[0];
+    s = s.slice(1);
+  }
+  return { keys, text, hold: '' };
+}
+
+// ------------------------------------------------- v0.10c: guest onboarding ----
+
+// The block every client prints on connect and on `/help`. The host's copy is trimmed: the
+// host's own commands are printed by the launcher and the daemon window anyway.
+export const ONBOARD_W = 54;
+export function onboardingLines(name = 'You', host = false) {
+  const head = `── claude-jam ${'─'.repeat(Math.max(3, ONBOARD_W - 14))}`;
+  const rows = host
+    ? ['plain line        → claude (unprefixed: it knows it is you)',
+      '/c <text>         → humans only — claude never sees it',
+      'F2 or /mirror     → mirror of the real TUI · /tools tool log',
+      '/help /who /join  → this block · participants · invite line']
+    : [`plain line        → claude (attributed [${name}])`,
+      '/c <text>         → humans only — claude never sees it',
+      '/who /quit        → participants / leave',
+      'F2 or /mirror     → watch the REAL Claude Code screen',
+      'Shift+Enter or \\  → multi-line message · /tools · /help',
+      'Lost? just ask claude — e.g. "how does this jam work?",',
+      '"how do I chat privately?" — it knows the full manual.'];
+  return [head, ...rows, '─'.repeat(ONBOARD_W)];
+}
+
+// ------------------------------------------------- v0.9: host chat surface ----
+
+// The host client command for a cmux split. cmux `send` types the line into a shell, so
+// every value is single-quoted here — a name may legally contain a space (NAME_RE), and
+// nothing can contain a quote (NAME_RE and TOKEN_VALUE_RE forbid it, the paths are the
+// launcher's own). The trailing \n is cmux's "press Enter".
+export function buildCmuxClientCmd({ node, script, url, name, token }) {
+  return `'${node}' '${script}' '${url}' --name '${name}'` +
+    `${token ? ` --token '${token}'` : ''} --host\n`;
+}
+
+// ------------------------------------------------- v0.11: cloudflared tunnel ----
+
+// `cloudflared tunnel --url …` prints a boxed banner once the quick tunnel is live; only the
+// hostname matters, so match just that instead of the box art around it.
+export const TRYCLOUDFLARE_RE = /https:\/\/([a-z0-9][a-z0-9-]*\.trycloudflare\.com)\b/;
+export function parseTunnelUrl(text) {
+  const m = TRYCLOUDFLARE_RE.exec(String(text ?? ''));
+  return m ? m[1] : null;
+}
+
+// Same shape as buildJoinLine/buildViewUrl, through the tunnel host instead of ip:port —
+// wss:// and https://, no port (Cloudflare terminates TLS at the edge and proxies to :443).
+// null until the tunnel has resolved a hostname, or (join only) while no token is set — same
+// "nothing to hand out while knocking" rule as the LAN line.
+export function buildTunnelJoinLine(host, token) {
+  return host && token ? `node client.mjs wss://${host} --name <You> --token ${token}` : null;
+}
+export function buildTunnelViewUrl(host, key) {
+  return host && key ? `https://jam:${key}@${host}` : null;
+}
+
+// Console lines for the tunnel, labelled distinctly from the LAN ones (`invite:`/`view:`) so
+// a host copying from the log never sends a stranger the wrong URL by mistake.
+export function tunnelJoinLines(tunnelJoin, tunnelView) {
+  const lines = [];
+  if (tunnelJoin) lines.push(`tunnel invite: ${tunnelJoin}`);
+  if (tunnelView) lines.push(`tunnel view: ${tunnelView}`);
+  return lines;
+}
+
+export function buildSettings(hooksPath) {
+  const cmd = (arg) => ({ hooks: [{ type: 'command', command: `${hooksPath} ${arg}` }] });
+  return {
+    hooks: {
+      SessionStart: [cmd('session-start')],
+      UserPromptSubmit: [cmd('prompt')],
+      Stop: [cmd('stop')],
+      Notification: [cmd('notification')],
+    },
+  };
+}

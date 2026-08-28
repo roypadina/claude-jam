@@ -1,0 +1,18 @@
+{
+  "name": "claude-jam",
+  "version": "0.1.0",
+  "description": "Two or more humans, one real interactive Claude Code session",
+  "type": "module",
+  "bin": {
+    "jam": "jam"
+  },
+  "scripts": {
+    "test": "node --test test.mjs"
+  },
+  "dependencies": {
+    "ink": "^5.2.1",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.1",
+    "ws": "^8.21.3"
+  }
+}
