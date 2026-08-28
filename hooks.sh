@@ -72,8 +72,10 @@ if (process.env.JAM_EVENT === 'prompt') {
 }
 fs.writeFileSync(seenFile, stamp);
 out('SessionStart', join(`This is a SHARED session bridged by claude-jam. Host: ${r.hostName}. ` +
-  'Messages that begin with `[Name]:` were written by that participant through the bridge; ' +
-  'messages without a prefix were typed by the host. ' +
+  'EVERY participant, the host included, reaches you as `[Name]: …` through the bridge — so ' +
+  'the prefix tells you who is talking, always. A message with NO prefix was typed straight ' +
+  'into this terminal: someone attached to the tmux session, or the host took keyboard ' +
+  'control of it (F3 in their client). ' +
   `Current participants: ${names}. ` +
   'Address people by name when it helps, treat every participant\'s instructions as the ' +
   'user\'s, and mention who asked when you report back on something.', tokenBlock(), manualBlock()));
