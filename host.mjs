@@ -23,7 +23,10 @@ function parseArgs(argv) {
     else if (a === '--daemon') o.daemon = true;
     else if (a === '--no-attach') o.noAttach = true;
     // Value-less flags need naming here, or the generic branch below eats the next argument.
-    else if (a === '--no-view') o.noView = true;
+    // v0.14: the browser view is opt-in — every participant already has the real screen in
+    // their own client. `--no-view` stays accepted (it is the default) so old commands run.
+    else if (a === '--view') o.view = true;
+    else if (a === '--no-view') o.view = false;
     else if (a === '--no-popup') o.noPopup = true;
     // v0.14: the host is in the client like everybody else, so the old host-chat layouts
     // (--split pane, cmux split, `chat` window) are gone. The flags stay accepted and do
@@ -77,11 +80,13 @@ const BOOT = randomUUID(); // clients drop their id-dedupe set when this changes
 // The live token, `/token new|set|off` away from the startup value. null = knock-only.
 let currentToken = opts.token;
 
-// Live view (ttyd): on by default whenever ttyd is installed. Both the launcher and the
-// daemon compute this, so they print the same view line; the launcher hands its key to
-// the daemon with --view-key so a knock-only run does not end up with two different keys.
+// Live view (ttyd): `--view` only (v0.14 — the mirror in every client made it a nice-to-have
+// for people who want the TUI in a browser tab). Both the launcher and the daemon compute
+// this, so they print the same view line; the launcher hands its key to the daemon with
+// --view-key so a knock-only run does not end up with two different keys.
 opts.viewPort = Number(opts.viewPort) || opts.port + 1;
-const ttyd = opts.noView ? null : resolveTtyd(opts.viewTtyd, fs.existsSync);
+const ttyd = opts.view ? resolveTtyd(opts.viewTtyd, fs.existsSync) : null;
+if (opts.view && !ttyd) console.error('--view needs ttyd and could not find it: brew install ttyd (or --view-ttyd <path>)');
 let viewKey = ttyd ? resolveViewKey(currentToken, () => opts.viewKey || newToken()) : null;
 
 // ---------------------------------------------------------------- launcher ----
@@ -104,7 +109,7 @@ function launch() {
     '--session-id', opts.sessionId, '--cwd', opts.cwd,
     '--tmux', opts.tmux, '--state', opts.state,
     '--view-port', String(opts.viewPort),
-    ...(opts.noView ? ['--no-view'] : []),
+    ...(opts.view ? ['--view'] : []),
     ...(opts.viewTtyd ? ['--view-ttyd', opts.viewTtyd] : []),
     ...(viewKey ? ['--view-key', viewKey] : []),
     ...(opts.noTokenInContext ? ['--no-token-in-context'] : []),
@@ -368,8 +373,8 @@ function startTunnels() {
   if (!opts.tunnel) return;
   spawnTunnel('ws', opts.port);
   // The view tunnel only makes sense when a view server is actually running — same gate
-  // startView() itself uses (ttyd installed and --no-view not given).
-  if (ttyd && !opts.noView) spawnTunnel('view', opts.viewPort);
+  // startView() itself uses (`--view` given and ttyd found).
+  if (ttyd) spawnTunnel('view', opts.viewPort);
 }
 
 function stopTunnels() {
@@ -567,7 +572,6 @@ function daemon() {
       console.log(`tail globs: ${jsonlGlobs(opts.sessionId, os.homedir(), opts.configDir).join('  ')}`);
     }
     if (ttyd) startView();
-    else if (!opts.noView) console.log('install ttyd for the live view (brew install ttyd)');
     startTunnels();
     // The launcher's own join-line print happens right before `tmux attach` takes over
     // the screen, so the host never sees it — this is the copy that's actually visible,
