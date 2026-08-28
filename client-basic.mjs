@@ -166,6 +166,8 @@ function render(ev) {
       if (session) { session.join = ev.join; session.view = ev.view; }
       return logJoin();
     }
+    // v0.14: a slash command ran in the TUI, or a guest's request was approved.
+    case 'sys': return sys(ev.text);
     case 'error': return emit({ glyph: '!', glyphColor: C.err, text: ev.text, textColor: C.err });
     default: return;
   }
@@ -242,6 +244,12 @@ rl.on('line', (raw) => {
     case 'token':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'token', op: act.op, value: act.value });
+      break;
+    // v0.14: one of claude's own commands — typed into the TUI for the host, sent to the
+    // host for approval for a guest. The daemon is what decides which.
+    case 'slash':
+      sendMsg({ t: 'slash', text: act.text });
+      if (!IS_HOST) sys(`${act.text} — sent to the host for approval`);
       break;
     case 'quit': process.exit(0);
     case 'error': err(act.text); break;

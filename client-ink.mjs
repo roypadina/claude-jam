@@ -246,6 +246,9 @@ function render(ev) {
       if (store.session) { store.session.join = ev.join; store.session.view = ev.view; }
       return logJoin();
     }
+    // v0.14: something happened to the session everybody should know about — a slash command
+    // was run in the TUI, a guest's request was approved.
+    case 'sys': return sys(ev.text);
     case 'error': return err(ev.text);
     default: return;
   }
@@ -391,6 +394,13 @@ function submit(raw) {
     case 'token':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'token', op: act.op, value: act.value });
+      break;
+    // v0.14: not a jam command, so it is one of claude's. The host's client types it into
+    // the real TUI; a guest's goes to the host for approval (the daemon decides — this
+    // client's `--host` flag is a label, not a permission).
+    case 'slash':
+      sendMsg({ t: 'slash', text: act.text });
+      if (!IS_HOST) sys(`${act.text} — sent to the host for approval`);
       break;
     case 'quit': return leave(0);
     case 'error': err(act.text); break;
