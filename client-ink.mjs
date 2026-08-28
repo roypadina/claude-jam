@@ -19,7 +19,7 @@ import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
 import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
-import { parseClientLine, joinLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS } from './lib.mjs';
+import { parseClientLine, joinLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS } from './lib.mjs';
 
 const h = React.createElement;
 
@@ -65,6 +65,7 @@ const store = {
   // v0.14: the mirror of the real TUI is THE view — everyone, host included, opens on it.
   // F2 (or /mirror) flips to the transcript, which is where the full history lives.
   mirror: true,
+  passthrough: false, // v0.14 F3 (host only): keys go straight to the claude TUI
   frame: null, // latest {rows, w, h} screen frame
   deferred: [], // entries that arrived while the mirror was up; flushed back on the way out
   tools: [], // v0.10: this turn's ⚙/⎿ lines, still collapsible
@@ -112,10 +113,15 @@ inkStdin.unref = () => inkStdin;
   const dec = new StringDecoder('utf8'); // a chunk can land mid-codepoint
   let hold = '';
   process.stdin.on('data', (buf) => {
-    const r = extractKeys(hold + dec.write(buf));
+    // v0.14: in passthrough mode the keyboard belongs to the claude TUI, so only F3 (the way
+    // back) is still ours — everything else, escape sequences included, goes on the wire
+    // untouched. ink never sees a byte of it, so nothing lands in the text field either.
+    const r = extractKeys(hold + dec.write(buf), store.passthrough ? PASSTHROUGH_SEQS : KEY_SEQS);
     hold = r.hold;
     for (const k of r.keys) keys.emit(k);
-    if (r.text) inkStdin.write(r.text);
+    if (!r.text) return;
+    if (store.passthrough) sendKeys(r.text);
+    else inkStdin.write(r.text);
   });
   process.stdin.resume();
 }
@@ -307,6 +313,28 @@ function sendResize() {
   ws.send(JSON.stringify({ t: 'resize', w: process.stdout.columns || 80, h: process.stdout.rows || 24 }));
 }
 
+// v0.14 F3: hand the keyboard to the real TUI (permission prompts, the trust dialog, an
+// interactive /model or /compact picker) and take it back. Host only — the daemon refuses
+// `key` frames from anyone else, so this check is courtesy, not the boundary. Turning it on
+// forces the mirror view: typing blind into a transcript would be absurd.
+function sendKeys(text) {
+  if (ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({ t: 'key', b64: Buffer.from(text, 'utf8').toString('base64') }));
+}
+
+function togglePassthrough(on) {
+  const next = on ?? !store.passthrough;
+  if (next === store.passthrough) return;
+  if (next && !IS_HOST) return err('F3 TUI control is the host\'s — ask them, or send a /command for approval');
+  store.passthrough = next;
+  if (next) toggleMirror(true);
+  toTranscript++;
+  sys(next ? 'TUI control ON — every key goes to claude\'s screen. F3 hands it back.'
+    : 'TUI control off — typing goes to the jam again.');
+  toTranscript--;
+  touch();
+}
+
 // v0.7/v0.14: flip between the live TUI (the default view) and the transcript. F2 and
 // `/mirror` are the same call; going back to the transcript flushes everything that arrived
 // while the mirror was up, in order, so nothing is lost.
@@ -421,7 +449,7 @@ function Mirror({ frame }) {
     hints ? h(Text, { color: C.dim }, `— mirror: ${hints}`) : null);
 }
 
-function StatusBar({ status, typing, spin, mirror }) {
+function StatusBar({ status, typing, spin, mirror, passthrough }) {
   const now = Date.now();
   const who = [...typing.entries()].filter(([, at]) => now - at < 4000).map(([n]) => n);
   const right = who.length ? `${who.join(', ')} ${who.length > 1 ? 'are' : 'is'} typing…` : '';
@@ -429,12 +457,18 @@ function StatusBar({ status, typing, spin, mirror }) {
   // chip's job is to make the F2 alternate discoverable long after the onboarding block
   // has scrolled away.
   const view = mirror ? '⧉ live TUI' : '≡ transcript';
+  // A permission prompt is the one moment the host must leave the jam layer, so the status
+  // row says which key does it. Guests are told who to wait for instead.
+  const waiting = `⚠ waiting for permission${IS_HOST ? ' — F3 to answer' : ' — the host answers'}`;
   return h(Box, { minHeight: 1 },
     h(Box, { flexGrow: 1 },
-      h(Text, { color: C.dimmer }, `${view}  `),
-      status.busy ? h(Text, { color: C.accent }, `${SPIN[spin]} claude is working…`) : null,
-      status.busy && status.waiting ? h(Text, { color: C.dim }, ' · ') : null,
-      status.waiting ? h(Text, { color: C.dim }, '⚠ waiting for host permission') : null),
+      passthrough
+        ? h(Text, { color: C.accent }, '⌨ TUI control — F3 returns')
+        : h(React.Fragment, null,
+          h(Text, { color: C.dimmer }, `${view}  `),
+          status.busy ? h(Text, { color: C.accent }, `${SPIN[spin]} claude is working…`) : null,
+          status.busy && status.waiting ? h(Text, { color: C.dim }, ' · ') : null,
+          status.waiting ? h(Text, { color: C.accent }, waiting) : null)),
     right ? h(Text, { color: C.dim }, right) : null);
 }
 
@@ -469,9 +503,15 @@ function App() {
   React.useEffect(() => {
     const onNewline = () => { store.cont.push(input); setInput(''); touch(); };
     const onMirror = () => toggleMirror();
+    const onPassthrough = () => togglePassthrough();
     keys.on('newline', onNewline);
     keys.on('mirror', onMirror);
-    return () => { keys.off('newline', onNewline); keys.off('mirror', onMirror); };
+    keys.on('passthrough', onPassthrough);
+    return () => {
+      keys.off('newline', onNewline);
+      keys.off('mirror', onMirror);
+      keys.off('passthrough', onPassthrough);
+    };
   }, [input]);
 
   const onChange = (v) => {
@@ -505,16 +545,20 @@ function App() {
       ? h(Box, { flexDirection: 'column' },
         strip.map((e) => h(Entry, { key: `strip-${e.key}`, e: { ...e, gap: false } })))
       : null,
-    h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror }),
-    s.cont.length
+    h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough }),
+    s.cont.length && !s.passthrough
       ? h(Box, { flexDirection: 'column' },
         s.cont.map((l, i) => h(Text, { key: `cont-${i}`, color: C.dim }, l === '' ? ' ' : l)))
       : null,
-    h(Box, null,
-      h(Text, { color: C.me }, NAME),
-      s.cont.length ? h(Text, { color: C.dim }, ' …') : null,
-      h(Text, { color: C.accent }, ' ❯ '),
-      h(TextInput, { value: input, onChange, onSubmit: (v) => { setInput(''); submit(v); } })));
+    // While the keyboard belongs to the TUI there is nothing to type here, and a live prompt
+    // would invite exactly the mistake F3 exists to prevent. Same one row either way.
+    s.passthrough
+      ? h(Box, null, h(Text, { color: C.dim }, '⌨ your keys are going to claude\'s screen — F3 to type in the jam again'))
+      : h(Box, null,
+        h(Text, { color: C.me }, NAME),
+        s.cont.length ? h(Text, { color: C.dim }, ' …') : null,
+        h(Text, { color: C.accent }, ' ❯ '),
+        h(TextInput, { value: input, onChange, onSubmit: (v) => { setInput(''); submit(v); } })));
 }
 
 // Ctrl-C in the terminal is ink's own (exitOnCtrlC): it unmounts, waitUntilExit resolves and

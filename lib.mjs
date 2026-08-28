@@ -524,7 +524,32 @@ export const KEY_SEQS = [
   ['\x1bOQ', 'mirror'], // F2, application mode
   ['\x1b[12~', 'mirror'], // F2, vt220
   ['\x1b[[B', 'mirror'], // F2, linux console
+  ...['\x1bOR', '\x1b[13~', '\x1b[[C'].map((s) => [s, 'passthrough']), // F3: SS3 / vt220 / linux
 ];
+
+// v0.14: while passthrough is on, every byte belongs to the claude TUI — the only key the
+// client still keeps for itself is the F3 that turns it back off.
+export const PASSTHROUGH_SEQS = KEY_SEQS.filter(([, name]) => name === 'passthrough');
+
+// One stdin chunk on its way to the real TUI, as tmux `send-keys` argument runs. ASCII (which
+// is every escape sequence, arrow, Enter and Tab a terminal sends) goes as `-H <hex>`, the
+// form tmux documents for an ASCII character; anything above 0x7f goes as one `-l` literal
+// run, because `-H` is ASCII-only. Never a shell, never one string tmux could read as a flag
+// (`-H` takes hex digits only, and a non-ASCII run cannot start with `-`). The cap is the
+// trust boundary: a client cannot make the daemon type a novel into the pane in one frame.
+export const KEY_CHUNK_MAX = 512;
+export function sendKeyArgs(text) {
+  const runs = [];
+  for (const ch of [...String(text ?? '')].slice(0, KEY_CHUNK_MAX)) {
+    const ascii = ch.codePointAt(0) < 0x80;
+    const last = runs.at(-1);
+    if (last && last.ascii === ascii) last.chars.push(ch);
+    else runs.push({ ascii, chars: [ch] });
+  }
+  return runs.map(({ ascii, chars }) => (ascii
+    ? ['-H', ...chars.map((c) => c.codePointAt(0).toString(16).padStart(2, '0'))]
+    : ['-l', chars.join('')]));
+}
 
 // Split a stdin chunk into recognised keys and the text that goes on to ink. A tail that
 // could still grow into one of the sequences is held back for the next chunk — except a
