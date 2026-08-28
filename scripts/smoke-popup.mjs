@@ -27,6 +27,7 @@ function peer(hello) {
   ws.addEventListener('message', (m) => { try { p.frames.push(JSON.parse(m.data)); } catch { /* not ours */ } });
   ws.addEventListener('close', (e) => { p.closeCode = e.code; });
   ws.addEventListener('error', () => { /* close carries the verdict */ });
+  p.send = (o) => ws.send(JSON.stringify(o));
   p.want = async (what, pred, ms = 6000) => {
     for (const deadline = Date.now() + ms; Date.now() < deadline;) {
       const hit = p.frames.find(pred);
@@ -56,8 +57,8 @@ async function until(what, pred, ms = 6000) {
 // Run popup.mjs the way tmux would, minus the popup. The exit promise is created at spawn
 // time on purpose: 'exit' fires once, and a listener added after the child is already gone
 // would never see it.
-function runPopup(name, ttl = '120') {
-  const child = spawn(process.execPath, [POPUP, name, '127.0.0.1', ttl, port],
+function runPopup(name, ttl = '120', kind = 'knock', detail = '') {
+  const child = spawn(process.execPath, [POPUP, name, '127.0.0.1', ttl, port, kind, detail],
     { env: { ...process.env, JAM_HOOK_SECRET: secret }, stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', (c) => { out += c; });
@@ -170,6 +171,25 @@ await step('a stale popup (knock already answered) gets a 404 and exits', async 
   p.key('a');
   eq(await p.exit(), 0, 'exit code');
   if (!/too late \(404\)/.test(p.out())) throw new Error(`popup printed: ${JSON.stringify(p.out())}`);
+});
+
+// v0.14: the same popup answers a guest's claude command.
+await step("popup.mjs kind=cmd allows a guest's /command through the real daemon", async () => {
+  const cmdy = peer({ name: 'Cmdy' });
+  await cmdy.want('knock pending', (f) => f.t === 'knock' && f.state === 'pending');
+  eq((await admit({ name: 'Cmdy', ok: true })).status, 200, 'admit status');
+  await cmdy.want('welcome', (f) => f.t === 'welcome');
+  cmdy.send({ t: 'slash', text: '/cost' });
+  await until('the request in the daemon log', () => /\[cmd\] Cmdy wants \/cost/.test(daemonLog()));
+  const p = runPopup('Cmdy', '120', 'cmd', '/cost');
+  p.key('a'); // one raw key, no Enter — and a popup grants one command, never `always`
+  const ran = await cmdy.want('the approval line', (f) => f.t === 'sys' && /Cmdy ran \/cost in the TUI \(approved by/.test(f.text));
+  eq(await p.exit(), 0, 'exit code');
+  const out = p.out().replace(/\x1b\[[0-9;]*m/g, '').trim();
+  if (!/⌘ Cmdy wants to run \/cost/.test(out)) throw new Error(`popup printed: ${JSON.stringify(out)}`);
+  if (!/\[a\]llow/.test(out)) throw new Error(`popup does not offer allow: ${JSON.stringify(out)}`);
+  console.log(`      popup rendered: ${JSON.stringify(out)}`);
+  console.log(`      ${JSON.stringify(ran.text)}`);
 });
 
 console.log(`\n--- RESULT --- ${failed ? `${failed} step(s) FAILED` : 'all steps passed'}`);
