@@ -394,11 +394,11 @@ export function toolResultAction(n) {
   return n < TOOL_RESULT_CAP ? 'show' : n === TOOL_RESULT_CAP ? 'ellipsis' : 'skip';
 }
 
-// Which tmux target is the claude TUI. `--split` layout: the top pane of the claude window —
-// `{top}` rather than `.0` so a host with `pane-base-index 1` still hits it. Default (v0.9):
-// the window itself, which has only the one pane, so a viewer sees nothing but claude.
-export function claudeTarget(session, split = false) {
-  return split ? `${session}:claude.{top}` : `${session}:claude`;
+// Which tmux target is the claude TUI: the `claude` window, which holds exactly one pane —
+// so a mirror frame and a ttyd viewer both show Claude Code and nothing else. Named, never
+// indexed, so a host with `base-index 1` still hits it.
+export function claudeTarget(session) {
+  return `${session}:claude`;
 }
 
 // ------------------------------------- v0.5.1: rendering feedback round -----------
@@ -551,17 +551,6 @@ export function onboardingLines(name = 'You', host = false) {
       'Lost? just ask claude — e.g. "how does this jam work?",',
       '"how do I chat privately?" — it knows the full manual.'];
   return [head, ...rows, '─'.repeat(ONBOARD_W)];
-}
-
-// ------------------------------------------------- v0.9: host chat surface ----
-
-// The host client command for a cmux split. cmux `send` types the line into a shell, so
-// every value is single-quoted here — a name may legally contain a space (NAME_RE), and
-// nothing can contain a quote (NAME_RE and TOKEN_VALUE_RE forbid it, the paths are the
-// launcher's own). The trailing \n is cmux's "press Enter".
-export function buildCmuxClientCmd({ node, script, url, name, token }) {
-  return `'${node}' '${script}' '${url}' --name '${name}'` +
-    `${token ? ` --token '${token}'` : ''} --host\n`;
 }
 
 // ------------------------------------------------- v0.11: cloudflared tunnel ----

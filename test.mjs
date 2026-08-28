@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, toolName, toolTurnSummary, extractKeys, KEY_SEQS, onboardingLines, ONBOARD_W, buildCmuxClientCmd, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, toolName, toolTurnSummary, extractKeys, KEY_SEQS, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -416,11 +416,11 @@ test('neutralizePrefixes: a forged [Name]: line can no longer claim attribution'
 
 // --- v0.5: split layout + restyle v2 ------------------------------------------
 
-test('claudeTarget: the window itself by default (v0.9), the top pane with --split', () => {
-  // `{top}` rather than `.0` so a host with `pane-base-index 1` still hits the TUI.
+test('claudeTarget: the claude window, which is the TUI and nothing else (v0.14)', () => {
+  // Named, not indexed: a host with `base-index 1` still hits it. The old `--split` pane
+  // target retired with the host chat strip.
   assert.equal(claudeTarget('jam'), 'jam:claude');
-  assert.equal(claudeTarget('jamtest', true), 'jamtest:claude.{top}');
-  assert.equal(claudeTarget('jam', false), 'jam:claude');
+  assert.equal(claudeTarget('jamtest'), 'jamtest:claude');
 });
 
 test('jsonl: a tool_result with text blocks keeps the first non-empty line', () => {
@@ -780,15 +780,3 @@ test('tunnelJoinLines: labelled distinctly from the LAN invite/view lines, empty
   assert.deepEqual(tunnelJoinLines(null, null), []);
 });
 
-test('buildCmuxClientCmd: every value quoted, --host set, Enter at the end', () => {
-  const cmd = buildCmuxClientCmd({
-    node: '/usr/bin/node', script: '/dir with space/client.mjs',
-    url: 'ws://127.0.0.1:7777', name: 'Dana K', token: 'friends-only-1',
-  });
-  assert.equal(cmd, "'/usr/bin/node' '/dir with space/client.mjs' 'ws://127.0.0.1:7777' " +
-    "--name 'Dana K' --token 'friends-only-1' --host\n");
-  // No token set: no flag at all, and the line still ends in the Enter cmux needs.
-  const knock = buildCmuxClientCmd({ node: '/n', script: '/s', url: 'ws://x', name: 'Roy', token: null });
-  assert.equal(knock.includes('--token'), false);
-  assert.equal(knock.endsWith('--host\n'), true);
-});
