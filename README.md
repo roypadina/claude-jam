@@ -2,13 +2,23 @@
 
 Two or more humans on different machines talking to **one real, interactive Claude Code
 session**. The host keeps the native `claude` TUI with all their plugins, skills, MCP servers,
-CLAUDE.md and hooks. Friends join from a terminal. The agent is told the session is shared and
-sees who wrote each message.
+CLAUDE.md and hooks. Everyone — the host included — joins from a terminal client whose default
+view is that TUI, streamed live. The agent is told the session is shared and sees who wrote
+each message.
+
+```
+        Roy (host)            Dana                 Eli
+        client  ─────┐        client ────┐         client ────┐
+                     └──────── WS ───────┴─────────────┘
+                                  │
+                     host.mjs daemon ── types into ──▶ the real `claude` TUI
+                                  └── capture-pane ──▶ the live view everyone watches
+```
 
 Requires node ≥ 22, tmux, and the `claude` CLI on PATH. Dependencies: `ws` for the daemon,
 `ink` + `react` + `ink-text-input` for the client's UI (`--basic` runs the client without
-them). Optional: `ttyd` for the read-only browser view of the TUI (`brew install ttyd`),
-`cloudflared` for `--tunnel` (`brew install cloudflared`).
+them). Optional: `ttyd` for the browser view (`--view`, `brew install ttyd`), `cloudflared`
+for `--tunnel` (`brew install cloudflared`).
 
 ## Host quickstart
 
@@ -511,182 +521,136 @@ the host's client asks for (`resize-window`). The live view reads it back with
 
 ## Testing
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — 99 tests: JSONL classification
-including tool results, sanitizer, name, prefix, UUID and token-value validation, hello
-classification, join/view line building, view-key rule, ttyd resolution, `token.json` shape,
-client command parsing (`/mirror`, `/tools`, `/help` included), settings builder, popup
-argv/badge/keypress rules, config-dir normalisation, the JSONL glob list, the claude pane
-target, the cmux client command, the rendering logic (label-column width, word wrap,
-markdown-lite, the tool-result cap, per-name color hashing and its palette exclusions, the
-message-block separation rule, screen-row sanitising, the frame diff/coalesce decision, the
-mirror's fit-to-terminal rule, tool-name extraction and turn summaries, the key-sequence
-extractor and the onboarding block), and the tunnel URL parser / join-line derivation
-(`parseTunnelUrl` against a real cloudflared banner, `buildTunnelJoinLine`,
-`buildTunnelViewUrl`, `tunnelJoinLines`).
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **111 tests**: JSONL
+classification including tool results, sanitizer, name, prefix, UUID and token-value
+validation, hello classification, invite-line building (LAN, view, tunnel and the combined
+`inviteLines` list), view-key rule, ttyd resolution, `token.json` shape, client command parsing
+(`/mirror`, `/tools`, `/help`, `/allow-cmd`, `/deny-cmd`), the v0.14 command tables
+(`JAM_COMMANDS` all answered by the client, `RESERVED_COMMANDS` refused as unbuilt, `slashName`
+lowercasing, `validSlashCommand` refusing newlines/control characters/overlong arguments,
+`guestSlashDecision` ask/run/refuse), the key tables (every F2 and F3 spelling, the
+Shift/Alt+Enter forms, the held partial sequence, and `PASSTHROUGH_SEQS` letting everything but
+F3 through), `sendKeyArgs` hex/literal runs and its cap, `mirrorSize`/`fitFrame` agreeing so
+nothing is cropped, settings builder, popup argv/prompt/badge/keypress rules, config-dir
+normalisation, the JSONL glob list, the claude pane target, and the rendering logic
+(label-column width, word wrap, markdown-lite, the tool-result cap, per-name color hashing and
+its palette exclusions, the message-block separation rule, screen-row sanitising, the frame
+diff/coalesce decision, tool-name extraction and turn summaries, the onboarding block).
 
-Five end-to-end smokes, all verified 2026-08-28 on node 24 / tmux 3.7c / claude 2.1.251 /
-ttyd 1.7.7. The first talks to the agent through a token, the second drives the real ink
-client on a pty and asserts what tmux captured, the third streams the terminal mirror, the
-fourth exercises admission with no token at all, the fifth the in-TUI popup path (the last two
-need no claude turn). Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on
-screen, and a daemon with replayed history puts an older turn's collapsed-tool line there.
-`--tunnel` was verified separately, end to end, over the real internet — see the
-"Public tunnel" testing notes below.
+Six end-to-end smokes, all verified 2026-08-28 on node 24 / tmux 3.7c / claude 2.1.251 /
+ttyd 1.7.7. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
+and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
 ```sh
 # zsh: `command -v claude` prints the alias text, not a path — ask for the binary.
-JAM_CLAUDE=$(whence -p claude 2>/dev/null || command -v claude) node host.mjs --tmux jamtest --port 7799 \
-  --view-port 7801 --name Host --token smoketoken --cwd "$PWD" --no-attach -- --model haiku
-node scripts/smoke-ink.mjs ws://127.0.0.1:7799 smoketoken jamtest   # first: needs empty history
-node scripts/smoke.mjs ws://127.0.0.1:7799 smoketoken
+# Run the launcher inside a tmux session of your own so it has a real terminal size, and
+# --no-attach so no host client of its own opens (the smokes bring their own clients).
+tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
+  "JAM_CLAUDE=$(whence -p claude 2>/dev/null || command -v claude) node host.mjs \
+   --tmux jamtest --port 7799 --view-port 7801 --name Host --token smoketoken \
+   --hook-secret smokehooksecret --cwd '$PWD' --no-attach -- --model haiku; sleep 300"
+
+node scripts/smoke-ink.mjs   ws://127.0.0.1:7799 smoketoken jamtest   # first: needs empty history
+node scripts/smoke-slash.mjs ws://127.0.0.1:7799 smoketoken jamtest
+node scripts/smoke.mjs       ws://127.0.0.1:7799 smoketoken
 node scripts/smoke-mirror.mjs ws://127.0.0.1:7799 smoketoken
-tmux kill-session -t jamtest          # exact name only, never a pattern
-rm -rf "$TMPDIR/claude-jam-7799"
-
-JAM_CLAUDE=$(whence -p claude 2>/dev/null || command -v claude) node host.mjs --tmux jamtest --port 7799 \
-  --name Host --cwd "$PWD" --no-attach -- --model haiku      # no --token: knock-only
-node scripts/smoke-knock.mjs ws://127.0.0.1:7799
-tmux kill-session -t jamtest
-rm -rf "$TMPDIR/claude-jam-7799"
-
-# in-TUI knock approval; --hook-secret so the smoke can POST /admit like the popup does
-JAM_CLAUDE=$(whence -p claude 2>/dev/null || command -v claude) node host.mjs --tmux jamtest --port 7799 \
-  --name Host --hook-secret smokehooksecret --cwd "$PWD" --no-attach -- --model haiku
 node scripts/smoke-popup.mjs ws://127.0.0.1:7799 jamtest 7799 smokehooksecret
-tmux kill-session -t jamtest
+tmux kill-session -t jamtest          # exact names only, never a pattern
+tmux kill-session -t jamdrive
+rm -rf "$TMPDIR/claude-jam-7799"
+
+# knock-only daemon (no --token) for the admission smoke
+tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
+  "JAM_CLAUDE=... node host.mjs --tmux jamtest --port 7799 --name Host --cwd '$PWD' \
+   --no-attach -- --model haiku; sleep 300"
+node scripts/smoke-knock.mjs ws://127.0.0.1:7799
+tmux kill-session -t jamtest; tmux kill-session -t jamdrive
 rm -rf "$TMPDIR/claude-jam-7799"
 ```
+
+**The v0.14 unified view, verified by hand on a real pty** (launcher run inside a 120x40 tmux
+session so its client had a terminal): `tmux ls` shows `jamtest` with **no `(attached)`**
+marker and two windows (`daemon`, `claude`), while the host's client fills the launching
+terminal — its opening view is the real TUI (`Claude Code v2.1.251 / Haiku 4.5`, the input box,
+`⏵⏵ bypass permissions on`), the chat strip under it (`* Host joined`), then `⧉ live TUI` and
+`Host ❯`. The claude window came up 120x35 = the terminal minus the five chrome rows, so the
+frame fills the pane exactly. `F2` erased the frame and left `≡ transcript` with the flushed
+history; `F2` again brought the live view back.
+
+Typing `/model` in the host client put claude's model picker on the real pane (`Select model`,
+`❯ 5. Haiku ✔`, `Enter to set as default · s to use this session only · Esc to cancel`) and the
+client mirrored it row for row. `F3` then switched the status row to `⌨ TUI control — F3
+returns` and the input row to `⌨ your keys are going to claude's screen …`; a raw `Up` moved the
+picker to `❯ 4. Sonnet`, `Down` back to `❯ 5. Haiku`, `Escape` cancelled it (`⎿ Kept model as
+Haiku 4.5` — no model change), and typing `reply with the single word f3ok` + `Enter` submitted
+straight into the TUI, which answered `⏺ f3ok`. That unprefixed turn came back through the
+transcript as `[Host] reply with the single word f3ok` / `[Claude] f3ok`, and `F3` again
+restored the input row. (Enter was proved on the prompt rather than in the model dialog on
+purpose: `Enter` there would have rewritten the machine's default model.)
+
+`smoke-slash.mjs` (11 steps, all passing) covers the rest over the wire, asserting on
+`capture-pane` for what did and did not reach the pane: a host's `/cost` typed in and announced
+as `SmokeHost ran /cost in the TUI`; a guest's `{t:'key'}` refused with `F3 TUI control is the
+host's, on loopback only`; a guest's `{t:'resize'}` refused with the window unmoved; `/clear`
+refused outright (`ends or wipes the session for everyone …`) with no request reaching the host
+and nothing in the pane; `/compact` requested, a second request refused while one is in flight,
+then denied (`/compact was denied by Host`) and never typed; `/allow-cmd Guest` running it once
+(`Guest ran /cost in the TUI (approved by Host)`) with the next one asking again;
+`/allow-cmd Guest always` running it (`… — standing`) and the one after that going straight
+through (`Host approved Guest's commands for this jam`) with no new request; `/resume` still
+refused after standing approval; `/model\nrm -rf ~` refused before the pane; and a wrong token
+knocking its way in through `/accept`.
 
 `smoke-ink.mjs` runs a second client ("Dana") in a 120x40 tmux session of its own (created and
 killed by the script — never the host's), drives a scripted peer ("Eli") over raw WS, and
-asserts on `capture-pane` output — 13 steps, all passing: the welcome block plus a clean
-`Dana ❯` row; the onboarding box above the roster line, with `/c`, `F2 or /mirror`,
-`Shift+Enter or \`, `just ask claude` and `attributed [Dana]` in it; `Eli joined`;
-`[Eli]  [humans-only] …` in its own block; `Eli is typing…` right-aligned on the status row
-(and NOT in the prompt row); four captures 300 ms apart showing the spinner move on the status
-row while the prompt row stays put; a `⚙ Read` + `⎿` + `[Claude]` block glued together and
-NOT collapsed (one tool call); a seven-`Bash` turn showing ≤ 4 live tool rows just above the
-status row while it runs and exactly one `⚙ 7 tools (Bash ×7)` line after it, with no `⚙ Bash`
-left in the transcript; `/tools` bringing all seven back (`last turn's tools (7)`); the raw
-bytes `ESC[13;2u` and `ESC CR` sent mid-composition adding pending lines instead of submitting
-(`Dana … ❯` with the lines dim above it) and plain Enter then sending all three as one
-`first line\nsecond line\nthird line`; `/help` printing a second onboarding box; a real `F2`
-keypress bringing up the host TUI (matched on `❯ [Eli]: …`, which only claude's own screen
-renders) with `[mirror]` on the status row, a chat line arriving during the mirror showing in
-the overlay and landing in the transcript after `F2` back; and finally the v0.9 layout — one
-pane in the `claude` window, a `chat` window, `Host ❯` last in it.
+asserts on `capture-pane` output — **17 steps, all passing**: the client opening on the live
+TUI with the `⧉ live TUI` chip and a clean `Dana ❯` row; the onboarding box above the roster
+line with `/c`, `F2`, `Shift+Enter or \`, `just ask claude` and `attributed [Dana]` in it; `F2`
+into the transcript with no TUI chrome left on screen; `Eli joined`; `[Eli]  [humans-only] …` in
+its own block; `Eli is typing…` right-aligned on the status row (and NOT in the prompt row);
+four captures 300 ms apart showing the spinner move on the status row while the prompt row
+stays put; a `⚙ Read` + `⎿` + `[Claude]` block glued together and NOT collapsed (one tool
+call); a seven-`Bash` turn showing ≤ 4 live tool rows while it runs and exactly one
+`⚙ 7 tools (Bash ×7)` line after it; `/tools` bringing all seven back; the raw bytes
+`ESC[13;2u` and `ESC CR` adding pending lines instead of submitting, then plain Enter sending
+all three as one message; `/help` printing a second onboarding box; `F2` back to the live TUI
+(matched on `❯ [Eli]: …`, which only claude's own screen renders) with a humans-only line
+landing in the chat strip above the status row and then in the transcript; the v0.14 layout
+(two windows, one pane in `claude`, **nothing attached**, `fill-character " "`); and a guest's
+`/compact` showing `sent to the host for approval`, logged as `[cmd] Dana wants /compact` and
+absent from the pane.
 
-`smoke-mirror.mjs` drives two scripted clients and asserts: a client that never subscribes
-gets no frames; `{t:'mirror',on:true}` delivers the current screen at once (142x50, 50 rows,
-SGR sequences intact, i.e. `capture-pane -e`); an injected marker shows up in the mirrored
-rows (`❯ [Watcher]: mirrormark-… `); the stream stays at 1.3–2 frames/s with no two frames
-closer than 200 ms while the TUI animates; `{t:'mirror',on:false}` stops it dead (zero frames
-in the next 2 s, including after a chat line changes the screen); and `hello {mirror:true}`
-subscribes from the first frame.
+`smoke-mirror.mjs` drives two scripted clients and asserts: a client that never subscribes gets
+no frames; `{t:'mirror',on:true}` delivers the current screen at once (142x35, 35 rows, SGR
+sequences intact, i.e. `capture-pane -e`); an injected marker shows up in the mirrored rows
+(`❯ [Watcher]: mirrormark-… `); the stream stays at 2.3 frames/s with no two frames closer than
+200 ms while the TUI animates; `{t:'mirror',on:false}` stops it dead; and `hello {mirror:true}`
+subscribes from the first frame (which is how every client now starts).
 
-`smoke-popup.mjs` runs knock-only and asserts: a knock sets `status-right` to `⚑ 1 waiting`
-and takes the popup decision (spawned, or skipped with nobody attached); `POST /admit` with a
-wrong secret is a 403 and admits nobody; with the right secret it welcomes the knocker and
-puts `status-right` back to exactly the value it had before; an unknown name is a 404;
-`popup.mjs` exits by itself when its TTL elapses; `a` on its stdin admits through the real
-daemon, `d` denies (close 4403), `i` leaves the knock pending so a later `/admit` still
-works, and a popup for an already-answered knock prints `too late (404)`.
+`smoke-popup.mjs` runs knock-only and asserts (10 steps): a knock sets `status-right` to
+`⚑ 1 waiting` and takes the popup decision (spawned, or skipped with nobody attached);
+`POST /admit` with a wrong secret is a 403 and admits nobody; with the right secret it welcomes
+the knocker and puts `status-right` back to exactly the value it had before; an unknown name is
+a 404; `popup.mjs` exits by itself when its TTL elapses; `a` on its stdin admits through the
+real daemon, `d` denies (close 4403), `i` leaves the knock pending so a later `/admit` still
+works, a popup for an already-answered knock prints `too late (404)`; and — v0.14 — the same
+popup run as `kind=cmd` renders `⌘ Cmdy wants to run /cost` with `[a]llow`, and one `a` makes
+the daemon run it (`Cmdy ran /cost in the TUI (approved by Host)`).
 
-The popup itself needs a real tmux client attached, which a `--no-attach` smoke has not got.
-Verified by hand with a pty client attached to `jamtest`: the box renders over the claude
-window (`⚑ Ruth wants to join (127.0.0.1)` / `[a]ccept · [d]eny · [i]gnore/Esc`), `a` typed
-into it admits Ruth and restores `status-right`; two knocks show `⚑ 2 waiting` with exactly
-one popup open, and answering the first immediately opens the second (`[knock] popup for
-Bar`). `--no-popup` on the same setup spawns no popup process, draws nothing and never
-touches `status-right`, while `/admit` keeps working.
+**The viewer padding fix**, measured directly: a 40x10 window with a 120x30 client attached
+draws **9447 `·` fill characters** with tmux's default, and **0** with the window's
+`fill-character ' '` (the option jam sets on its own `claude` window at launch). In the real
+jam the host's client also pins the window size, so an attaching viewer gets padding rather
+than reshaping the screen — and if something does take the size (a `--no-attach` daemon with no
+host client, say), the frame pump puts it back once nobody is attached: a 200x60 viewer
+attached to a 120x35 window left it at 120x35, logged as `[resize] claude window → 120x35`.
 
-**The popup needs `-c` (v0.9 finding).** With a viewer's grouped session attached as well,
-`display-popup -t <session>` let tmux 3.7c pick *the viewer's* client — the knock box was
-drawn in the browser and never on the host's terminal (reproduced with a pty client on
-`jamtest` plus a `VIEW_SH` session: `host popup=false badge=true / viewer popup=true`). The
-daemon now asks `list-clients -t <session> -F '#{client_name}'` (which lists clients of the
-base session only, never of a grouped one) and passes the first as `-c`, logging
-`[knock] popup for Bar on /dev/ttys028`. Re-verified after the fix: `host popup=true
-badge=true / viewer popup=false badge=false`, and pressing `a` on the host's client still
-admits the knocker (`[admit] Bar accepted`) and clears the badge.
-
-**v0.9 viewer surface**, verified with the daemon's own `VIEW_SH` run in a tmux session of its
-own against `jamtest` (100x26): the capture holds the Claude Code screen and nothing else —
-`status=off` and `destroy-unattached=on` on the viewer session, no session-level `status`
-option written on `jamtest` itself, and exactly one pane in the `claude` window. `ttyd` on
-`--view-port 7801` serves the page with `-u jam:smoketoken` and 401s on a wrong password.
-
-**v0.9 host chat surface**, both paths: the tmux fallback comes up as `windows: daemon,
-claude, chat — window 'chat' — Ctrl-b n toggles chat` with one pane in `claude`; `--split`
-gives back `claude` with two panes (52-row TUI + 9-row client, no `chat` window) and
-`smoke.mjs` still round-trips through it, so the `claude.{top}` target is right. The cmux path
-was exercised against a stub `cmux` on `$JAM_CMUX` with `CMUX_SURFACE_ID` set (no real panes
-opened): the launcher calls `identify --json`, then `--json new-split down --surface <id>`,
-then `send --surface surface:99 -- '<node>' '<client.mjs>' 'ws://127.0.0.1:7805' --name 'Host'
---token 'smoketoken' --host`, reports `your client is the cmux split below this surface`, and
-creates no `chat` window. A stub that fails `new-split` falls back to the `chat` window, as
-does a host who is not inside cmux (no `CMUX_SURFACE_ID`) or passes `--no-cmux`.
-
-**`--basic`** was checked against the same daemon: the onboarding block prints on connect with
-its `(--basic: F2/Shift+Enter and /tools are ink-only …)` footer, `/help` reprints it,
-`/mirror` answers `the mirror view is ink-client only — run without --basic` and `/tools`
-`tool lines are always inline in --basic`.
-
-`--config-dir` verified the same way: `--config-dir "$TMPDIR/jam-cfg-test/"` (trailing slash
-on purpose) beats the launcher's own `CLAUDE_CONFIG_DIR`, logs
-`claude profile: …/jam-cfg-test` with no trailing slash plus both `tail globs:`, and `ps eww`
-on the claude process shows `CLAUDE_CONFIG_DIR=…/jam-cfg-test`. That fresh profile opens its
-own first-run onboarding, as documented. Dropping a transcript at
-`<config-dir>/projects/<slug>/<session-id>.jsonl` is picked up and broadcast, so the second
-glob really is tailed.
-
-The split layout (now `--split`, opt-in) and the restyle were verified by hand on the same
-setup (pty client attached to `jamtest`, `--model haiku`): the `claude` window comes up with
-two panes (TUI + a 9-row client, no third window), injection/capture/Enter all hit the top
-pane, a knock popup draws over the split and `a` in it admits the knocker, and the resize
-hooks hold the chat pane at 9 rows when a differently-sized client attaches. A turn with tool
-calls renders `⚙` / `⎿` lines, seven results collapse to five plus one `⎿ …`, `**bold**` and
-`` `code` `` come out as ANSI, prompt-row captures 300 ms apart show different spinner frames,
-and admitting a `Konstantina` widens the label column live. Without `--split` the client gets
-its own `chat` window (or a cmux split), no hooks are set, and `smoke.mjs` still passes.
-
-The v0.5.1 rendering feedback round was verified the same way (`jamtest`, `--model haiku`, a
-scripted two-friend exchange): `Ruth` and `Bar` render in two different hashed colors (183 and
-81) that stay the same on every line they send; the `/c` line renders `[Ruth]  [humans-only]
-psst, this line is humans-only` entirely in magenta 213; no line for a human or for `[Claude]`
-carries a glyph, just `[Name]  text`; and a blank line lands before Ruth's first say, before
-her chat line, before Bar's say, and before the `⚙ Bash: {"command":"pwd",…}` block — while the
-`⚙`/`⎿`/`[Claude]` reply that follows stays glued as one block with no blank line inside it, and
-the `* Ruth joined` / `* Bar joined` system lines forced none of their own.
-
-The v0.6 ink client is covered by `smoke-ink.mjs` above plus a hand pass on the same setup
-(`jamtest`, `--model haiku`, keys sent with `tmux send-keys -l`): `/quit` exits 0, Ctrl-C exits
-0, a bad name closes 4400 and the client prints `! rejected: bad name` and exits 1, a dead port
-logs `disconnected, retrying in 1s / 2s / 4s`, a trailing `\` turns the prompt into `Multi … ❯`
-and the next line flushes both as one `[humans-only]` block with the second line hanging under
-the first, `/token new` from a friend answers `! host only` and `/compact` answers `! slash
-commands run only in the host TUI`, a knock renders `⚑ Konstantina wants to join (127.0.0.1) —
-/accept …` and `/accept Konstantina` admits her while widening the label column live, `/join`
-and `/token set` reprint the invite line unwrapped, and `--basic` (plus a piped stdin) falls
-back to the readline renderer against the same daemon.
-
-The live view and the token context are checked with curl and the hook script directly
-(verified 2026-08-28 on ttyd 1.7.7 — note 1.7+ is read-only by default, so no `-R` flag):
-
-```sh
-curl -su jam:smoketoken     http://127.0.0.1:7800/ | head -c 40   # ttyd HTML
-curl -so /dev/null -w '%{http_code}\n' -u jam:wrong http://127.0.0.1:7800/   # 401
-cat "$TMPDIR/claude-jam-7799/token.json"                          # {token, join, viewUrl}
-JAM_STATE="$TMPDIR/claude-jam-7799" JAM_PORT=7799 JAM_HOOK_SECRET=x \
-  JAM_HOST_NAME=Host JAM_NODE=$(command -v node) ./hooks.sh session-start </dev/null
-```
-
-After a `/token set rotatekey-1` the old key 401s and `jam:rotatekey-1` 200s (the daemon
-restarts its own ttyd child by pid); `tmux kill-session -t jamtest` takes that child with it.
-A real ttyd websocket connection creates `jamtest-view-<pid>` pinned to the `claude` window
-with `destroy-unattached on`, keeps that window while the host switches to another, ignores
-anything the viewer types, and disappears on disconnect. Asking the agent *"what is the join
-token?"* from the TUI answers with the token, join command and view URL.
+**Tunnel lines in the client**, verified with a stub `cloudflared` on `PATH` that prints a real
+`trycloudflare.com` banner (the URL derivation and the plumbing are what changed in v0.14, not
+cloudflared): `token.json` held all five keys, and the host client's welcome and `/join` both
+printed `tunnel invite:` / `tunnel view:` first and the LAN `invite:` / `view:` lines below.
+`--view` on the same run served the ttyd page (200 with the key, 401 with a wrong one), and
+`tmux kill-session` took the ttyd and both tunnel children with it (0 left in `ps`).
 
 `smoke.mjs` asserts the JSONL contains `[Tester]: …`, an `agent` text event contains `pong`,
 and a `status busy:false` arrives after the Stop hook. `smoke-knock.mjs` prints PASS/FAIL per
@@ -695,28 +659,22 @@ knocking, a pending socket refused when it tries to talk, `/accept` welcoming it
 roster, a duplicate name closed 4409, `/token set` replying with the new join line, a friend
 with that token admitted directly, and a wrong token knocking then denied with 4403.
 
-**Public tunnel**, verified 2026-08-28 on `cloudflared` 2026.8.2 against the real
-`trycloudflare.com` edge (`jamtest` on port 7799, `--view-port 7801 --tunnel`): both quick
-tunnels came up within 10 s of launch, logged as `tunnel (ws) up: <host>` / `tunnel (view) up:
-<host>` in the daemon window, and the console block reprinted with `tunnel invite:` /
-`tunnel view:` first, the LAN `invite:`/`view:` lines below. `token.json` held all five keys
-including `tunnelJoin`/`tunnelView`, and `hooks.sh session-start` folded both into claude's
-context (`tunnel join command: …; tunnel live view: …`). A scripted client dialed the real
-`wss://<host>.trycloudflare.com` tunnel with the token and completed a `say` → `pong` round
-trip indistinguishable from the LAN path (`smoke.mjs` unmodified, pointed at the tunnel URL);
-`curl -u jam:<key> https://<host2>.trycloudflare.com/` returned the ttyd HTML (200) and a
-wrong password 401'd, through the tunnel. `/token new` from a loopback host connection
-rotated the token/key in both `join`/`view` and `tunnelJoin`/`tunnelView` while the tunnel
-*hostnames* stayed byte-for-byte identical, confirming rotation never touches them.
-`kill -9`ing the ws tunnel's own pid produced `tunnel (ws) exited (cloudflared code null) —
-its join/view URL is cleared`, dropped `tunnel invite:` from the console block and
-`tunnelJoin` from `token.json` (the view tunnel, untouched, kept working), and did not
-respawn it. `tmux kill-session -t jamtest` took both remaining `cloudflared` pids and the
-ttyd pid down with it (confirmed via `ps aux`), leaving the user's own unrelated `jam`
-session on :7777 untouched throughout. `--tunnel` with `cloudflared` removed from `PATH`
-exited 2 with `cloudflared not found on PATH. --tunnel needs it: brew install cloudflared`
-before any tmux session was created. The plain LAN smoke (`smoke.mjs` against
-`ws://127.0.0.1:7799`) still passed unmodified on the same `--tunnel` daemon.
+Earlier rounds, still valid and re-run unchanged where they apply: the v0.5.1 rendering rules
+(hashed per-name colors stable across lines, the magenta `[humans-only]` line, no speech
+glyphs, one blank line between blocks with a turn's `⚙`/`⎿`/`[Claude]` glued together), the
+v0.6 client behaviours (`/quit` and Ctrl-C exit 0, a bad name closes 4400 with
+`! rejected: bad name`, a dead port backs off `1s / 2s / 4s`, a trailing `\` composes,
+`/token new` from a friend answers `! host only`, `--basic` and a piped stdin fall back to the
+readline renderer), `--config-dir` (a trailing slash normalised away, `ps eww` showing
+`CLAUDE_CONFIG_DIR` on the claude process, both `tail globs:` logged and the second one
+actually tailed), the ttyd credential rotation (old key 401s, new key 200s, child restarted by
+pid), the token-in-context block (`hooks.sh session-start` folds token, join command, view URL
+and tunnel pair in; asking the agent "what is the join token?" answers with them), and the real
+`trycloudflare.com` end-to-end run from v0.11 (both tunnels up in <10 s, a client dialling
+`wss://…` completing a `say` → `pong` round trip, `/token new` rotating the credential while
+the hostnames stayed byte-identical, a `kill -9`d tunnel clearing its line without a respawn).
+The retired `--split` / cmux / `chat`-window layouts were verified in v0.9 and are gone in
+v0.14; their flags are accepted as no-ops.
 
 ## Known ceilings (deliberate)
 
@@ -731,7 +689,9 @@ before any tmux session was created. The plain LAN smoke (`smoke.mjs` against
 - Injection verifies by looking for the message's own first visual line (up to 40 chars, less
   on a narrow pane) in the pane, so two identical consecutive messages could match a stale
   echo. Nonce-prefix it if that ever bites.
-- Friends cannot answer permission prompts or run slash commands; only the host's TUI can.
+- Friends cannot answer permission prompts; the host does that with F3 (or by attaching).
+  A friend's slash command runs only after the host approves it, and never at all if it is
+  `/exit`, `/clear` or `/resume`.
 - Admission is per person (`/accept`), but there are still no per-friend credentials: once in,
   everybody is equally trusted, and `/deny` cannot kick somebody who is already admitted.
 - A knock popup that is answered elsewhere (a client's `/accept`, or the knock expiring) stays
@@ -740,16 +700,14 @@ before any tmux session was created. The plain LAN smoke (`smoke.mjs` against
   attached gets no popup at all, and none is re-opened when a client attaches later.
 - `status-right` is snapshotted once, when the daemon starts. Changing it yourself while jam
   is running means the next restore puts the daemon's snapshot back, not your newer value.
-- The 9-row chat pane (`--split` only) is held by hooks on **client** events of the jam
-  session. A ttyd viewer attaching at another size resizes the shared window from its own
-  (grouped) session, whose hooks are not ours, so the split can drift until your own client
-  next attaches or resizes — which puts it straight back. Resizing the pane yourself is undone
-  the same way. Grouped sessions also shrink the shared `claude` window to the smallest
-  attached client, viewers included — that is tmux, not jam, and it applies to the mirror too.
-- The cmux split is opened once, at launch. Close it and the host has no chat client until the
-  next `jam host` (the daemon does not watch for it); `cmux new-split` also has no
-  "run this command" flag, so the client command is typed into the new shell — a shell that
-  refuses to run it (a broken rc file) leaves an idle split behind.
+- The claude window is sized for the host's mirror, and `resize-window` pins it: an attaching
+  client (a `tmux attach`, a second browser viewer) gets blank padding instead of reshaping it,
+  and if something does take the size the daemon only puts it back once nobody is attached —
+  while you are attached, the size is yours. Two viewers of different sizes means the smaller
+  picture wins for one of them; that is tmux, not jam.
+- The host's client tracks its terminal, not the other way round: on a terminal that never
+  reports a size (a pipe, some CI shells) the window falls back to 80x19 and the mirror is that
+  small for everyone. Resize the terminal once and it corrects itself.
 - More than five tool results in one turn collapse to a single `⎿ …`; the full output is in
   the host's TUI, and the count resets on the next turn.
 - The live tool region shows the last four `⚙`/`⎿` lines, and which of the two you see is up
@@ -776,8 +734,9 @@ before any tmux session was created. The plain LAN smoke (`smoke.mjs` against
   Ghostty, WezTerm, iTerm2 with CSI-u on, tmux passing them through); `Option+Enter` needs
   Alt-as-ESC. A trailing `\` is the mechanism that works everywhere, and `--basic` has only
   that one.
-- The mirror, the tool collapse and the newline keys are ink-only: `--basic` appends lines and
-  never redraws, and it reads stdin through readline instead of the key filter.
+- The live view, the tool collapse, the newline keys and F2/F3 are ink-only: `--basic` appends
+  lines and never redraws, and it reads stdin through readline instead of the key filter. It is
+  a transcript-only client, and its onboarding footer says so.
 - Markdown-lite is applied per logical line, so a `**bold**` or `` `code` `` span that straddles
   an explicit newline renders with its markers visible instead of styled. (In `--basic` it is
   applied per already-wrapped line, so a soft wrap breaks a span there too.)
@@ -804,6 +763,27 @@ before any tmux session was created. The plain LAN smoke (`smoke.mjs` against
   same way any TLS-terminating proxy is — the join token / knock approval is what actually
   gates who gets in, same trust model as the LAN case. No IP allow-listing on a quick tunnel:
   the URL itself is the only thing standing between a stranger and a knock/wrong-token attempt.
+- F3 passthrough is raw by design: the host's bytes reach claude unsanitized (that is what
+  answering a prompt means). The gate is the socket — `--host` **and** loopback, i.e. the client
+  the launcher spawned — plus a size cap per frame. Anything else on loopback that speaks the
+  protocol could claim the same trust; on a shared machine, that is the boundary to know about.
+- Slash passthrough types the command and presses Enter after 300 ms. claude's palette filters
+  as you type and Enter picks the highlighted row, so a command whose name is a prefix of
+  another could in principle submit the neighbour; every real command name we tried resolved to
+  itself. A picker that opens instead is normal — drive it with F3.
+- `/exit` and `/quit` in a client mean "leave my client"; they never reach claude. Ending the
+  session itself is `tmux attach -t jam` (or `tmux kill-session`).
+- Standing approval (`/allow-cmd always`) lives in daemon memory, is per name, and dies with
+  the daemon. A guest who reconnects under the same name keeps it; there is no way to revoke it
+  short of restarting (there is no `/deny-cmd always`).
+- A guest can have one command request in flight, and it expires after two minutes. The tmux
+  popup for it only appears if somebody is attached to the jam session, which in the normal
+  v0.14 layout nobody is — the host answers in their client.
+- The connect block is printed above the live view, so a client that reconnects to a busy
+  daemon replays up to 300 events into the terminal's scrollback before the frame comes back.
+  That is the transcript doing its job, but it does scroll.
+- Nothing tells a guest that the host is in TUI control: their view keeps updating (they can see
+  the keystrokes land), but the `⌨` marker is local to the host's client.
 - No rate limiting, no web client, single session per host, no Windows.
 - First run in a fresh directory hits claude's "is this a folder you trust?" dialog. Before
   every injection until one succeeds, the daemon waits up to 30 s for either that dialog (it
