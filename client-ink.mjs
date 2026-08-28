@@ -50,7 +50,7 @@ const fg256 = (n) => `ansi256(${n})`; // everybody else's stable per-name color 
 const SPIN = ['✻', '✼', '✽', '✼']; // claude's own working glyph cycle
 const NO_WRAP_W = 4096; // wider than any terminal: ink leaves the line alone, the terminal
 // soft-wraps it, and an invite command stays one selectable run instead of gaining a newline.
-const OVERLAY_ROWS = 3; // chat/knock lines shown over the mirror while it is on
+const STRIP_ROWS = 3; // rows of chat/system lines kept under the mirror (v0.14 chat strip)
 
 // ------------------------------------------------------------------- state ----
 // One store, no React. `entries` is append-only: <Static> renders each item exactly once.
@@ -134,13 +134,17 @@ function blockKey(kind) {
 // tools/knocks/system/errors, blank for speech), then the text. Each entry freezes the label
 // width and the terminal width it was built at, because <Static> never re-renders it.
 // `bare` skips the label/glyph gutter entirely (the onboarding block draws its own box).
-function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.dim, text = '', textColor, md = false, wrap = true, bare = false }) {
+function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.dim, text = '', textColor, md = false, wrap = true, bare = false, strip = false }) {
   // Blank line between blocks: the rhythm that makes a transcript readable. Tools and their
   // results glue to their turn's block, so they do not get one of their own.
   const gap = !!turnKey && lastTurn !== null && turnKey !== lastTurn;
   if (turnKey) lastTurn = turnKey;
   const entry = {
     key: ++seq, gap, label, color, glyph, glyphColor, md, wrap, bare,
+    // `strip`: worth a row of the chat strip in mirror view. The mirror already shows
+    // everything claude sees — its own output and the `[Name]:` messages typed into it — so
+    // the strip is for what it cannot: humans-only chat, knocks, system lines and errors.
+    strip,
     text: String(text), textColor,
     labelW: store.labelW, cols: process.stdout.columns || 80,
   };
@@ -156,8 +160,8 @@ function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.d
   touch();
 }
 
-const sys = (text) => emit({ glyph: '*', text, textColor: C.dim });
-const err = (text) => emit({ glyph: '!', glyphColor: C.err, text, textColor: C.err });
+const sys = (text) => emit({ glyph: '*', text, textColor: C.dim, strip: true });
+const err = (text) => emit({ glyph: '!', glyphColor: C.err, text, textColor: C.err, strip: true });
 
 // The host's invite lines, wherever they are shown (welcome, /join, a /token reply).
 function logJoin() {
@@ -198,7 +202,7 @@ function render(ev) {
     }
     // Human-only: the agent never sees it, so it renders unmissable — label, prefix and text
     // all in the one color nothing else uses.
-    case 'chat': return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat });
+    case 'chat': return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat, strip: true });
     case 'agent': {
       if (ev.kind === 'tool' || ev.kind === 'tool-result') {
         // Collapse mode (default): the turn's tool lines live in the live region until the
@@ -230,7 +234,7 @@ function render(ev) {
       if (ev.state === 'pending') return sys('waiting for host approval…');
       if (ev.state === 'denied') return leave(1, '! the host denied your request');
       if (ev.state === 'expired') return leave(1, '! nobody approved your request in time');
-      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
+      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}`, strip: true });
     }
     case 'token': {
       if (store.session) { store.session.join = ev.join; store.session.view = ev.view; }
@@ -477,9 +481,10 @@ function App() {
   };
 
   // Live region, in order: the mirror frame (or the in-progress turn's tool lines), the
-  // 3-row overlay of what arrived while the mirror is up, the status row, the pending lines
-  // of a multi-line message, and the input row.
+  // 3-row chat strip of what the mirror cannot show, the status row, the pending lines of a
+  // multi-line message, and the input row.
   const liveTools = s.mirror || s.toolsExpanded ? [] : s.tools.slice(-LIVE_TOOL_ROWS);
+  const strip = s.mirror ? s.deferred.filter((e) => e.strip).slice(-STRIP_ROWS) : [];
   return h(Box, { flexDirection: 'column' },
     h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
     s.mirror ? h(Mirror, { frame: s.frame }) : null,
@@ -496,9 +501,9 @@ function App() {
         },
       })))
       : null,
-    s.mirror && s.deferred.length
+    s.mirror && strip.length
       ? h(Box, { flexDirection: 'column' },
-        s.deferred.slice(-OVERLAY_ROWS).map((e) => h(Entry, { key: `ov-${e.key}`, e: { ...e, gap: false } })))
+        strip.map((e) => h(Entry, { key: `strip-${e.key}`, e: { ...e, gap: false } })))
       : null,
     h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror }),
     s.cont.length
