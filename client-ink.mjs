@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 // claude-jam ink client (v0.6, extended by v0.7 mirror / v0.10 tool collapse / v0.10b
-// newline keys / v0.10c onboarding). Reached through client.mjs; `--basic` picks
-// client-basic.mjs.
+// newline keys / v0.10c onboarding / v0.14 unified mirror-first view). Reached through
+// client.mjs; `--basic` picks client-basic.mjs.
+//
+// v0.14: this is the ONE surface — host and guests both run it, and the default view is the
+// live mirror of the real claude TUI, with the transcript one F2 away. The host additionally
+// gets F3 (raw keys into the TUI) and slash passthrough; the daemon enforces both, so this
+// file's `--host` flag decides what to render, never what is allowed.
 //
 // The socket and every piece of state live in `store`, plain JS — React owns none of it, so a
 // frame arriving before the first render just lands in the array and shows up when ink mounts.
 // ink only renders: <Static> for the transcript (append-only, so history is never re-drawn and
 // scrollback stays the terminal's own), then the live region (mirror frame / in-progress tool
-// lines), a status row, and the input row.
+// lines), the chat strip, a status row, and the input row.
 //
 // Visual rules are v0.5/v0.5.1 verbatim; what changed is who does the wrapping. A <Static>
 // item is laid out with no width constraint (ink renders it in its own container), so the
