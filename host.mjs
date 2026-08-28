@@ -674,6 +674,9 @@ function admit(name, ok) {
   pending.delete(sock);
   if (ok) {
     admitSocket(sock, p.name, false, isLoopback(p.ip));
+    // The mirror wish rode in on the hello that knocked; a client whose default view is the
+    // mirror (v0.14) must not have to ask again after being let in.
+    if (p.mirror) setMirror(sock, true);
     console.log(`[admit] ${p.name} accepted`);
   } else {
     send(sock, { t: 'knock', id: nextId++, ts: Date.now(), state: 'denied' });
@@ -749,7 +752,7 @@ function onSocket(ws, req) {
         ws.close(4408, 'knock expired');
         pumpPopups();
       }, KNOCK_TTL);
-      pending.set(ws, { name: c.name, ip, timer });
+      pending.set(ws, { name: c.name, ip, timer, mirror: m.mirror === true });
       send(ws, { t: 'knock', id: nextId++, ts: Date.now(), state: 'pending' });
       sendHosts({ t: 'knock', name: c.name, ip });
       console.log(`[knock] ${c.name} from ${ip} — /accept ${c.name} | /deny ${c.name}`);

@@ -62,7 +62,9 @@ const store = {
   typing: new Map(), // name -> last typing ms
   cont: [], // pending lines of a multi-line message (trailing `\`, Shift+Enter, Alt+Enter)
   session: null, // welcome's session block; .join only ever set for the host
-  mirror: false, // v0.7: showing the host's real screen instead of the transcript
+  // v0.14: the mirror of the real TUI is THE view — everyone, host included, opens on it.
+  // F2 (or /mirror) flips to the transcript, which is where the full history lives.
+  mirror: true,
   frame: null, // latest {rows, w, h} screen frame
   deferred: [], // entries that arrived while the mirror was up; flushed back on the way out
   tools: [], // v0.10: this turn's ⚙/⎿ lines, still collapsible
@@ -78,6 +80,7 @@ let backoff = 1000;
 let boot = null; // daemon boot id: event ids restart at 1 when it changes
 let lastTypingSent = 0;
 let seq = 0; // <Static> keys
+let toTranscript = 0; // >0: emit() writes to the transcript even in mirror view (connect block)
 let block = null; // current open message block (nextBlock in lib.mjs)
 let lastTurn = null; // turnKey of the last emitted block, so blocks get a blank line between
 let app = null; // ink instance, once mounted
@@ -145,7 +148,10 @@ function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.d
   // (the last few show as an overlay) and are flushed into the transcript, in order, when
   // the guest flips back. A NEW array, never a push: <Static> memoizes its slice on the
   // items reference, so an in-place mutation is silently dropped and the line never renders.
-  if (store.mirror) store.deferred = [...store.deferred, entry];
+  // `toTranscript` is the one exception: the connect block (welcome, onboarding, history
+  // replay) is printed once, above the mirror, or a first-time guest would open on a bare
+  // screen with the instructions hidden behind F2.
+  if (store.mirror && !toTranscript) store.deferred = [...store.deferred, entry];
   else store.entries = [...store.entries, entry];
   touch();
 }
@@ -240,10 +246,12 @@ function connect() {
   ws = new WebSocket(url);
   ws.addEventListener('open', () => {
     backoff = 1000;
-    ws.send(JSON.stringify({ t: 'hello', name: NAME, token: TOKEN, host: IS_HOST || undefined }));
-    // A reconnect while watching the mirror re-subscribes: the daemon knows nothing about
-    // the socket that died.
-    if (store.mirror) ws.send(JSON.stringify({ t: 'mirror', on: true }));
+    // `mirror` in the hello subscribes from the very first frame — including through a knock,
+    // where the welcome only comes when the host accepts. A reconnect repeats it: the daemon
+    // knows nothing about the socket that died.
+    ws.send(JSON.stringify({
+      t: 'hello', name: NAME, token: TOKEN, host: IS_HOST || undefined, mirror: store.mirror,
+    }));
   });
   ws.addEventListener('message', (m) => {
     let ev;
@@ -252,6 +260,7 @@ function connect() {
       store.session = ev.session;
       store.roster = ev.roster;
       store.labelW = labelWidth(ev.roster); // set before the replay, so history aligns
+      toTranscript++; // the whole connect block goes on screen, mirror view or not
       sys(`jam ${ev.session.id} — host ${ev.session.hostName}, cwd ${ev.session.cwd}`);
       if (IS_HOST) logJoin();
       logOnboarding(); // above the first messages; the replay comes after it
@@ -260,6 +269,7 @@ function connect() {
       if (ev.session?.boot !== boot) { boot = ev.session?.boot; seen.clear(); }
       for (const hist of ev.history || []) if (!seen.has(hist.id)) { seen.add(hist.id); render(hist); }
       sys(`here: ${store.roster.join(', ')}`);
+      toTranscript--;
       sendResize(); // host only: fit the claude window to this terminal
       return;
     }
@@ -293,8 +303,9 @@ function sendResize() {
   ws.send(JSON.stringify({ t: 'resize', w: process.stdout.columns || 80, h: process.stdout.rows || 24 }));
 }
 
-// v0.7: flip between the transcript and the host's real screen. F2 and `/mirror` are the
-// same call; leaving flushes everything that arrived while the mirror was up.
+// v0.7/v0.14: flip between the live TUI (the default view) and the transcript. F2 and
+// `/mirror` are the same call; going back to the transcript flushes everything that arrived
+// while the mirror was up, in order, so nothing is lost.
 function toggleMirror(on) {
   const next = on ?? !store.mirror;
   if (next === store.mirror) return;
@@ -302,11 +313,12 @@ function toggleMirror(on) {
   sendMsg({ t: 'mirror', on: next });
   if (next) {
     store.frame = null;
-    sys('mirror on — the host\'s real screen. F2 or /mirror goes back to the transcript.');
   } else {
     store.entries = [...store.entries, ...store.deferred];
     store.deferred = [];
-    sys('mirror off — back to the transcript.');
+    toTranscript++;
+    sys('transcript — F2 goes back to the live TUI');
+    toTranscript--;
   }
   touch();
 }
@@ -409,9 +421,13 @@ function StatusBar({ status, typing, spin, mirror }) {
   const now = Date.now();
   const who = [...typing.entries()].filter(([, at]) => now - at < 4000).map(([n]) => n);
   const right = who.length ? `${who.join(', ')} ${who.length > 1 ? 'are' : 'is'} typing…` : '';
+  // Which view you are in is always on screen: the mirror IS the default (v0.14), so the
+  // chip's job is to make the F2 alternate discoverable long after the onboarding block
+  // has scrolled away.
+  const view = mirror ? '⧉ live TUI' : '≡ transcript';
   return h(Box, { minHeight: 1 },
     h(Box, { flexGrow: 1 },
-      mirror ? h(Text, { color: C.dim }, '[mirror] ') : null,
+      h(Text, { color: C.dimmer }, `${view}  `),
       status.busy ? h(Text, { color: C.accent }, `${SPIN[spin]} claude is working…`) : null,
       status.busy && status.waiting ? h(Text, { color: C.dim }, ' · ') : null,
       status.waiting ? h(Text, { color: C.dim }, '⚠ waiting for host permission') : null),

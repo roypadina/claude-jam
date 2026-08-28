@@ -725,18 +725,21 @@ test('onboardingLines: the guest block is boxed, <=10 rows, names the reader, po
   const body = lines.join('\n');
   assert.match(body, /attributed \[Dana\]/);
   assert.match(body, /\/c <text>/);
-  assert.match(body, /F2 or \/mirror/);
+  assert.match(body, /F2 +→ transcript ⇄ live TUI/); // v0.14: the live TUI is the default view
   assert.match(body, /Shift\+Enter or \\/);
   assert.match(body, /just ask claude/);
+  assert.doesNotMatch(body, /F3/); // passthrough is host-only, never advertised to a guest
 });
 
-test('onboardingLines: the host block is trimmed but still lists the host surfaces', () => {
+test('onboardingLines: the host block leads with F2/F3 and slash passthrough', () => {
   const host = onboardingLines('Roy', true);
-  assert.ok(host.length < onboardingLines('Roy', false).length);
+  assert.ok(host.length <= 10, `${host.length} rows`);
   const body = host.join('\n');
+  assert.match(body, /attributed \[Roy\]/); // v0.14: attribution is symmetric
+  assert.match(body, /F2 +→ transcript ⇄ live TUI/);
+  assert.match(body, /F3 +→ type INTO the TUI/);
+  assert.match(body, /\/model \/compact/);
   assert.match(body, /\/help/);
-  assert.match(body, /\/mirror/);
-  assert.doesNotMatch(body, /attributed/); // the host types unprefixed
 });
 
 test('client: /help reprints the onboarding block', () => {

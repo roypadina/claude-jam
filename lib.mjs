@@ -553,15 +553,19 @@ export function extractKeys(chunk, seqs = KEY_SEQS) {
 export const ONBOARD_W = 54;
 export function onboardingLines(name = 'You', host = false) {
   const head = `── claude-jam ${'─'.repeat(Math.max(3, ONBOARD_W - 14))}`;
+  // v0.14: the screen above is the real Claude Code TUI, so both blocks lead with the view
+  // keys. The host's copy adds F3 — the one thing only the host can do.
   const rows = host
-    ? ['plain line        → claude (unprefixed: it knows it is you)',
+    ? [`plain line        → claude (attributed [${name}])`,
       '/c <text>         → humans only — claude never sees it',
-      'F2 or /mirror     → mirror of the real TUI · /tools tool log',
+      'F2                → transcript ⇄ live TUI (this screen)',
+      'F3                → type INTO the TUI (permissions, /model)',
+      '/model /compact…  → run any claude command in the TUI',
       '/help /who /join  → this block · participants · invite line']
     : [`plain line        → claude (attributed [${name}])`,
       '/c <text>         → humans only — claude never sees it',
+      'F2                → transcript ⇄ live TUI (this screen)',
       '/who /quit        → participants / leave',
-      'F2 or /mirror     → watch the REAL Claude Code screen',
       'Shift+Enter or \\  → multi-line message · /tools · /help',
       'Lost? just ask claude — e.g. "how does this jam work?",',
       '"how do I chat privately?" — it knows the full manual.'];
