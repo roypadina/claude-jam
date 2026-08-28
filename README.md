@@ -17,85 +17,83 @@ npm install
 ./jam host --name Roy --cwd ~/Code/some-project -- --model sonnet
 ```
 
-That creates a tmux session `jam` with the windows `daemon` (log), `claude` (the real TUI,
-alone in its window) and `chat` (your own jam client) and attaches you to `claude` — see
-[Layout](#layout-claude-alone-chat-next-door). Launched from inside
-[cmux](https://cmux.com), the chat client goes into a cmux split below your surface instead
-and there is no `chat` window. With no `--token` (as above) there is no token at all: friends
-knock and you accept them (see [Access](#access-token-or-knock)). With `--token abc123…` the
-launcher also prints a join line:
+That builds a **detached** tmux session `jam` — two windows, `daemon` (log) and `claude` (the
+real TUI, alone in its window) — and then runs **your own jam client full-screen in the
+terminal you launched from**. You watch the real Claude Code screen through the client's
+default view and type into the jam; nothing is attached to tmux at all. See
+[What the host sees](#what-the-host-sees).
+
+With no `--token` (as above) there is no token: friends knock and you accept them (see
+[Access](#access-token-or-knock)). With `--token abc123…` the launcher also prints a join line:
 
 ```
 node client.mjs ws://100.86.8.97:7777 --name <You> --token abc123…
 ```
 
-plus, when `ttyd` is installed, a second line for the read-only browser view:
+Send that to your friends. It scrolls above your client on launch, and your client prints it
+again on connect and any time you type `/join` — together with the browser-view URL (`--view`)
+and the tunnel pair (`--tunnel`) when those are on.
+
+Closing your client kills nothing: the daemon, the TUI and every guest stay exactly where they
+were, and the launcher prints how to rejoin, how to reach the raw TUI, and how to actually
+stop:
 
 ```
-view: http://jam:abc123…@100.86.8.97:7778
+client closed — the jam is still running.
+  rejoin:  node client.mjs ws://127.0.0.1:7777 --name Roy --token abc123… --host
+  raw TUI: tmux attach -t jam
+  stop:    tmux kill-session -t jam
 ```
-
-Send those to your friends. The launcher prints them right before `tmux attach` takes over
-the screen, so you'll likely miss that first copy — they're shown again in three other places:
-the `daemon` window's log (`Ctrl-b w` → `daemon`), your own client pane on connect (as
-`invite: …` / `view: …`), and any time with `/join` in your client. They also reprint once more
-when you detach from tmux.
-
-Closing the terminal kills nothing; `tmux attach -t jam` comes back. You can type straight
-into the claude TUI — that shows up on everyone's client as a message from you.
 
 If you normally run claude with `--dangerously-skip-permissions` through a shell alias, note
 that aliases do not apply here — pass it explicitly after `--` — and think twice before doing
 that in a session where friends can send instructions the agent treats as yours.
 
 Useful flags: `--port`, `--host`, `--tmux <name>` (run a second jam), `--token <value>`,
-`--no-attach` (set everything up but stay in your shell), `-- <extra claude args>`,
-`--resume <session-id>` (continue an existing session instead of starting fresh — wins
-over `--session-id` if both are given; see below), `--view-port` / `--view-ttyd <path>` /
-`--no-view` (live view, below), `--no-token-in-context` (keep the token out of claude's
-context, below), `--no-popup` (no in-TUI knock popup, below), `--split` (your client in a
-9-row pane under the TUI instead of its own window — viewers then see it, below),
-`--no-cmux` (never open a cmux split), `--config-dir <dir>` (run the TUI as another
-claude profile, below), `--tunnel` (two Cloudflare quick tunnels so a remote friend needs no
-Tailscale/LAN access at all, below).
+`--no-attach` (build everything but do not open your client), `-- <extra claude args>`,
+`--resume <session-id>` (continue an existing session instead of starting fresh — wins over
+`--session-id` if both are given; see below), `--view` (opt-in browser view; `--view-port` /
+`--view-ttyd <path>`, below), `--no-token-in-context` (keep the token out of claude's context,
+below), `--no-popup` (no in-TUI knock popup, below), `--config-dir <dir>` (run the TUI as
+another claude profile, below), `--tunnel` (two Cloudflare quick tunnels so a remote friend
+needs no Tailscale/LAN access at all, below).
+`--split`, `--no-split`, `--no-cmux` and `--no-view` are retired in v0.14 and accepted as
+no-ops, so an old command line still runs (the launcher says so).
 The `claude` binary is resolved as `--claude <path>` / `JAM_CLAUDE=<path>`, then
 `~/.local/bin/claude` if it exists, then plain `claude` from PATH — the resolved path is
 printed at launch. (PATH `claude` can be a wrapper shim from another terminal app.)
 
-### Layout: claude alone, chat next door
+### What the host sees
 
 ```
-┌ jam:claude ───────────────────────────────────────────────┐   ┌ jam:chat ───────────────┐
-│ the real claude TUI — the ONLY pane in this window        │   │ [Dana]   rerun the tests?│
-│ …                                                         │   │                          │
-│                                                           │   │          ⚙ 3 tools (Bash…│
-│                                                           │   │ [Claude] All 71 pass.    │
-│                                                           │   │ Roy ❯                    │
-└───────────────────────────────────────────────────────────┘   └──────────────────────────┘
-      what a ttyd viewer sees, and nothing else                  Ctrl-b n toggles
+┌ your terminal ─────────────────────────────────────────────┐   ┌ tmux session `jam` ──────┐
+│  ▐▛███▛█   Claude Code v2.1.251                            │   │ daemon  (log)            │
+│ ▝▜██████▀  Haiku 4.5                                       │   │ claude  (the real TUI)   │
+│ ❯ [Dana]: rerun the tests                                  │   │                          │
+│ ⏺ All 71 pass.                                             │   │ detached — nothing is     │
+│ ──────────────────────────────────────────────────────     │   │ attached to it            │
+│ ❯                                                          │   └──────────────────────────┘
+│ [Dana]  [humans-only] nice                                 │     tmux attach -t jam
+│ ⧉ live TUI                       Dana is typing…           │     for the raw TUI
+│ Roy ❯                                                      │
+└────────────────────────────────────────────────────────────┘
+   the mirror of the claude window · chat strip · status · input
 ```
 
-The `claude` window holds exactly one pane. That is the whole point: ttyd viewers pin that
-window, so the browser view is the Claude Code screen and nothing else — no window list, no
-knock badge, no host chat. Your own jam client goes:
+One surface, the same one guests get: the live TUI fills the terminal, the chat strip under it
+carries what that screen cannot show (humans-only chat, knocks, system lines, errors), then the
+status row and your input row. **F2** swaps to the transcript and back; **F3** hands your
+keyboard to the TUI (below).
 
-- **into a cmux split** below the surface you launched from, when the launcher is running
-  inside [cmux](https://cmux.com) (`CMUX_SURFACE_ID` is set and `cmux identify` answers). The
-  launcher runs `cmux new-split down` and types the client command into the new surface, then
-  attaches your main surface to the `claude` window. Any cmux failure falls back to ↓, and
-  `--no-cmux` skips the probe entirely.
-- **into a tmux window `chat`** otherwise. `Ctrl-b n` toggles between `claude` and `chat`
-  (`Ctrl-b w` lists all three).
-- **into a 9-row pane under the TUI** with `--split` — the pre-v0.9 layout. `Ctrl-b o` jumps
-  between the panes, `Ctrl-b z` zooms the TUI to full height and back, and the pane is pinned
-  to 9 rows by three session-scoped tmux hooks (`client-attached`, `client-detached`,
-  `client-resized`) because tmux otherwise rescales panes proportionally and the first client
-  attaching at a different size would squeeze it to four rows. Viewers see this strip: they
-  pin the window, and the strip is in it. `/c` still stays invisible to claude.
+The `claude` window holds exactly one pane and nothing else ever moves into it — that is what
+keeps the mirror (and an optional browser viewer) free of host chrome. The whole v0.9 host-chat
+machinery — the 9-row `--split` pane, the cmux split, the `chat` window — is gone with it.
 
-Everything that drives the TUI (paste, Enter, the pane scan) targets the claude **pane** —
-which is the window itself in the default layout and `claude.{top}` under `--split` — so it
-keeps working wherever your cursor is.
+Because nothing attaches to tmux, the window size is jam's to choose: the launcher creates the
+session at your terminal's size minus the client's five chrome rows, your client re-sends its
+size whenever the terminal resizes, and the daemon puts that size back if somebody attaches,
+takes the window with them and leaves again. So the mirror fills your screen exactly, with
+nothing cropped.
 
 ### Resume an ongoing session
 
@@ -145,17 +143,20 @@ participants can never share a name (attribution is by name, so `Dana` is refuse
 "host only". Your own client is trusted because the launcher spawns it on loopback; a `host`
 claim from any other address is treated as an ordinary friend.
 
-### Approving a knock without leaving the TUI
+### Approving a knock (and a command request) from the TUI
 
-You do not even have to look at the chat pane to let someone in. On every knock the daemon
-also opens a small `tmux display-popup` right over the claude window (over both panes — a
-popup is drawn per client, not per pane):
+Your own client shows every knock, so this is for the case where you are attached to tmux
+instead. On every knock — and on every guest command request — the daemon opens a small
+`tmux display-popup` over the claude window, on the clients attached to the jam session:
 
 ```
   ⚑ Dana wants to join (100.86.8.97)
 
   [a]ccept · [d]eny · [i]gnore/Esc
 ```
+
+A command request renders the same way — `⌘ Dana wants to run /compact` with `[a]llow` — and
+grants that one command only, never standing approval.
 
 One key, no Enter: `a` admits her exactly as `/accept Dana` would, `d` denies her (socket
 closed 4403). Anything else — `i`, Esc, Ctrl-C — closes the popup and leaves the knock
@@ -170,21 +171,25 @@ started and puts it back the moment the last knock is answered (and again when i
 Your global tmux config is never written to.
 
 Popups appear only on clients attached to the jam session itself — ttyd viewers sit on
-grouped sessions and never see them, and with nobody attached at all the daemon logs
-`[knock] no client attached — no popup for Dana` and moves on (your clients still got the
-knock). Knocks queue: one popup at a time, the next opening when the previous closes.
-`--no-popup` turns off both the popup and the status line.
+grouped sessions and never see them, and in the normal v0.14 case (you in your client, tmux
+detached) there is no attached client at all: the daemon logs `[knock] no client attached — no
+popup for Dana` and moves on, because your client already has the knock. Requests queue: one
+popup at a time, the next opening when the previous closes. `--no-popup` turns off both the
+popup and the status line.
 
-## Live view (ttyd)
+## Live view in a browser (`--view`, opt-in)
 
-If `ttyd` is installed (`brew install ttyd`, probed at `/opt/homebrew/bin/ttyd` or wherever
-`--view-ttyd <path>` points), the daemon also serves a **read-only** browser view of the real
-claude TUI on `--view-port` (default: your port + 1). No ttyd, or `--no-view`, and the daemon
-just logs `install ttyd for the live view (brew install ttyd)` — nothing else changes.
+Every participant already watches the real TUI in their own client, so the browser view is a
+nice-to-have now: **`--view`** turns it on (needs `ttyd` — `brew install ttyd`, probed at
+`/opt/homebrew/bin/ttyd` or wherever `--view-ttyd <path>` points). Ask for it without ttyd
+installed and the launcher says so instead of quietly running without it; `--no-view` is
+accepted and is what happens anyway.
 
 ```
 view: http://jam:abc123…@100.86.8.97:7778
 ```
+
+Append `?fontSize=16` (a ttyd client option) if the TUI comes out too small in the tab.
 
 The password is the friend token while one is set (so a friend needs no second secret), and
 a generated 16-char key while there is none. Every `/token new|set|off` rotates it — ttyd
@@ -195,12 +200,10 @@ that moment on.
 Each browser connection gets a tmux session of its own, grouped with the jam session (the
 same live windows) but pinned to the `claude` window with `destroy-unattached on` **and
 `status off`**: viewers never move each other's or your screen, they see no tmux chrome at
-all (window list, `⚑ N waiting` badge — all of that is on your session, not theirs), and
-their session disappears when they close the tab. Read-only is ttyd's default (1.7+), and
-nothing in the view can type into the pane.
-
-Guests who would rather stay in the terminal press **F2** in their jam client for the same
-picture — see [the mirror](#f2-the-mirror-of-the-real-tui).
+all, and their session disappears when they close the tab. Read-only is ttyd's default (1.7+),
+and nothing in the view can type into the pane. A viewer whose browser is bigger than the
+window gets blank padding rather than tmux's `·` fill (the window carries
+`fill-character ' '`), and the daemon puts your own size back once they are gone.
 
 The ttyd child dies with the daemon (SIGINT/SIGTERM/SIGHUP and `tmux kill-session` are all
 handled). A `kill -9` of the daemon is the one case that leaves it orphaned — the pid is
@@ -217,8 +220,8 @@ tunnels from the daemon, tracked by pid exactly like the ttyd child:
 ```
 
 One tunnels the WS/HTTP port (`cloudflared tunnel --url http://localhost:7777`), the other
-the view port (`--url http://localhost:7778`, skipped when there is no view server to tunnel
-— no ttyd, or `--no-view`). Each prints a boxed banner with a
+the view port (`--url http://localhost:7778`, skipped when there is no view server to tunnel —
+i.e. unless `--view` is on and ttyd was found). Each prints a boxed banner with a
 `https://<random-words>.trycloudflare.com` URL once it connects (typically a few seconds);
 the daemon parses that line out of `cloudflared`'s own stderr and derives:
 
@@ -233,12 +236,16 @@ instead of `ws://`. These are what you hand to a friend who is not on your Tails
 — tunnel lines **first**, the LAN `invite:`/`view:` lines below — every time a tunnel
 resolves, dies, or `/token` changes. Nothing prints for a tunnel that has not resolved yet
 (or, for the join line, while no token is set — same "nothing to hand out while knocking"
-rule as the LAN line). The same values also ride along on `token.json` (as `tunnelJoin` /
-`tunnelView` — hence claude's own context, below), a host client's `welcome`, and the
-`{t:'token'}` frame — the client's own terminal UI does not render them (v0 ceiling, by
-design: `--tunnel` needed no client changes because `wss://` already just works for joining),
-so treat the daemon log / `token.json` / asking claude as the authoritative sources for these
-two lines specifically, not a client's `/join`.
+rule as the LAN line). The same values ride along on `token.json` (as `tunnelJoin` / `tunnelView` — hence claude's
+own context, below), a host client's `welcome` and the `{t:'token'}` frame, and **your client
+prints them** on connect and on `/join`, tunnel pair first:
+
+```
+* tunnel invite: node client.mjs wss://<random-words>.trycloudflare.com --name <You> --token abc123…
+* tunnel view: https://jam:abc123…@<random-words-2>.trycloudflare.com
+* invite: node client.mjs ws://100.86.8.97:7805 --name <You> --token abc123…
+* view: http://jam:abc123…@100.86.8.97:7806
+```
 
 `/token new|set|off` rotates the *token/key embedded in the URL* only — the tunnel hostnames
 themselves never change, so a friend who bookmarked a tunnel URL keeps reaching the right
@@ -309,35 +316,117 @@ node client.mjs ws://<host-ip>:7777 --name Dana
 node client.mjs ws://<host-ip>:7777 --name Dana --token abc123…
 ```
 
-On connect (and on `/help`) the client prints a short dim onboarding block — what a plain
-line does, `/c`, `/who`, `/quit`, F2, multi-line, and the reminder that claude itself knows
-the whole manual and can be asked "how does this jam work?". The host gets a trimmed version.
+You land on the **live TUI** — the host's real Claude Code screen, streamed — with a short dim
+onboarding block printed above it (what a plain line does, `/c`, `/who`, `/quit`, F2,
+multi-line, and the reminder that claude itself knows the whole manual and can be asked "how
+does this jam work?"). `/help` reprints it.
 
-- A plain line goes to the agent, prefixed as `[Dana]: …` so attribution survives.
+- A plain line goes to the agent, prefixed as `[Dana]: …` so attribution survives. The host's
+  messages are prefixed too — attribution is symmetric.
 - `/c <text>` is human-only chat: other humans see it, the agent never does.
-- `/who` lists who is connected, `/help` reprints the onboarding block, `/quit` leaves. Any
-  other slash command is refused — `/compact`, `/model` and friends only work in the host's
-  TUI. `/join`, `/token`, `/accept` and `/deny` are host only — a friend running them gets
-  "host only", never the token.
+- `/who` lists who is connected, `/help` reprints the onboarding block, `/quit` leaves (the
+  session keeps running without you).
+- **F2** swaps between the live TUI and the transcript, `/mirror` does the same.
+- Any other `/command` is one of claude's — it goes to the host for approval, see
+  [claude's own commands](#claudes-own-commands-host-passthrough-and-guest-requests).
+  `/join`, `/token`, `/accept`, `/deny`, `/allow-cmd` and `/deny-cmd` are host-only — a friend
+  running them gets "host only", never the token. **F3** is host-only too.
 - **Multi-line:** `Shift+Enter` (kitty/CSI-u `ESC[13;2u` or xterm's `ESC[27;2;13~`) and
   `Option/Alt+Enter` (`ESC CR`) insert a newline; plain Enter sends. A trailing `\` does the
   same in any terminal. Pending lines show dim above the input row and the prompt shows
   `Dana … ❯`.
 - **`/tools`** reprints the last completed turn's full tool log; `/tools on` stops collapsing
   tool lines, `/tools off` (default) collapses them — see below.
-- The client has three regions, bottom-up: the input row (`Dana ❯ …`), a status row of its own,
-  and the transcript above. The status row carries `✻ claude is working…` and `⚠ waiting for
-  host permission` on the left and `Dana is typing…` (or `Dana, Eli are typing…`) on the right,
-  and is blank when there is nothing to say. Nothing status-ish ever lands in the input row.
+- The client has four regions, bottom-up: the input row (`Dana ❯ …`), a status row of its own,
+  the 3-row chat strip, and the live TUI (or, after F2, the transcript). The status row carries
+  the view chip (`⧉ live TUI` / `≡ transcript`), `✻ claude is working…` and
+  `⚠ waiting for permission` on the left and `Dana is typing…` (or `Dana, Eli are typing…`) on
+  the right. Nothing status-ish ever lands in the input row.
 - `--basic` swaps the UI for the old readline renderer — one prompt row with the status text
   inside it, no `ink`/`react` needed. For a terminal ink misbehaves in; it is also picked
-  automatically when stdin is not a tty (a pipe, a heredoc), since ink needs raw mode. It has
-  the onboarding block and `/help`, and it keeps every tool line inline; the mirror, tool
-  collapse and the Shift/Alt+Enter keys need a live region and a filtered stdin, so they are
-  ink-only — `/mirror` and `/tools` say so, and the block's own footer repeats it. Trailing
-  `\` is the multi-line mechanism there.
+  automatically when stdin is not a tty (a pipe, a heredoc), since ink needs raw mode. It is
+  **transcript-only**: no live TUI view, no F2/F3, no Shift+Enter, no tool collapse (every
+  `⚙`/`⎿` line goes straight to the log). The onboarding block's footer says so.
 
-### How the client reads
+## The two views
+
+The client is one pane with two views, and F2 (or `/mirror`) swaps them:
+
+| | live TUI (default) | transcript (F2) |
+| --- | --- | --- |
+| what fills the pane | the host's real claude pane, actual cells and colors, ≤4 frames/s | every jam message, reply and tool line, append-only |
+| under it | 3-row chat strip: humans-only chat, knocks, system lines, errors | in-progress tool lines (last four `⚙`/`⎿`) |
+| what it is for | watching claude work exactly as the host sees it | reading back what was said, and by whom |
+
+The daemon runs `tmux capture-pane -e` for the live view: only for clients that asked, only
+when the screen changed, at most four frames a second, and never stored in history — a mirror
+is a live view, not a log. Lines that arrive while you are on the live TUI wait for you: the
+last three chat/system ones show in the strip, and flipping to the transcript flushes all of
+them in order, so nothing is lost. A guest whose terminal is narrower than the host's window
+gets the rows cropped at the right, and a shorter terminal keeps the **bottom** of the window
+(where a TUI's live part is); a dim `— mirror: host pane is 142 cols wide, yours is 110 · 23
+row(s) above cut off` line says exactly what was dropped.
+
+Typing always goes through the jam protocol — the live view is read-only for everybody. The
+one exception is the host's F3.
+
+## F3: the host's keyboard, straight into the TUI
+
+Permission prompts, the trust dialog, an interactive `/model` or `/compact` picker — some
+things want a keyboard on the real TUI. The host presses **F3**:
+
+- every key from then on is forwarded raw to the claude pane (base64 on the wire, typed in with
+  `send-keys`), the view switches to the live TUI if it was not there, the status row reads
+  `⌨ TUI control — F3 returns`, and the input row is replaced by the same hint;
+- Ctrl-C goes to claude too — that is the point;
+- F3 again gives the keyboard back to the jam.
+
+When claude asks for permission, the status row says `⚠ waiting for permission — F3 to answer`
+(guests are told "the host answers" instead).
+
+**Guests never get it.** The daemon accepts `{t:'key'}` frames only from a socket that is both
+`--host` and on loopback — the client the launcher itself spawned — and refuses everything else
+with `F3 TUI control is the host's, on loopback only`. The frames are size-capped, encoded as
+tmux `send-keys -H` hex (ASCII) or one `-l` literal run (anything above 0x7f), and never touch
+a shell. This is the one path that is deliberately *not* sanitized: answering a prompt means
+sending exactly the bytes you pressed.
+
+## claude's own commands (host passthrough and guest requests)
+
+jam owns `/c` `/who` `/help` `/quit` `/mirror` `/tools` `/join` `/accept` `/deny` `/token`
+`/allow-cmd` `/deny-cmd`. **Everything else that starts with a slash belongs to claude.**
+
+From the **host's** client it is typed into the real TUI verbatim — `send-keys -l` then Enter,
+no `[Name]:` prefix — so claude's own command palette runs it. `/model`, `/compact`, `/mcp`,
+`/status`, a plugin's `/foo:bar`: all of them work, any picker they open renders in everyone's
+live view, and F3 drives it. Everybody sees `* Roy ran /model in the TUI`.
+
+From a **guest** it is a request:
+
+```
+guest:  /compact — sent to the host for approval
+host:   ⌘ Dana wants to run /compact — /allow-cmd Dana · /allow-cmd Dana always · /deny-cmd Dana
+```
+
+| host answers | effect |
+| --- | --- |
+| `/allow-cmd Dana` | runs it once; the next command asks again |
+| `/allow-cmd Dana always` | runs it, and that guest's later commands run without asking, for this jam only (daemon memory, gone on restart) |
+| `/allow-cmd` / `/allow-cmd always` | same, for the only request waiting (errors if several are) |
+| `/deny-cmd Dana` | refused; the guest is told who denied it |
+| nothing | the request expires after 2 minutes |
+
+Default is deny, nothing is ever auto-approved, and a guest can have only one request in
+flight. **`/exit`, `/clear` and `/resume` are refused outright** — they end or wipe the session
+for everyone, so there is no approval path at all and standing approval never covers them
+(server-side list, re-checked on every command). `/exit` and `/quit` typed in a client mean
+"leave my client"; ending claude itself is `tmux attach -t jam` and typing it there.
+
+Before anything reaches the pane the command is validated: one `/name` of letters, digits and
+`:._-`, optional single-line arguments, control characters stripped, length capped — so a
+newline cannot smuggle a second line in behind it.
+
+## How the client reads
 
 Every line is `[Label]` padded to one column, then either a glyph or two blank spaces where
 one would go, then the text. Speech (a human talking to claude, and claude's own replies) has
@@ -352,7 +441,8 @@ no glyph at all — `[Name]  text`. The glyph column survives only for the rest:
 | `⚙ 4 tools (Bash ×3, Read ×1)` | a finished turn's tool run, folded into one line (`/tools` expands it) |
 | human-only `/c` chat | `[Name]  [humans-only] text`, no glyph — label, prefix and text all in one magenta no other line uses; claude never sees these |
 | `⚑` | somebody knocking |
-| `*` | system: joins, leaves, invite lines, the welcome |
+| `⌘` | a guest asking to run one of claude's commands (host clients only) |
+| `*` | system: joins, leaves, invite lines, who ran what in the TUI, the welcome |
 | `!` | an error, in red |
 
 The label column is as wide as the longest name in the room (`Claude` always counted) and is
@@ -366,9 +456,12 @@ blank. While claude is working the status row carries a `✻ ✼ ✽` spinner �
 only while busy, and unref'd, so an idle client is completely quiet.
 
 The transcript is append-only (ink's `<Static>`): a line is drawn once and then belongs to the
-terminal's own scrollback, so scrolling back is the normal `Ctrl-b PgUp` / mouse wheel and
-nothing is ever redrawn under you. Only the live region — mirror frame, in-progress tool
-lines, status row, pending input lines, input row — is redrawn.
+terminal's own scrollback, so scrolling back is the normal mouse wheel / `Ctrl-b PgUp` and
+nothing is ever redrawn under you. Only the live region — mirror frame, chat strip,
+in-progress tool lines, status row, pending input lines, input row — is redrawn. The connect
+block (welcome, invite lines, onboarding, history replay) is printed into the transcript even
+though the live TUI is the opening view, so a first-time guest is not staring at a bare screen
+with the instructions hidden behind a keypress.
 
 ### Tool collapse
 
@@ -385,24 +478,6 @@ A turn with a single tool call keeps the old inline `⚙` + `⎿` pair — colla
 a summary of one line would be silly. `/tools` reprints the last completed turn's full log
 into the transcript, `/tools on` switches to always-expanded (every `⚙`/`⎿` goes straight to
 the transcript, as before v0.10) and `/tools off` collapses again.
-
-### F2: the mirror of the real TUI
-
-`F2` (or `/mirror`) flips the client between the transcript and a live mirror of the host's
-claude pane: the daemon runs `tmux capture-pane -e` and streams the actual cells, colors and
-all. Only clients that asked for it get frames, only when the screen changed, and at most four
-frames a second. Frames are never stored in history — a mirror is a live view, not a log.
-
-While the mirror is up, chat/knock/system lines are held back and the last three show as a
-strip above the status row (which also carries a `[mirror]` marker); flipping back with F2
-flushes all of them into the transcript in order, so nothing is lost. A guest whose terminal
-is narrower than the host's pane gets the rows cropped at the right, and a shorter terminal
-keeps the **bottom** of the pane (where a TUI's live part is); a dim `— mirror: host pane is
-142 cols wide, yours is 110 · 23 row(s) above cut off` line says exactly what was dropped.
-
-The mirror is view-only sugar: typing still goes through the jam protocol (`say`/`chat`/
-commands), so nothing a guest presses reaches the host's TUI. `--basic` has no mirror (it only
-ever appends lines) and answers `/mirror` by saying so.
 
 ## Tailscale
 
@@ -424,6 +499,15 @@ come from `Stop` / `Notification` hooks in a generated `settings.json` passed wi
 so nothing global is touched. Those hooks authenticate with `JAM_HOOK_SECRET` — an internal
 secret generated per run and handed to `claude` in its env, never to a friend — so `/token
 new|off` cannot break the turn-status round trip. The hook endpoint is loopback-only on top.
+
+Three more paths reach the pane, all of them typed in by the daemon and never through a shell:
+a slash command (`send-keys -l` + Enter, host+loopback, or a guest's after approval), F3 raw
+keys (`send-keys -H` hex / `-l` literal, host+loopback only, size-capped) and the window resize
+the host's client asks for (`resize-window`). The live view reads it back with
+`capture-pane -e`. Everything a guest can send is either sanitized (messages, chat) or gated
+(commands, keys, resize) — the wire frames are `say`/`chat`/`typing`/`mirror`/`slash`/`cmd`/
+`key`/`resize`/`admit`/`token` in, and `welcome`/`roster`/`say`/`chat`/`typing`/`agent`/
+`status`/`screen`/`knock`/`cmdreq`/`token`/`sys`/`error` out.
 
 ## Testing
 
