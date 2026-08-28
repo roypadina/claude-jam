@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, buildCmuxClientCmd, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -25,11 +25,10 @@ function parseArgs(argv) {
     // Value-less flags need naming here, or the generic branch below eats the next argument.
     else if (a === '--no-view') o.noView = true;
     else if (a === '--no-popup') o.noPopup = true;
-    // v0.9: the split is opt-IN now (a viewer must see nothing but claude). `--no-split`
-    // is what that already is, so it stays accepted and does nothing.
-    else if (a === '--split') o.split = true;
-    else if (a === '--no-split') o.split = false;
-    else if (a === '--no-cmux') o.noCmux = true;
+    // v0.14: the host is in the client like everybody else, so the old host-chat layouts
+    // (--split pane, cmux split, `chat` window) are gone. The flags stay accepted and do
+    // nothing, so an old command line still runs.
+    else if (a === '--split' || a === '--no-split' || a === '--no-cmux') o.retiredLayout = a;
     else if (a === '--no-token-in-context') o.noTokenInContext = true;
     else if (a === '--tunnel') o.tunnel = true;
     else if (a.startsWith('--')) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
@@ -59,7 +58,6 @@ if (opts.resume) {
 }
 opts.sessionId ||= randomUUID();
 opts.claude ||= resolveClaude(process.env, fs.existsSync); // --claude wins, then JAM_CLAUDE
-opts.cmux ||= process.env.JAM_CMUX || 'cmux'; // v0.9 chat strip, probed only inside cmux
 // Which claude account/profile the TUI runs as. null = whatever claude defaults to.
 opts.configDir = resolveConfigDir(opts.configDir, process.env);
 if (!validName(opts.name)) { console.error(`bad --name: ${opts.name}`); process.exit(2); }
@@ -71,15 +69,10 @@ if (opts.tunnel && spawnSync('cloudflared', ['--version'], { encoding: 'utf8' })
 }
 
 // Everything that drives the real TUI — capture-pane, paste-buffer, send-keys — targets the
-// claude PANE, not the window: with `--split` the claude window holds the TUI on top and the
-// host's own client in a 9-row pane below, so a window target would follow the host's focus
-// into the client pane. Named, never indexed, so a `base-index`/`pane-base-index` of 1 is fine.
-// Default (v0.9): the window has exactly one pane, so pane and window are the same thing —
-// and a ttyd viewer pinned to the window sees nothing but Claude Code.
-const SPLIT = !!opts.split;
-const CLAUDE_PANE = claudeTarget(opts.tmux, SPLIT);
-const CLAUDE_WINDOW = `${opts.tmux}:claude`;
-const CLIENT_ROWS = 9; // the host's own client pane under the TUI, `--split` only
+// claude window, which holds exactly one pane: the TUI. Named, never indexed, so a host with
+// `base-index`/`pane-base-index` of 1 is fine. v0.14: nothing else ever lives in that window,
+// so pane and window are the same thing — the mirror, and a ttyd viewer, see only Claude Code.
+const CLAUDE_PANE = claudeTarget(opts.tmux);
 const BOOT = randomUUID(); // clients drop their id-dedupe set when this changes
 // The live token, `/token new|set|off` away from the startup value. null = knock-only.
 let currentToken = opts.token;
@@ -92,29 +85,6 @@ const ttyd = opts.noView ? null : resolveTtyd(opts.viewTtyd, fs.existsSync);
 let viewKey = ttyd ? resolveViewKey(currentToken, () => opts.viewKey || newToken()) : null;
 
 // ---------------------------------------------------------------- launcher ----
-// v0.9: the host's chat strip in a cmux split, so no tmux surface (and therefore no ttyd
-// viewer) can see it. Only when the launcher itself runs inside a cmux terminal — cmux
-// exports CMUX_SURFACE_ID into every one of them — and the app answers `identify`. Every
-// failure returns false and the caller falls back to a tmux `chat` window; a host who is
-// not in cmux never pays for the probe. `--no-cmux` opts out.
-function cmuxSplitClient(argv) {
-  if (opts.noCmux || !process.env.CMUX_SURFACE_ID) return false;
-  const cmux = (...a) => spawnSync(opts.cmux, a, { encoding: 'utf8', timeout: 10000 });
-  if (cmux('identify', '--json').status !== 0) return false;
-  const made = cmux('--json', 'new-split', 'down', '--surface', process.env.CMUX_SURFACE_ID);
-  if (made.status !== 0) { console.log(`cmux new-split failed: ${(made.stderr || '').trim()}`); return false; }
-  let surface = null;
-  try { const j = JSON.parse(made.stdout); surface = j.surface_ref || j.surface || j.surface_id; } catch { /* not JSON */ }
-  if (!surface) { console.log(`cmux new-split gave no surface ref: ${(made.stdout || '').trim().slice(0, 120)}`); return false; }
-  // cmux `send` types the line into the new shell, so it is a command line, not argv.
-  const sent = cmux('send', '--surface', String(surface), '--', buildCmuxClientCmd({
-    node: argv[0], script: argv[1], url: argv[2], name: opts.name, token: opts.token,
-  }));
-  if (sent.status !== 0) { console.log(`cmux send failed: ${(sent.stderr || '').trim()}`); return false; }
-  console.log(`cmux: host client in ${surface} (split below this surface)`);
-  return true;
-}
-
 function launch() {
   if (tmux('has-session', '-t', opts.tmux).status === 0) {
     console.error(`tmux session "${opts.tmux}" already exists. Attach with: tmux attach -t ${opts.tmux}\n` +
@@ -140,7 +110,6 @@ function launch() {
     ...(opts.noTokenInContext ? ['--no-token-in-context'] : []),
     ...(opts.noPopup ? ['--no-popup'] : []),
     ...(opts.tunnel ? ['--tunnel'] : []),
-    ...(SPLIT ? ['--split'] : []), // decides which tmux target is the claude TUI
     ...(opts.configDir ? ['--config-dir', opts.configDir] : []), // daemon globs that profile's transcripts too
     ...(opts.resume ? ['--resume', opts.resume] : [])]; // daemon needs this to skip pre-existing JSONL history
 
@@ -162,52 +131,32 @@ function launch() {
     ...env, opts.claude,
     ...(opts.resume ? ['--resume', opts.resume] : ['--session-id', opts.sessionId]),
     '--settings', path.join(opts.state, 'settings.json'), ...opts.extra));
-  // The host's own client. v0.9: the claude window keeps exactly one pane, so a ttyd viewer
-  // pinned to it sees nothing but Claude Code — the chat strip lives somewhere the viewers
-  // cannot reach. In cmux: a split below the launcher's own surface. Otherwise: a `chat`
-  // window of its own. `--split` puts it back in a 9-row pane under the TUI (v0.5), and
-  // then viewers do see it.
-  const client = [process.execPath, path.join(HERE, 'client.mjs'), `ws://127.0.0.1:${opts.port}`,
-    '--name', opts.name, ...(opts.token ? ['--token', opts.token] : []), '--host'];
-  let chatWhere;
-  let chatWindow = false; // only the tmux fallback adds a third window
-  if (SPLIT) {
-    const split = tmux('split-window', '-d', '-v', '-l', String(CLIENT_ROWS),
-      '-P', '-F', '#{pane_id}', '-t', CLAUDE_WINDOW, '-c', opts.cwd, ...client);
-    must(split);
-    // tmux scales panes proportionally when the window resizes, so the first client that
-    // attaches at a different size squeezes the chat pane down to four rows. Session-scoped
-    // hooks (never the global config) put it back whenever a client comes, goes or resizes.
-    // The pane id comes from tmux itself and never moves, unlike an index.
-    const pane = (split.stdout || '').trim();
-    if (pane) {
-      for (const ev of ['client-attached', 'client-detached', 'client-resized']) {
-        tmux('set-hook', '-t', opts.tmux, ev, `resize-pane -t "${pane}" -y ${CLIENT_ROWS}`);
-      }
-    }
-    chatWhere = 'split: TUI on top, your client below; Ctrl-b o swaps panes';
-  } else if (cmuxSplitClient(client)) {
-    chatWhere = 'your client is the cmux split below this surface';
-  } else {
-    must(tmux('new-window', '-d', '-t', opts.tmux, '-c', opts.cwd, '-n', 'chat', ...client));
-    chatWhere = 'window `chat` — Ctrl-b n toggles chat';
-    chatWindow = true;
-  }
-  tmux('select-window', '-t', CLAUDE_WINDOW);
-  if (SPLIT) tmux('select-pane', '-t', CLAUDE_PANE);
-
+  if (opts.retiredLayout) console.log(`${opts.retiredLayout} is retired in v0.14 — the host uses the same client as everyone (ignored)`);
   console.log(`\nclaude-jam up. session ${opts.sessionId}\n` +
-    `  tmux: ${opts.tmux} (windows: daemon, claude${chatWindow ? ', chat' : ''}) — ${chatWhere}`);
+    `  tmux: ${opts.tmux} (windows: daemon, claude) — detached; \`tmux attach -t ${opts.tmux}\` for the raw TUI`);
   // The tunnel dials out from the daemon process (a separate node process from this one), so
   // it has not resolved anything yet by the time this print runs — the daemon window logs the
   // URLs a few seconds later, once cloudflared reports them.
-  if (opts.tunnel) console.log('cloudflared tunnel connecting — see the daemon window (Ctrl-b w) for the join/view URLs once it is up');
+  if (opts.tunnel) console.log('cloudflared tunnel connecting — the join/view URLs land in your client (/join) once it is up');
   printJoin();
   if (opts.noAttach) return;
-  spawnSync(TMUX, ['attach', '-t', opts.tmux], { stdio: 'inherit' });
-  // Attach just returned control to the shell (the host detached) — the join line that
-  // scrolled off before is worth reprinting now that it's visible again.
-  printJoin();
+
+  // v0.14: nothing attaches to tmux. The host runs the same single-pane client as every
+  // guest, full-screen in this terminal, and watches the real TUI through its mirror view —
+  // so there is one surface to learn, and no host chrome for a viewer to see. Loopback +
+  // `--host` is what makes this client trusted (F3 key passthrough, slash commands, /token).
+  const client = spawnSync(process.execPath,
+    [path.join(HERE, 'client.mjs'), `ws://127.0.0.1:${opts.port}`,
+      '--name', opts.name, ...(opts.token ? ['--token', opts.token] : []), '--host'],
+    { stdio: 'inherit' });
+  // The client is just a window onto the session: closing it leaves the daemon, the TUI and
+  // every guest exactly where they were, so say how to come back and how to actually stop.
+  console.log(`\nclient closed — the jam is still running.\n` +
+    `  rejoin:  node client.mjs ws://127.0.0.1:${opts.port} --name ${opts.name}` +
+    `${currentToken ? ` --token ${currentToken}` : ''} --host\n` +
+    `  raw TUI: tmux attach -t ${opts.tmux}\n` +
+    `  stop:    tmux kill-session -t ${opts.tmux}\n`);
+  if (client.status) process.exitCode = client.status;
 }
 
 let sessionCreated = false;
