@@ -237,6 +237,17 @@ export function parseClientLine(line) {
     }
     return { kind: 'error', text: 'usage: /token new | set <value> | off' };
   }
+  // v0.14: the host's answer to a guest's `/command` request. `always` (last word, with or
+  // without a name) grants that guest standing approval for the rest of this jam; no name
+  // means the only guest currently waiting.
+  if (t === '/allow-cmd' || t.startsWith('/allow-cmd ')) {
+    const words = t.slice(10).trim().split(/\s+/).filter(Boolean);
+    const always = words.at(-1)?.toLowerCase() === 'always';
+    return { kind: 'cmd', op: 'allow', name: (always ? words.slice(0, -1) : words).join(' ') || null, always };
+  }
+  if (t === '/deny-cmd' || t.startsWith('/deny-cmd ')) {
+    return { kind: 'cmd', op: 'deny', name: t.slice(9).trim() || null, always: false };
+  }
   // v0.7: flip between the transcript and a live mirror of the host's real TUI. Same
   // action as F2; the basic client has no mirror and says so.
   if (t === '/mirror') return { kind: 'mirror' };
@@ -254,8 +265,62 @@ export function parseClientLine(line) {
     const text = t.slice(2).trim();
     return text ? { kind: 'chat', text } : { kind: 'error', text: 'usage: /c <message>' };
   }
-  if (t.startsWith('/')) return { kind: 'error', text: 'slash commands run only in the host TUI' };
+  // v0.14: anything else that looks like a command belongs to claude, not to jam — the host
+  // client types it into the real TUI, a guest's becomes a request the host approves.
+  if (t.startsWith('/')) {
+    if (RESERVED_COMMANDS.includes(slashName(t))) {
+      return { kind: 'error', text: `${slashName(t)} is specced (v0.12/v0.13) but not built yet` };
+    }
+    const v = validSlashCommand(t);
+    return v.ok ? { kind: 'slash', text: v.text } : { kind: 'error', text: v.error };
+  }
   return { kind: 'say', text: t };
+}
+
+// ------------------------------------------- v0.14: claude slash commands ----
+
+// jam's own commands: everything a client answers itself. Everything else is claude's.
+// Kept as data so the client, the daemon and the docs cannot drift apart.
+export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror', '/tools',
+  '/join', '/accept', '/deny', '/token', '/allow-cmd', '/deny-cmd'];
+
+// Specced (v0.12 export, v0.13 files) but not implemented. Named here so they are refused
+// with the truth instead of being typed into the TUI, where claude would just shrug.
+export const RESERVED_COMMANDS = ['/export', '/send', '/paste', '/get',
+  '/allow-export', '/deny-export', '/accept-file', '/deny-file'];
+
+// Session-lifecycle commands: they end or wipe the conversation for EVERYBODY, so they stay
+// with the host. Hard list, enforced server-side — no guest request, no `/allow-cmd always`
+// standing approval, ever. (`/exit` never reaches here from a client anyway: it means "leave
+// my client".)
+export const HOST_ONLY_COMMANDS = ['/exit', '/clear', '/resume'];
+
+// `/model opus` → `/model`. Everything before the first space, lowercased: claude's own
+// command names are lowercase, and the hard list must not be dodged with `/CLEAR`.
+export function slashName(text) {
+  return String(text ?? '').trim().split(/\s+/)[0].toLowerCase();
+}
+
+// A claude command on its way into the pane. Anything typed into the real TUI is a trust
+// boundary, so this is narrow on purpose: one `/name` of letters/digits/`:._-` (MCP and
+// plugin commands use `:` and `_`), optional single-line arguments, no control characters,
+// no newline that would submit a second line, and a length a pane can actually show.
+export const SLASH_RE = /^\/[A-Za-z][A-Za-z0-9_:.-]{0,39}(?: [^\n]{1,300})?$/;
+export function validSlashCommand(text) {
+  if (typeof text !== 'string') return { ok: false, error: 'command must be a string' };
+  const t = stripControl(text).trim();
+  if (!SLASH_RE.test(t)) {
+    return { ok: false, error: `not a usable command: ${JSON.stringify(String(text).slice(0, 40))}` };
+  }
+  return { ok: true, text: t };
+}
+
+// What happens to a guest's `/command`. `refuse` = the hard host-only list, no approval path
+// at all; `run` = this guest already has standing approval (`/allow-cmd always`) for this
+// jam; `ask` = default, the host is asked once. Nothing is ever auto-approved.
+export function guestSlashDecision(text, alwaysAllowed = false) {
+  if (HOST_ONLY_COMMANDS.includes(slashName(text))) return 'refuse';
+  return alwaysAllowed ? 'run' : 'ask';
 }
 
 // Which `claude` to spawn. PATH is not trustworthy: it can hold a wrapper shim from

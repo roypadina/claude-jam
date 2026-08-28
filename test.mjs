@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, RESERVED_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -116,10 +116,12 @@ test('client: /join reprints the invite (host-only enforcement is client.mjs run
   assert.deepEqual(parseClientLine('/join'), { kind: 'join' });
 });
 
-test('client: unknown slash command is refused locally', () => {
-  const a = parseClientLine('/compact');
-  assert.equal(a.kind, 'error');
-  assert.match(a.text, /host TUI/);
+test('client: a command jam does not own is claude\'s, and comes back as a slash action', () => {
+  // v0.14: the client no longer refuses these locally — the host types them into the real
+  // TUI, a guest's becomes a request. Who is allowed is the daemon's call, not the parser's.
+  assert.deepEqual(parseClientLine('/compact'), { kind: 'slash', text: '/compact' });
+  assert.deepEqual(parseClientLine('  /model opus  '), { kind: 'slash', text: '/model opus' });
+  assert.deepEqual(parseClientLine('/mcp'), { kind: 'slash', text: '/mcp' });
 });
 
 test('client: trailing backslash continues the message', () => {
@@ -280,8 +282,10 @@ test('client: a bad or missing /token op is a usage error', () => {
 });
 
 test('client: host-only commands are not confused with lookalikes', () => {
-  assert.equal(parseClientLine('/accepted').kind, 'error'); // unknown slash, not /accept
-  assert.equal(parseClientLine('/tokens new').kind, 'error');
+  // A lookalike is not the jam command — it is just another claude command (v0.14), so it
+  // routes to the TUI instead of admitting anybody or rotating anything.
+  assert.deepEqual(parseClientLine('/accepted'), { kind: 'slash', text: '/accepted' });
+  assert.deepEqual(parseClientLine('/tokens new'), { kind: 'slash', text: '/tokens new' });
   assert.deepEqual(parseClientLine('accept Dana'), { kind: 'say', text: 'accept Dana' });
 });
 
@@ -627,7 +631,7 @@ test('mirrorSize: the claude window that exactly fills a terminal, silly sizes c
 
 test('client: /mirror is a view toggle everyone may run', () => {
   assert.deepEqual(parseClientLine('/mirror'), { kind: 'mirror' });
-  assert.equal(parseClientLine('/mirrors').kind, 'error'); // not a lookalike
+  assert.equal(parseClientLine('/mirrors').kind, 'slash'); // not a lookalike: claude's, not jam's
 });
 
 // --- v0.10: tool collapse -------------------------------------------------------
@@ -675,7 +679,7 @@ test('client: /tools reprints, /tools on|off switches mode, anything else is a u
   const a = parseClientLine('/tools bogus');
   assert.equal(a.kind, 'error');
   assert.match(a.text, /usage: \/tools/);
-  assert.equal(parseClientLine('/toolsy').kind, 'error');
+  assert.equal(parseClientLine('/toolsy').kind, 'slash');
 });
 
 // --- v0.10b: newline keys -------------------------------------------------------
@@ -713,6 +717,60 @@ test('extractKeys: a split sequence is held back, a lone ESC is not', () => {
   assert.deepEqual(extractKeys('\x1b'), { keys: [], text: '\x1b', hold: '' });
   // Every sequence in the table is reachable from its own prefix.
   for (const [seq] of KEY_SEQS) assert.equal(extractKeys(seq).keys.length, 1, JSON.stringify(seq));
+});
+
+// --- v0.14: claude slash commands ------------------------------------------------
+
+test('JAM_COMMANDS: every jam command is answered by the client, never sent to the TUI', () => {
+  for (const cmd of JAM_COMMANDS) {
+    const a = parseClientLine(cmd);
+    assert.notEqual(a.kind, 'slash', `${cmd} would be typed into the TUI`);
+    assert.notEqual(a.kind, 'say', `${cmd} would be sent to claude as text`);
+  }
+  // The two lists cannot overlap, or a jam command would be refused as unbuilt.
+  for (const cmd of RESERVED_COMMANDS) assert.equal(JAM_COMMANDS.includes(cmd), false, cmd);
+});
+
+test('RESERVED_COMMANDS: specced-but-unbuilt commands are refused, not typed into the TUI', () => {
+  for (const cmd of RESERVED_COMMANDS) {
+    const a = parseClientLine(`${cmd} something`);
+    assert.equal(a.kind, 'error', cmd);
+    assert.match(a.text, /not built yet/);
+  }
+});
+
+test('slashName: the command word only, lowercased so /CLEAR cannot dodge the hard list', () => {
+  assert.equal(slashName('/model opus'), '/model');
+  assert.equal(slashName('  /compact  '), '/compact');
+  assert.equal(slashName('/CLEAR'), '/clear');
+  assert.equal(slashName(''), '');
+  assert.equal(slashName(undefined), '');
+});
+
+test('validSlashCommand: one single-line command, control characters stripped, garbage refused', () => {
+  assert.deepEqual(validSlashCommand('/model'), { ok: true, text: '/model' });
+  assert.deepEqual(validSlashCommand('/model sonnet 4.5'), { ok: true, text: '/model sonnet 4.5' });
+  assert.deepEqual(validSlashCommand('/mcp__jira__issues'), { ok: true, text: '/mcp__jira__issues' });
+  // The pane is a trust boundary: an escape sequence or a second line would type itself in.
+  assert.deepEqual(validSlashCommand('/model\x1b[2J'), { ok: true, text: '/model' });
+  for (const bad of ['/model\nrm -rf ~', '/', '//', '/1model', 'model', '',
+    `/model ${'x'.repeat(400)}`, `/${'m'.repeat(60)}`, 42, undefined]) {
+    assert.equal(validSlashCommand(bad).ok, false, JSON.stringify(bad));
+  }
+  // A newline that survives stripControl still cannot pass: the trailing part is dropped by
+  // SLASH_RE, never silently submitted as a second line.
+  assert.equal(validSlashCommand('/compact\n/exit').ok, false);
+});
+
+test('guestSlashDecision: default ask, standing approval runs, the hard list always refuses', () => {
+  assert.equal(guestSlashDecision('/compact'), 'ask');
+  assert.equal(guestSlashDecision('/compact', true), 'run');
+  // Session-lifecycle commands are host-only, with or without standing approval.
+  for (const cmd of HOST_ONLY_COMMANDS) {
+    assert.equal(guestSlashDecision(cmd), 'refuse', cmd);
+    assert.equal(guestSlashDecision(cmd, true), 'refuse', `${cmd} with always`);
+    assert.equal(guestSlashDecision(`${cmd.toUpperCase()} now`, true), 'refuse', cmd);
+  }
 });
 
 // --- v0.14: F3 raw key passthrough ----------------------------------------------
@@ -787,7 +845,7 @@ test('onboardingLines: the host block leads with F2/F3 and slash passthrough', (
 
 test('client: /help reprints the onboarding block', () => {
   assert.deepEqual(parseClientLine('/help'), { kind: 'help' });
-  assert.equal(parseClientLine('/helpme').kind, 'error');
+  assert.equal(parseClientLine('/helpme').kind, 'slash');
 });
 
 // --- v0.9: cmux chat surface ----------------------------------------------------

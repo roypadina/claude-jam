@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -781,6 +781,8 @@ function onSocket(ws, req) {
     } else if (m.t === 'mirror') {
       // View-only sugar: everybody may watch, nobody types through it.
       setMirror(ws, m.on !== false);
+    } else if (m.t === 'slash') {
+      onSlash(ws, me, m.text);
     } else if (m.t === 'key') {
       // F3 passthrough: the host's keyboard, straight into the TUI. This is the one path
       // where bytes are NOT sanitized — driving a permission prompt or the /model picker is
@@ -814,6 +816,39 @@ function onSocket(ws, req) {
     if (me && clients.delete(ws)) rosterChanged({ left: me.name });
   });
   ws.on('error', () => { /* client vanished */ });
+}
+
+// ---------------------------------------------------------- slash commands ----
+// v0.14: a `/command` jam does not own belongs to claude. From the host's client (loopback,
+// `--host`) it is typed into the real TUI verbatim — no `[Name]:` prefix, so claude's own
+// command palette runs it and any picker it opens shows up in everyone's mirror. From
+// anyone else it is refused here; the approval path arrives with the guest-request flow.
+function onSlash(ws, me, text) {
+  const v = validSlashCommand(text);
+  if (!v.ok) return sendError(ws, v.error);
+  if (!trusted(me)) return sendError(ws, 'claude commands run in the host TUI only');
+  runSlash(me.name, v.text);
+}
+
+// Serialized on the injection queue: typing a command into the pane while a message is
+// mid-paste would interleave two inputs in one prompt.
+function runSlash(who, text, note = '') {
+  broadcast({ t: 'sys', text: `${who} ran ${text} in the TUI${note}` });
+  queue = queue.then(() => typeSlash(text)).catch((e) => console.error('slash failed:', e.message));
+}
+
+async function typeSlash(text) {
+  await ensureReady();
+  // Same courtesy wait as an injection: claude queues what it gets mid-response anyway.
+  for (let i = 0; i < 8; i++) {
+    if (/❯|^> ?$/m.test(capture().split('\n').slice(-5).join('\n'))) break;
+    await sleep(250);
+  }
+  tmux('send-keys', '-t', CLAUDE_PANE, '-l', text);
+  // The command palette filters as you type and Enter picks the highlighted row, so give it
+  // a beat to settle on the exact match before submitting.
+  await sleep(300);
+  tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
 }
 
 // ------------------------------------------------------- raw key passthrough ----
