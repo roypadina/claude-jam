@@ -571,3 +571,11 @@ the DEFAULT view, the transcript is the F2 alternate. Web view demoted to opt-in
   it (`/model`, `/compact`, `/mcp`, `/resume` …). Server-enforced host+loopback only; guests
   keep getting "host TUI only". Interactive command UIs (pickers) then render in the mirror,
   and F3 passthrough drives them.
+- **Guest slash commands (host-gated):** a guest's non-jam `/command` becomes a request:
+  guest sees `sent to host for approval`, host client (and popup) shows
+  `⌘ Dana wants to run /compact — /allow-cmd Dana | /allow-cmd always | /deny-cmd Dana`.
+  Approved → daemon types it into the TUI exactly like a host slash passthrough, and
+  broadcasts `* Dana ran /compact (approved by Roy)`. `always` = standing approval for that
+  guest for THIS jam. Dangerous by nature (commands change the session for everyone) —
+  default deny, never auto-approve, and `/allow-cmd always` excludes `/exit`, `/clear`,
+  `/resume` (session-lifecycle commands stay host-only, hard list server-side).
