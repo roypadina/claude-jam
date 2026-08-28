@@ -458,12 +458,27 @@ export function frameDecision({ rows, prev = null, now = 0, lastAt = 0, minGap =
   return now - lastAt < minGap ? 'wait' : 'send';
 }
 
+// Rows a client spends on its own chrome in the mirror view: the chat strip (3), the status
+// row and the input row. Everything else is frame.
+export const MIRROR_CHROME = 5;
+
+// The claude window size that exactly fills a terminal of this size in the mirror view — so
+// the host sees the whole TUI with nothing cropped. v0.14: the tmux session is detached, so
+// its window size is ours to choose (the launcher sets it, the host client keeps it in step
+// on resize). Floors keep a silly terminal from producing an unusable pane.
+export function mirrorSize(cols, rows) {
+  return {
+    w: Math.max(40, Math.min(500, Math.floor(Number(cols) || 80))),
+    h: Math.max(10, Math.min(300, Math.floor(Number(rows) || 24) - MIRROR_CHROME)),
+  };
+}
+
 // What of a host frame fits this terminal. The newest content in a TUI is at the bottom, so
 // a guest with fewer rows keeps the LAST ones; width is left to the renderer (it truncates
 // ANSI-aware) and only reported here so the client can say the host is wider.
 export function fitFrame(frame, cols, terminalRows) {
   const rows = frame?.rows || [];
-  const keep = Math.max(4, (Number(terminalRows) || 24) - 5);
+  const keep = Math.max(4, (Number(terminalRows) || 24) - MIRROR_CHROME);
   return {
     rows: rows.length > keep ? rows.slice(-keep) : rows,
     croppedRows: Math.max(0, rows.length - keep),

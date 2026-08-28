@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -115,7 +115,12 @@ function launch() {
 
   // First window: the daemon (its own window, not a pane — its log is for when something
   // breaks, and it must never eat rows from the TUI).
-  must(tmux('new-session', '-d', '-s', opts.tmux, '-c', opts.cwd, '-n', 'daemon',
+  // Nothing ever attaches to this session (v0.14), so tmux would size its windows to the
+  // 80x24 default and the host would watch a postage stamp in a full-screen terminal. Size
+  // it to what the mirror view can actually show instead; the client re-sizes it on resize.
+  const size = mirrorSize(process.stdout.columns, process.stdout.rows);
+  must(tmux('new-session', '-d', '-s', opts.tmux, '-x', String(size.w), '-y', String(size.h),
+    '-c', opts.cwd, '-n', 'daemon',
     process.execPath, self, '--daemon', ...common));
   sessionCreated = true;
   waitForHealth();
@@ -418,6 +423,24 @@ function pumpMirror() {
   for (const ws of mirrors) if (clients.has(ws)) send(ws, ev);
 }
 
+// Only the client the launcher spawned on loopback with `--host` may touch the real TUI.
+// Both halves matter: `host` is the claim, `loopback` is what makes it believable.
+const trusted = (me) => !!(me && me.host && me.loopback);
+
+// Keep the detached claude window the size of the host's mirror. A no-op when it already
+// matches, so a resize storm costs one tmux query. `resize-window` pins the window to a
+// manual size (documented ceiling: a later `tmux attach` no longer reshapes it).
+let windowSize = { w: 0, h: 0 };
+function resizeClaudeWindow(w, h) {
+  const want = mirrorSize(w, h); // the client sends its terminal size; mirrorSize takes the chrome off
+  if (want.w === windowSize.w && want.h === windowSize.h) return;
+  const r = tmux('resize-window', '-t', CLAUDE_PANE, '-x', String(want.w), '-y', String(want.h));
+  if (r.status !== 0) return console.log(`resize-window failed: ${(r.stderr || '').trim()}`);
+  windowSize = want;
+  console.log(`[resize] claude window → ${want.w}x${want.h}`);
+  lastFrame = null; // the next capture is a different shape; send it even if the text matches
+}
+
 function setMirror(ws, on) {
   if (on) mirrors.add(ws); else mirrors.delete(ws);
   if (mirrors.size && !frameTimer) {
@@ -610,8 +633,11 @@ function onHook(event, body) {
 const isLoopback = (ip) => { const s = String(ip || ''); return s.endsWith('127.0.0.1') || s === '::1'; };
 
 // Both admission paths end here: the same welcome, the same roster broadcast.
-function admitSocket(ws, name, host) {
-  const me = { name, host, joinedAt: Date.now(), lastTyping: 0 };
+// `loopback` is remembered per socket, not re-derived later: everything that can reach the
+// real TUI (F3 keys, slash passthrough, window resize) needs host AND loopback, and a
+// `host:true` claim from off-box was already downgraded to a friend by classifyHello.
+function admitSocket(ws, name, host, loopback = false) {
+  const me = { name, host, loopback, joinedAt: Date.now(), lastTyping: 0 };
   clients.set(ws, me);
   send(ws, {
     t: 'welcome', id: nextId++, ts: Date.now(), you: name, roster: names(),
@@ -647,7 +673,7 @@ function admit(name, ok) {
   clearTimeout(p.timer);
   pending.delete(sock);
   if (ok) {
-    admitSocket(sock, p.name, false);
+    admitSocket(sock, p.name, false, isLoopback(p.ip));
     console.log(`[admit] ${p.name} accepted`);
   } else {
     send(sock, { t: 'knock', id: nextId++, ts: Date.now(), state: 'denied' });
@@ -709,7 +735,7 @@ function onSocket(ws, req) {
       // `hello {mirror:true}` starts a client straight in mirror mode; the runtime
       // {t:'mirror'} frame (F2 / `/mirror`) is the same switch.
       if (c.admit === 'token') {
-        admitSocket(ws, c.name, c.host);
+        admitSocket(ws, c.name, c.host, isLoopback(ip));
         if (m.mirror === true) setMirror(ws, true);
         return;
       }
@@ -752,6 +778,12 @@ function onSocket(ws, req) {
     } else if (m.t === 'mirror') {
       // View-only sugar: everybody may watch, nobody types through it.
       setMirror(ws, m.on !== false);
+    } else if (m.t === 'resize') {
+      // The host's terminal grew or shrank. Nothing is attached to this tmux session, so the
+      // claude window is only ever as big as somebody says — and the host's mirror is the
+      // screen that has to fit. Guests never resize the room they are watching.
+      if (!trusted(me)) return sendError(ws, 'host TUI only');
+      resizeClaudeWindow(m.w, m.h);
     } else if (m.t === 'admit') {
       if (!me.host) return sendError(ws, 'host only');
       onAdmit(ws, m);

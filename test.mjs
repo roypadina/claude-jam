@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, toolName, toolTurnSummary, extractKeys, KEY_SEQS, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, extractKeys, KEY_SEQS, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -611,6 +611,18 @@ test('fitFrame: a shorter guest keeps the newest rows, a narrower one is told th
   // A missing frame or a silly terminal size must not throw.
   assert.deepEqual(fitFrame(null, 80, 24).rows, []);
   assert.ok(fitFrame({ rows, w: 80 }, 80, 0).rows.length >= 4);
+});
+
+test('mirrorSize: the claude window that exactly fills a terminal, silly sizes clamped', () => {
+  // Chrome = chat strip + status row + input row, so the frame fills the rest exactly and
+  // fitFrame crops nothing.
+  assert.deepEqual(mirrorSize(120, 40), { w: 120, h: 40 - MIRROR_CHROME });
+  assert.equal(fitFrame({ rows: [...Array(40 - MIRROR_CHROME).keys()].map(String), w: 120 }, 120, 40).croppedRows, 0);
+  // Floors: a tiny or missing size still produces a usable pane instead of a 1-row one.
+  assert.deepEqual(mirrorSize(10, 6), { w: 40, h: 10 });
+  assert.deepEqual(mirrorSize(undefined, undefined), { w: 80, h: 24 - MIRROR_CHROME });
+  // And a ceiling, so a bogus frame cannot ask tmux for a 100k-column window.
+  assert.deepEqual(mirrorSize(99999, 99999), { w: 500, h: 300 });
 });
 
 test('client: /mirror is a view toggle everyone may run', () => {

@@ -260,6 +260,7 @@ function connect() {
       if (ev.session?.boot !== boot) { boot = ev.session?.boot; seen.clear(); }
       for (const hist of ev.history || []) if (!seen.has(hist.id)) { seen.add(hist.id); render(hist); }
       sys(`here: ${store.roster.join(', ')}`);
+      sendResize(); // host only: fit the claude window to this terminal
       return;
     }
     // Screen frames are a live view at 4/s: they must never enter the dedupe set (it would
@@ -282,6 +283,15 @@ function connect() {
 }
 
 const sendMsg = (o) => { if (ws?.readyState === 1) ws.send(JSON.stringify(o)); else err('not connected'); };
+
+// v0.14: nothing is attached to the host's tmux session, so the claude window is exactly as
+// big as this terminal says it should be. Host only (the daemon enforces it too) — a guest
+// must never reshape the screen everybody else is watching. Silent when the socket is down:
+// the reconnect sends it again.
+function sendResize() {
+  if (!IS_HOST || ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({ t: 'resize', w: process.stdout.columns || 80, h: process.stdout.rows || 24 }));
+}
 
 // v0.7: flip between the transcript and the host's real screen. F2 and `/mirror` are the
 // same call; leaving flushes everything that arrived while the mirror was up.
@@ -490,6 +500,8 @@ function App() {
 // the exit below runs. These are for a signal from outside, where ink sees nothing.
 process.on('SIGINT', () => leave(0));
 process.on('SIGTERM', () => leave(0));
+// Terminal resized: ink relays out on its own, and the host's claude window follows along.
+process.stdout.on('resize', sendResize);
 app = inkRender(h(App), { patchConsole: false, stdin: inkStdin });
 connect();
 await app.waitUntilExit();
