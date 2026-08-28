@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -781,6 +781,14 @@ function onSocket(ws, req) {
     } else if (m.t === 'mirror') {
       // View-only sugar: everybody may watch, nobody types through it.
       setMirror(ws, m.on !== false);
+    } else if (m.t === 'key') {
+      // F3 passthrough: the host's keyboard, straight into the TUI. This is the one path
+      // where bytes are NOT sanitized — driving a permission prompt or the /model picker is
+      // exactly what it is for — so the gate is everything: host flag AND loopback (the
+      // client the launcher itself spawned), a per-frame size cap, and hex/literal encoding
+      // that never reaches a shell. A guest gets a refusal and nothing else.
+      if (!trusted(me)) return sendError(ws, 'F3 TUI control is the host\'s, on loopback only');
+      typeKeys(m.b64);
     } else if (m.t === 'resize') {
       // The host's terminal grew or shrank. Nothing is attached to this tmux session, so the
       // claude window is only ever as big as somebody says — and the host's mirror is the
@@ -806,6 +814,18 @@ function onSocket(ws, req) {
     if (me && clients.delete(ws)) rosterChanged({ left: me.name });
   });
   ws.on('error', () => { /* client vanished */ });
+}
+
+// ------------------------------------------------------- raw key passthrough ----
+// v0.14 F3: base64 (so a frame carries an escape sequence intact) → tmux send-keys runs.
+// Bad base64, an oversized frame or a decode that yields nothing is dropped silently: this
+// is a keystroke, not a message, and an error line per stray byte would be noise.
+const KEY_FRAME_MAX = 4096; // base64 chars, before decoding
+function typeKeys(b64) {
+  if (typeof b64 !== 'string' || !b64 || b64.length > KEY_FRAME_MAX) return;
+  let text;
+  try { text = Buffer.from(b64, 'base64').toString('utf8'); } catch { return; }
+  for (const args of sendKeyArgs(text)) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
 }
 
 // --------------------------------------------------------------- injection ----

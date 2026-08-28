@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, extractKeys, KEY_SEQS, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -713,6 +713,49 @@ test('extractKeys: a split sequence is held back, a lone ESC is not', () => {
   assert.deepEqual(extractKeys('\x1b'), { keys: [], text: '\x1b', hold: '' });
   // Every sequence in the table is reachable from its own prefix.
   for (const [seq] of KEY_SEQS) assert.equal(extractKeys(seq).keys.length, 1, JSON.stringify(seq));
+});
+
+// --- v0.14: F3 raw key passthrough ----------------------------------------------
+
+test('extractKeys: every F3 spelling toggles passthrough, and F3 is not F2', () => {
+  for (const seq of ['\x1bOR', '\x1b[13~', '\x1b[[C']) {
+    assert.deepEqual(extractKeys(seq), { keys: ['passthrough'], text: '', hold: '' }, JSON.stringify(seq));
+  }
+  // vt220 F3 (ESC[13~) and kitty Shift+Enter (ESC[13;2u) share a prefix: the partial must be
+  // held back rather than guessed at.
+  assert.deepEqual(extractKeys('\x1b[13'), { keys: [], text: '', hold: '\x1b[13' });
+  assert.deepEqual(extractKeys('\x1b[13;2u'), { keys: ['newline'], text: '', hold: '' });
+  assert.deepEqual(extractKeys('\x1bOQ'), { keys: ['mirror'], text: '', hold: '' }); // F2 stays F2
+});
+
+test('PASSTHROUGH_SEQS: while the TUI has the keyboard, only F3 is still the client\'s', () => {
+  assert.equal(PASSTHROUGH_SEQS.length, 3);
+  assert.equal(PASSTHROUGH_SEQS.every(([, name]) => name === 'passthrough'), true);
+  // An arrow key, Enter and even F2 pass through as text — that is the whole point.
+  for (const seq of ['\x1b[A', '\r', '\x1bOQ', '\x1b[13;2u', 'y']) {
+    const r = extractKeys(seq, PASSTHROUGH_SEQS);
+    assert.deepEqual(r.keys, [], JSON.stringify(seq));
+    assert.equal(r.text + r.hold, seq, JSON.stringify(seq));
+  }
+  // F3 itself still comes back as the key, never as bytes for the pane.
+  assert.deepEqual(extractKeys('\x1bOR', PASSTHROUGH_SEQS), { keys: ['passthrough'], text: '', hold: '' });
+});
+
+test('sendKeyArgs: ASCII (escape sequences included) goes as -H hex, non-ASCII as one -l run', () => {
+  // Down-arrow then Enter: exactly what driving a permission prompt or /model picker needs.
+  assert.deepEqual(sendKeyArgs('\x1b[B\r'), [['-H', '1b', '5b', '42', '0d']]);
+  assert.deepEqual(sendKeyArgs('y'), [['-H', '79']]);
+  // A literal run for anything above 0x7f (-H is ASCII-only), split at the boundary.
+  assert.deepEqual(sendKeyArgs('a✓b'), [['-H', '61'], ['-l', '✓'], ['-H', '62']]);
+  assert.deepEqual(sendKeyArgs('שלום'), [['-l', 'שלום']]);
+  // Nothing to type is no tmux call at all.
+  for (const v of ['', null, undefined]) assert.deepEqual(sendKeyArgs(v), [], String(v));
+  // Cap: one frame can never make the daemon type more than KEY_CHUNK_MAX characters.
+  const flood = sendKeyArgs('x'.repeat(KEY_CHUNK_MAX + 500));
+  assert.equal(flood.length, 1);
+  assert.equal(flood[0].length - 1, KEY_CHUNK_MAX);
+  // Every hex value is two digits and a real ASCII code — no shell, no argv surprises.
+  for (const arg of sendKeyArgs('\x00\x1fA~').at(0).slice(1)) assert.match(arg, /^[0-9a-f]{2}$/);
 });
 
 // --- v0.10c: guest onboarding ---------------------------------------------------
