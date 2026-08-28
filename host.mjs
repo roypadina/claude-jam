@@ -583,8 +583,8 @@ function daemon() {
   http.listen(opts.port, opts.host, () => {
     console.log(`claude-jam daemon on ${opts.host}:${opts.port}, session ${opts.sessionId}`);
     writeTokenFile();
-    // Printed by the launcher too, but that copy scrolls away under `tmux attach`; this is
-    // the one the host can still read in the daemon window. The globs come with it: a
+    // Printed by the launcher too, but that copy scrolls away under the host's client; this
+    // is the one the host can still read in the daemon window. The globs come with it: a
     // profile on another machine keeps its transcripts somewhere else entirely.
     if (opts.configDir) {
       console.log(`claude profile: ${opts.configDir}`);
@@ -592,9 +592,9 @@ function daemon() {
     }
     if (ttyd) startView();
     startTunnels();
-    // The launcher's own join-line print happens right before `tmux attach` takes over
-    // the screen, so the host never sees it — this is the copy that's actually visible,
-    // in the `daemon` tmux window.
+    // The launcher prints this too, right before the host's client takes over the screen —
+    // this is the copy that stays readable, in the `daemon` window, for when the host wants
+    // it after the fact (`/join` in the client is the everyday way).
     printJoin();
     console.log(`state ${opts.state}`);
   });

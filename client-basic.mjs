@@ -125,9 +125,11 @@ function logJoin() {
 // renderer does not do.
 function logOnboarding() {
   for (const l of onboardingLines(NAME, IS_HOST)) emit({ text: l, textColor: C.dim, bare: true });
-  // The block is shared with the ink client, which can do all three of those; say so here
-  // rather than promising a key this renderer never sees.
-  emit({ text: '(--basic: F2/Shift+Enter and /tools are ink-only — trailing \\ still does multi-line)', textColor: C.dim, bare: true });
+  // The block is shared with the ink client, which can do all of that; say so here rather
+  // than promising keys and a view this renderer never has. v0.14: the live TUI is the
+  // default view everywhere else, so a --basic guest should know what they are missing.
+  emit({ text: '(--basic: transcript only — no live TUI view, no F2/F3, no Shift+Enter, no /tools.', textColor: C.dim, bare: true });
+  emit({ text: ' Trailing \\ still does multi-line. Drop --basic for the full client.)', textColor: C.dim, bare: true });
 }
 
 function render(ev) {
