@@ -350,13 +350,23 @@ export function resolveTtyd(override, exists = () => false) {
 // pick any client showing that window — and a ttyd viewer sits on a GROUPED session showing
 // the same window, so the popup was drawn on the guest's browser instead of the host's
 // terminal (observed on tmux 3.7c). The caller passes a client attached to the base session.
+// v0.14: the same popup answers both kinds of request — a knock (`kind:'knock'`) and a
+// guest's claude command (`kind:'cmd'`, `detail` = the command). Both trail the original
+// argv, so an old popup.mjs would still render a knock.
 export const POPUP_W = 64;
 export const POPUP_H = 7;
-export function buildPopupArgs({ session, client, node, script, name, ip, ttlS, port, secret }) {
+export function buildPopupArgs({ session, client, node, script, name, ip, ttlS, port, secret, kind = 'knock', detail = '' }) {
   return ['display-popup', '-t', session, ...(client ? ['-c', client] : []),
     '-w', String(POPUP_W), '-h', String(POPUP_H),
     '-e', `JAM_HOOK_SECRET=${secret}`, '-E',
-    node, script, name, String(ip), String(ttlS), String(port)];
+    node, script, name, String(ip), String(ttlS), String(port), kind, String(detail)];
+}
+
+// What the popup says. One line, because a popup is seven rows and four of them are frame.
+export function popupPrompt(kind, name, ip, detail) {
+  return kind === 'cmd'
+    ? `⌘ ${name} wants to run ${detail}`
+    : `⚑ ${name} wants to join${ip ? ` (${ip})` : ''}`;
 }
 
 // The jam session's status line while knocks are pending; null means "put the host's own
