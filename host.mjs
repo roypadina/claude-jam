@@ -540,21 +540,21 @@ function stopPopup() {
 function pumpPopups() {
   refreshStatusRight();
   if (opts.noPopup || popupProc) return;
-  const next = [...pending.values()].map((p) => ({ ...p, kind: 'knock' }))
-    .concat([...cmdRequests.values()].map((r) => ({ ...r, kind: 'cmd', ip: '' })))
-    .find((p) => !p.popped);
+  // Knocks first, then command requests; `popped` is set on the record itself, so a request
+  // whose popup was ignored waits for a client command instead of popping again.
+  const queued = [...[...pending.values()].map((p) => ['knock', p]),
+    ...[...cmdRequests.values()].map((r) => ['cmd', r])];
+  const next = queued.find(([, p]) => !p.popped);
   if (!next) return;
-  // `popped` lives on the record itself, so a request whose popup was ignored waits for a
-  // client command instead of popping again.
-  (next.kind === 'cmd' ? [...cmdRequests.values()] : [...pending.values()])
-    .find((p) => p.name === next.name && !p.popped).popped = true;
+  const [kind, rec] = next;
+  rec.popped = true;
   // The /accept or /allow-cmd line logged with the request itself is still the way in.
   const client = hostClients()[0];
-  if (!client) return console.log(`[${next.kind}] no client attached — no popup for ${next.name}`);
+  if (!client) return console.log(`[${kind}] no client attached — no popup for ${rec.name}`);
   const child = spawn(TMUX, buildPopupArgs({
     session: opts.tmux, client, node: process.execPath, script: path.join(HERE, 'popup.mjs'),
-    name: next.name, ip: next.ip, ttlS: Math.round(KNOCK_TTL / 1000), port: opts.port,
-    secret: opts.hookSecret, kind: next.kind, detail: next.text || '',
+    name: rec.name, ip: rec.ip || '', ttlS: Math.round(KNOCK_TTL / 1000), port: opts.port,
+    secret: opts.hookSecret, kind, detail: rec.text || '',
   }), { stdio: ['ignore', 'ignore', 'pipe'] });
   popupProc = child;
   let err = '';
@@ -570,7 +570,7 @@ function pumpPopups() {
     if (popupProc === child) popupProc = null;
     console.log(`knock popup failed: ${e.message}`);
   });
-  console.log(`[knock] popup for ${next.name} on ${client} (tmux pid ${child.pid})`);
+  console.log(`[${kind}] popup for ${rec.name} on ${client} (tmux pid ${child.pid})`);
 }
 
 function daemon() {
@@ -819,7 +819,7 @@ function onSocket(ws, req) {
     } else if (m.t === 'slash') {
       onSlash(ws, me, m.text);
     } else if (m.t === 'cmd') {
-      onCmd(ws, m);
+      onCmd(ws, me, m);
     } else if (m.t === 'key') {
       // F3 passthrough: the host's keyboard, straight into the TUI. This is the one path
       // where bytes are NOT sanitized — driving a permission prompt or the /model picker is
@@ -928,9 +928,9 @@ function answerCmd(name, ok, always = false) {
   return null;
 }
 
-function onCmd(ws, m) {
+function onCmd(ws, me, m) {
   // Approving types into the real TUI, so the gate is the same as F3's: host + loopback.
-  if (!trusted(ws && clients.get(ws))) return sendError(ws, 'host TUI only');
+  if (!trusted(me)) return sendError(ws, 'host TUI only');
   const err = answerCmd(m.name, m.op === 'allow', m.always === true);
   if (err) sendError(ws, err);
 }
