@@ -762,6 +762,25 @@ test('validSlashCommand: one single-line command, control characters stripped, g
   assert.equal(validSlashCommand('/compact\n/exit').ok, false);
 });
 
+test('client: /allow-cmd — bare, named, always, and named+always', () => {
+  assert.deepEqual(parseClientLine('/allow-cmd'), { kind: 'cmd', op: 'allow', name: null, always: false });
+  assert.deepEqual(parseClientLine('/allow-cmd Dana'), { kind: 'cmd', op: 'allow', name: 'Dana', always: false });
+  // `always` with no name is the only request waiting — same rule as /accept.
+  assert.deepEqual(parseClientLine('/allow-cmd always'), { kind: 'cmd', op: 'allow', name: null, always: true });
+  assert.deepEqual(parseClientLine('/allow-cmd Dana always'), { kind: 'cmd', op: 'allow', name: 'Dana', always: true });
+  // A name may legally contain a space (NAME_RE), and `always` is still the last word.
+  assert.deepEqual(parseClientLine('/allow-cmd Dana K always'), { kind: 'cmd', op: 'allow', name: 'Dana K', always: true });
+  assert.deepEqual(parseClientLine('/allow-cmd Dana K'), { kind: 'cmd', op: 'allow', name: 'Dana K', always: false });
+});
+
+test('client: /deny-cmd, and neither lookalike is mistaken for the real command', () => {
+  assert.deepEqual(parseClientLine('/deny-cmd Dana'), { kind: 'cmd', op: 'deny', name: 'Dana', always: false });
+  assert.deepEqual(parseClientLine('/deny-cmd'), { kind: 'cmd', op: 'deny', name: null, always: false });
+  // /deny is the knock command and must not be swallowed by the /deny-cmd branch.
+  assert.deepEqual(parseClientLine('/deny Dana'), { kind: 'deny', name: 'Dana' });
+  assert.equal(parseClientLine('/allow-cmds Dana').kind, 'slash');
+});
+
 test('guestSlashDecision: default ask, standing approval runs, the hard list always refuses', () => {
   assert.equal(guestSlashDecision('/compact'), 'ask');
   assert.equal(guestSlashDecision('/compact', true), 'run');

@@ -242,6 +242,15 @@ function render(ev) {
       if (ev.state === 'expired') return leave(1, '! nobody approved your request in time');
       return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}`, strip: true });
     }
+    // v0.14: a guest wants to run one of claude's commands. Host clients only — and the
+    // wording is the answer, so the host never has to remember the syntax.
+    case 'cmdreq':
+      return emit({
+        glyph: '⌘',
+        glyphColor: C.accent,
+        text: `${ev.name} wants to run ${ev.cmd} — /allow-cmd ${ev.name} · /allow-cmd ${ev.name} always · /deny-cmd ${ev.name}`,
+        strip: true,
+      });
     case 'token': {
       if (store.session) { store.session.join = ev.join; store.session.view = ev.view; }
       return logJoin();
@@ -390,6 +399,11 @@ function submit(raw) {
     case 'deny':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'admit', name: act.name || undefined, ok: act.kind === 'accept' });
+      break;
+    // v0.14: answering a guest's /command request.
+    case 'cmd':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'cmd', op: act.op, name: act.name || undefined, always: act.always });
       break;
     case 'token':
       if (!IS_HOST) err('host only');

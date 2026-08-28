@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -649,9 +649,12 @@ function admitSocket(ws, name, host, loopback = false) {
   });
   rosterChanged({ joined: name });
   send(ws, { t: 'status', id: nextId++, ts: Date.now(), busy: status.busy, waiting: status.waiting });
-  // Knocks stay out of `history`, so a host client that connects (or reconnects) while
-  // somebody is waiting would otherwise never hear about them.
-  if (host) for (const p of pending.values()) send(ws, { t: 'knock', id: nextId++, ts: Date.now(), name: p.name, ip: p.ip });
+  // Knocks and command requests stay out of `history`, so a host client that connects (or
+  // reconnects) while somebody is waiting would otherwise never hear about them.
+  if (host) {
+    for (const p of pending.values()) send(ws, { t: 'knock', id: nextId++, ts: Date.now(), name: p.name, ip: p.ip });
+    for (const r of cmdRequests.values()) send(ws, { t: 'cmdreq', id: nextId++, ts: Date.now(), name: r.name, cmd: r.text });
+  }
 }
 
 // The one admission decision, shared by `/accept`/`/deny` in a host client ({t:'admit'})
@@ -783,6 +786,8 @@ function onSocket(ws, req) {
       setMirror(ws, m.on !== false);
     } else if (m.t === 'slash') {
       onSlash(ws, me, m.text);
+    } else if (m.t === 'cmd') {
+      onCmd(ws, m);
     } else if (m.t === 'key') {
       // F3 passthrough: the host's keyboard, straight into the TUI. This is the one path
       // where bytes are NOT sanitized — driving a permission prompt or the /model picker is
@@ -810,6 +815,9 @@ function onSocket(ws, req) {
   ws.on('close', () => {
     const p = pending.get(ws);
     if (p) { clearTimeout(p.timer); pending.delete(ws); pumpPopups(); }
+    // A guest who left has nothing waiting for approval any more.
+    const req = cmdRequests.get(ws);
+    if (req) { clearTimeout(req.timer); cmdRequests.delete(ws); pumpPopups(); }
     const me = clients.get(ws);
     // Drop the mirror subscription first: the last watcher leaving stops the capture timer.
     if (mirrors.has(ws)) setMirror(ws, false);
@@ -821,13 +829,78 @@ function onSocket(ws, req) {
 // ---------------------------------------------------------- slash commands ----
 // v0.14: a `/command` jam does not own belongs to claude. From the host's client (loopback,
 // `--host`) it is typed into the real TUI verbatim — no `[Name]:` prefix, so claude's own
-// command palette runs it and any picker it opens shows up in everyone's mirror. From
-// anyone else it is refused here; the approval path arrives with the guest-request flow.
+// command palette runs it and any picker it opens shows up in everyone's mirror. From a
+// guest it is a REQUEST: default deny, the host approves it once (or, with `always`, for the
+// rest of this jam), and the session-lifecycle commands cannot be approved at all.
+const cmdRequests = new Map(); // ws -> {name, text, timer} — one in flight per guest
+const cmdAlways = new Set(); // lowercased guest names with standing approval, this jam only
+const CMD_TTL = 120000; // same patience as a knock
+
 function onSlash(ws, me, text) {
   const v = validSlashCommand(text);
   if (!v.ok) return sendError(ws, v.error);
-  if (!trusted(me)) return sendError(ws, 'claude commands run in the host TUI only');
-  runSlash(me.name, v.text);
+  if (trusted(me)) return runSlash(me.name, v.text);
+  switch (guestSlashDecision(v.text, cmdAlways.has(me.name.toLowerCase()))) {
+    case 'refuse':
+      return sendError(ws, `${slashName(v.text)} ends or wipes the session for everyone — ` +
+        'the host runs that one, and it cannot be approved for a guest');
+    case 'run':
+      return runSlash(me.name, v.text, ` (${opts.name} approved ${me.name}'s commands for this jam)`);
+    default:
+      return requestSlash(ws, me, v.text);
+  }
+}
+
+function requestSlash(ws, me, text) {
+  const mine = cmdRequests.get(ws);
+  if (mine) return sendError(ws, `${mine.text} is still waiting for the host — one at a time`);
+  const timer = setTimeout(() => {
+    cmdRequests.delete(ws);
+    sendError(ws, `${text} expired — nobody approved it`);
+    pumpPopups();
+  }, CMD_TTL);
+  timer.unref?.();
+  cmdRequests.set(ws, { name: me.name, text, timer });
+  sendHosts({ t: 'cmdreq', name: me.name, cmd: text });
+  console.log(`[cmd] ${me.name} wants ${text} — /allow-cmd ${me.name} | /allow-cmd ${me.name} always | /deny-cmd ${me.name}`);
+  pumpPopups();
+}
+
+// The one decision, shared by `/allow-cmd`/`/deny-cmd` in a host client and by the popup.
+// No name = the only request waiting. Returns null when it acted, else why it did not.
+function answerCmd(name, ok, always = false) {
+  const waiting = [...cmdRequests.entries()];
+  let hit;
+  if (name == null || name === '') {
+    if (waiting.length !== 1) {
+      return waiting.length ? `${waiting.length} commands are waiting — name one` : 'no command is waiting';
+    }
+    hit = waiting[0];
+  } else {
+    hit = waiting.find(([, r]) => nameTaken(name, [r.name]));
+    if (!hit) return `nothing is waiting from "${name}"`;
+  }
+  const [sock, r] = hit;
+  clearTimeout(r.timer);
+  cmdRequests.delete(sock);
+  if (!ok) {
+    sendError(sock, `${r.text} was denied by ${opts.name}`);
+    console.log(`[cmd] ${r.name}'s ${r.text} denied`);
+  } else {
+    // Standing approval is per person and never covers the hard list — guestSlashDecision
+    // re-checks it on every later command, so `always` can never widen into /clear.
+    if (always) cmdAlways.add(r.name.toLowerCase());
+    runSlash(r.name, r.text, ` (approved by ${opts.name}${always ? ' — standing' : ''})`);
+  }
+  pumpPopups();
+  return null;
+}
+
+function onCmd(ws, m) {
+  // Approving types into the real TUI, so the gate is the same as F3's: host + loopback.
+  if (!trusted(ws && clients.get(ws))) return sendError(ws, 'host TUI only');
+  const err = answerCmd(m.name, m.op === 'allow', m.always === true);
+  if (err) sendError(ws, err);
 }
 
 // Serialized on the injection queue: typing a command into the pane while a message is
