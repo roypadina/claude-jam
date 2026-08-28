@@ -7,7 +7,11 @@ case "$cmd" in
   host) exec node "$DIR/host.mjs" "$@" ;;
   join) exec node "$DIR/client.mjs" "$@" ;;
   *)
-    echo "usage: jam host [--port N] [--name X] [--cwd DIR] [--tmux NAME] [--token V] [-- <claude args>]"
-    echo "       jam join <ws-url> --name X [--token Y] [--basic]   (no token = knock, the host accepts you)"
+    echo "usage: jam host [--port N] [--name X] [--cwd DIR] [--tmux NAME] [--token V]"
+    echo "                [--view] [--tunnel] [--config-dir D] [-- <claude args>]"
+    echo "         builds a detached tmux session (daemon + the real claude TUI) and opens"
+    echo "         your own client here: live TUI by default, F2 transcript, F3 TUI control."
+    echo "       jam join <ws-url> --name X [--token Y] [--basic]"
+    echo "         no token = knock, the host accepts you."
     exit 2 ;;
 esac
