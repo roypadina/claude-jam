@@ -2335,3 +2335,169 @@ export function buildSettings(hooksPath) {
     },
   };
 }
+
+// =============================== v0.30: a landed paste has more than one shape ====
+// Observed live 2026-08-29 15:20: a nineteen-line message failed with "pasted text never appeared
+// in the claude pane" and Ctrl-U then wiped it. Claude Code 2.1.x does not echo a multi-line
+// paste — it collapses the whole thing to a placeholder — so the echo probe could never match.
+// Measured on 2.1.251 (100x32, `tmux paste-buffer -p`): ANY bracketed paste carrying a newline
+// becomes one, from three lines up, and the counter climbs per paste in a session:
+//   `❯ [Pasted text #3 +3 lines]`   `❯ [Pasted text #2 +18 lines]`
+// Matched on the FAMILY rather than one spelling: earlier builds drew `[Pasted text +NN lines]`
+// with no counter, and a later one is free to put something else between the brackets.
+export const PASTE_PLACEHOLDER_RE = /\[pasted\s+text[^\]]{0,64}\]/i;
+export function hasPastePlaceholder(text) { return PASTE_PLACEHOLDER_RE.test(String(text ?? '')); }
+
+// The input box's own rows — NOT "the last three rows of the pane". Measured on 2.1.251 the last
+// three rows are chrome (`[claude2] | Haiku 4.5 | …`, `⏸ manual mode on`, the corner hint) and the
+// box sits four rows further up; worse, that chrome changes on its own (`⏸ manual mode on · ← for
+// agents` becomes `paste again to expand` after a paste), so diffing it would report a paste that
+// landed when nothing landed at all. So: from the last prompt row down to the rule that closes the
+// box. ponytail: with a picker on screen the last prompt row can be a transcript echo rather than
+// the box — harmless here, because nothing pastes into a pane that is showing a picker.
+export const INPUT_AREA_MAX = 12;
+const RULE_ROW_RE = /^[─━—_]{10,}$/;
+const PROMPT_ROW_RE = /^\s*(?:❯|>)(?:\s|$)/;
+const OPTION_ROW_RE = /^\s*(?:❯|▶|>|\*)\s*\d[.)]\s/;
+export function inputAreaRows(screen) {
+  const rows = (Array.isArray(screen) ? screen : String(screen ?? '').split('\n'))
+    .map((r) => String(r).replace(/\s+$/, ''));
+  let i = -1;
+  for (let k = rows.length - 1; k >= 0; k--) {
+    if (PROMPT_ROW_RE.test(rows[k]) && !OPTION_ROW_RE.test(rows[k])) { i = k; break; }
+  }
+  if (i < 0) return rows.slice(-3);
+  const out = [];
+  for (let k = i; k < rows.length && out.length < INPUT_AREA_MAX; k++) {
+    if (RULE_ROW_RE.test(rows[k].trim())) break;
+    out.push(rows[k]);
+  }
+  return out;
+}
+
+// Did the paste land? Three independent yeses, because a landed paste has three different shapes
+// on screen and the live failure was believing only the first one. Returns WHICH one said yes
+// (the daemon logs it, so a future rendering change shows up as "always 'changed'" rather than as
+// somebody's lost message), or null for "not yet".
+export function injectLanded({ probe = '', before = null, after = '' } = {}) {
+  const tail = String(after ?? '').split('\n').slice(-15).join('\n');
+  if (probe && tail.includes(probe)) return 'probe';
+  const box = inputAreaRows(after);
+  if (box.some(hasPastePlaceholder)) return 'placeholder';
+  // Weakest, and last: the box is not what it was immediately before `paste-buffer`. It is the
+  // only rule that survives a rendering jam has never seen, and it is safe to be wrong about
+  // because v0.30's other half means the payload is on disk either way.
+  if (before != null && inputAreaRows(before).join('\n') !== box.join('\n')) return 'changed';
+  return null;
+}
+
+// Is there anything in the box to clear? The v0.30 rule is "capture first, and only clear if
+// something is actually in it" — a blind Ctrl-U into an empty box is what wiped a message that
+// had in fact never been pasted. Measured bonus: on 2.1.251 ONE Ctrl-U does not clear a wrapped
+// multi-row input, it kills one visual line, so clearing means repeating until the box is empty.
+export function inputBoxText(screen) {
+  const box = inputAreaRows(screen);
+  if (!box.length) return '';
+  return [box[0].replace(PROMPT_ROW_RE, ''), ...box.slice(1)].join('\n').trim();
+}
+export const CLEAR_TRIES = 6;
+
+// Very large payloads go in on line boundaries, ≤8 KB a paste, Enter only after the last one.
+// Concatenating the chunks is the payload byte for byte: the newline stays with the line it ends,
+// so a boundary can never glue two of the sender's lines together. A single line longer than a
+// whole chunk is cut, because nothing else can cut it.
+export const PASTE_CHUNK_MAX = 8 * 1024;
+export function chunkPayload(text, max = PASTE_CHUNK_MAX) {
+  const s = String(text ?? '');
+  const cap = Math.max(1, Math.trunc(max) || PASTE_CHUNK_MAX);
+  if (s.length <= cap) return [s];
+  const lines = s.split('\n');
+  const units = lines.map((l, i) => (i < lines.length - 1 ? `${l}\n` : l));
+  const parts = [];
+  let cur = '';
+  for (let u of units) {
+    while (u.length > cap) {
+      if (cur) { parts.push(cur); cur = ''; }
+      parts.push(u.slice(0, cap));
+      u = u.slice(cap);
+    }
+    if (!u) continue;
+    if (cur.length + u.length > cap) { parts.push(cur); cur = ''; }
+    cur += u;
+  }
+  if (cur) parts.push(cur);
+  return parts;
+}
+
+// ------------------------------------------- v0.30: the outbox ----
+// Every payload is written here BEFORE it is pasted and deleted only after a verified submit, so
+// "I could not confirm it arrived" is never the same event as "it is gone". The name carries when
+// it was written and who wrote it, because `/retry` has to be able to find the newest one that
+// belongs to the person asking.
+export const OUTBOX_DIR = 'outbox';
+export const OUTBOX_KEEP = 20; // kept payloads; the oldest fall off, so a broken pane cannot fill a disk
+export const OUTBOX_NAME_RE = /^(\d{10,16})-([A-Za-z0-9_-]{1,24})\.txt$/;
+export function outboxSlug(name) {
+  return String(name ?? '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'someone';
+}
+export function outboxName(ts, name) { return `${Math.trunc(Number(ts) || 0)}-${outboxSlug(name)}.txt`; }
+export function parseOutboxName(file) {
+  const m = OUTBOX_NAME_RE.exec(String(file ?? ''));
+  return m ? { file: String(file), ts: Number(m[1]), name: m[2] } : null;
+}
+// Newest first, because that is the one `/retry` means.
+export function outboxEntries(files = []) {
+  return (files || []).map(parseOutboxName).filter(Boolean).sort((a, b) => b.ts - a.ts || a.file.localeCompare(b.file));
+}
+// The host may retry anybody's (they can see the room); everyone else only their own — a kept
+// payload is somebody's unsent message, not shared state.
+export function resolveOutbox(entries = [], who = null, isHost = false) {
+  const slug = outboxSlug(who).toLowerCase();
+  const mine = isHost ? entries : entries.filter((e) => e.name.toLowerCase() === slug);
+  if (!mine.length) {
+    return { ok: false, error: isHost ? 'nothing is kept — every message so far reached claude'
+      : 'nothing of yours is kept — every message you sent reached claude' };
+  }
+  return { ok: true, entry: mine[0], count: mine.length };
+}
+export function outboxReport(entries = [], now = Date.now()) {
+  if (!entries.length) return 'nothing is kept — every message so far reached claude';
+  return [`${entries.length} message${entries.length > 1 ? 's' : ''} kept (newest first) — /retry sends the newest again:`,
+    ...entries.map((e) => `  ${e.name} · ${uptimeText(Math.max(0, now - e.ts))} ago · ${e.file}`)].join('\n');
+}
+export function keptMessageText(file) {
+  return `couldn't confirm your message reached claude — kept at ${file} · /retry to send it again`;
+}
+
+// --------------------------------------- v0.30: client-side input history ----
+// Nothing here talks to the daemon: `↑`/`↓` walk what THIS client submitted, so anything typed can
+// be recalled and re-sent whatever the daemon did with it. Consecutive duplicates collapse, blanks
+// are never stored, and the newest is at index 0.
+export const HISTORY_LIVE = 50; // what ↑/↓ walk in memory
+export const HISTORY_FILE_MAX = 200; // what the file keeps
+export function historyPush(list = [], text, max = HISTORY_LIVE) {
+  const s = String(text ?? '').trim();
+  if (!s) return list.slice(0, max);
+  if (list[0] === s) return list.slice(0, max);
+  return [s, ...list].slice(0, max);
+}
+// `idx` is -1 for "typing something new". Up walks towards older, down back towards the draft.
+// The draft is handed back when you walk off the newest end, so ↑ then ↓ never eats what you typed.
+export function historyMove(list = [], idx = -1, dir = 'up', draft = '') {
+  if (!list.length) return { idx: -1, text: draft, moved: false };
+  if (dir === 'up') {
+    const next = Math.min(idx + 1, list.length - 1);
+    return { idx: next, text: list[next], moved: next !== idx };
+  }
+  const next = idx - 1;
+  if (next < 0) return { idx: -1, text: draft, moved: idx !== -1 };
+  return { idx: next, text: list[next], moved: true };
+}
+export function parseHistoryFile(text) {
+  return String(text ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-HISTORY_FILE_MAX);
+}
+// On disk oldest-first (a file people may `tail`); in memory newest-first.
+export function serializeHistory(list = [], max = HISTORY_FILE_MAX) {
+  const out = [...list].reverse().slice(-max);
+  return out.length ? `${out.join('\n')}\n` : '';
+}
