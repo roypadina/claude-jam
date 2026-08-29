@@ -166,7 +166,10 @@ export function toolResultText(content) {
       ? content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n')
       : '';
   const line = raw.split('\n').map((l) => l.trim()).find(Boolean) || '';
-  return line.length > TOOL_RESULT_MAX ? `${line.slice(0, TOOL_RESULT_MAX - 1)}…` : line;
+  // v0.17 F4: a tool result is file contents and command output — the same class of leak as a
+  // tool call's own arguments, so it goes through the same best-effort mask.
+  const one = maskSecrets(line);
+  return one.length > TOOL_RESULT_MAX ? `${one.slice(0, TOOL_RESULT_MAX - 1)}…` : one;
 }
 
 export function parseJsonlLine(line) {
@@ -212,8 +215,18 @@ export function parseJsonlLine(line) {
       if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
         out.push({ kind: 'text', text: b.text.trim() });
       } else if (b?.type === 'tool_use') {
+        // v0.17 F1: an Edit/MultiEdit/Write call's own arguments ARE the diff, so render them as
+        // one — everything else keeps the truncated-JSON summary. F4 masks either shape, because
+        // this is the line that carries file contents to everybody else's terminal.
+        // `file` (v0.17 F2) is what `/files` counts; only file-shaped tools have one.
+        const name = b.name ?? '?';
         const args = JSON.stringify(b.input ?? {});
-        out.push({ kind: 'tool', text: `${b.name ?? '?'}: ${args.slice(0, 120)}` });
+        const file = toolFile(name, b.input);
+        out.push({
+          kind: 'tool',
+          ...(file ? { file } : {}),
+          text: maskSecrets(toolDiffText(name, b.input) ?? `${name}: ${args.slice(0, 120)}`),
+        });
       }
       // thinking and everything else: ignored.
     }
@@ -300,6 +313,13 @@ export function parseClientLine(line) {
     return { kind: 'file-ok', op: 'deny', name: t.slice(10).trim() || null, always: false };
   }
   if (t === '/get' || t.startsWith('/get ')) return { kind: 'get', name: t.slice(4).trim() || null };
+  // v0.17 F2/F3: what the session has touched, and what git says about it. Both are answered by
+  // the DAEMON (only it has the transcript and the cwd), so the client just forwards them.
+  if (t === '/files') return { kind: 'files' };
+  if (t === '/diff' || t.startsWith('/diff ')) {
+    const v = validDiffPath(t.slice(5));
+    return v.ok ? { kind: 'diff', path: v.path } : { kind: 'error', text: v.error };
+  }
   // v0.14: anything else that looks like a command belongs to claude, not to jam — the host
   // client types it into the real TUI, a guest's becomes a request the host approves.
   if (t.startsWith('/')) {
@@ -326,7 +346,9 @@ export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror',
   '/join', '/accept', '/deny', '/token', '/allow-cmd', '/deny-cmd',
   // v0.12 export, v0.13 files.
   '/export', '/allow-export', '/deny-export', '/send', '/paste', '/get',
-  '/accept-file', '/deny-file'];
+  '/accept-file', '/deny-file',
+  // v0.17 F2/F3: the paths this session touched, and git's own answer about them.
+  '/files', '/diff'];
 
 // Session-lifecycle commands: they end or wipe the conversation for EVERYBODY, so they stay
 // with the host. Hard list, enforced server-side — no guest request, no `/allow-cmd always`
@@ -612,13 +634,17 @@ export function nextBlock(kind, current) {
 // rendered cells — OSC (window title, clipboard writes), DCS/APC/PM/SOS strings, and the
 // C0 controls that would move the guest's cursor out of the frame. A row that carries any
 // escape gets a reset appended, or its color bleeds into the row below it.
+// v0.17 F4: and the deny-list mask, because a row of the host's screen is the one place a
+// secret reaches every guest without anybody choosing to send it. maskSecrets bails on its own
+// single hint scan when a row cannot contain any of the shapes, which is nearly every row —
+// see the cost note there. Best effort only: a value split across SGR sequences will not match.
 export const FRAME_ROW_MAX = 2000;
 export function sanitizeFrameRow(row) {
-  const s = String(row)
+  const s = maskSecrets(String(row)
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '') // OSC (title, clipboard)
     .replace(/\x1b[P^_X][^\x1b]*(?:\x1b\\)?/g, '') // DCS / PM / APC / SOS
     // C0 except ESC (0x1b) and TAB (0x09), DEL, and the 8-bit C1 range.
-    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, '')
+    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, ''))
     .slice(0, FRAME_ROW_MAX);
   return s.includes('\x1b') ? `${s}\x1b[0m` : s;
 }
@@ -785,14 +811,14 @@ export function onboardingLines(name = 'You', host = false) {
       'F3                → attach the real TUI (Ctrl-b d back)',
       'a / d             → answer the ⚑ bar · i/Esc hides it',
       '/model /compact…  → run any claude command in the TUI',
-      '/send <path>      → offer a file to everyone · /export',
+      '/send <path>      → offer a file · /export /files /diff',
       '/help /who /join  → this block · participants · invite line']
     : [`plain line        → claude (attributed [${name}])`,
       '/c <text>         → humans only — claude never sees it',
       'F2                → transcript ⇄ live TUI (this screen)',
-      '/who /quit        → participants / leave',
+      '/who /files /diff → participants · files · git diff',
       '/send <path>      → give claude a file · /paste · /export',
-      'Shift+Enter or \\  → multi-line message · /tools · /help',
+      'Shift+Enter or \\  → multi-line · /tools /help /quit',
       'Lost? just ask claude — e.g. "how does this jam work?",',
       '"how do I chat privately?" — it knows the full manual.'];
   return [head, ...rows, '─'.repeat(ONBOARD_W)];
@@ -1071,6 +1097,212 @@ export function funnelPrecheck(statusJson) {
     };
   }
   return { ok: true, dns };
+}
+
+// ------------------------------- v0.17 F4: best-effort secret masking ----
+// A short deny-list of shapes that are secrets whatever file they came out of, applied to the
+// two places a guest sees content nobody typed at them: a tool call's rendering (F1 makes that
+// much more revealing) and a mirror row (sanitizeFrameRow). NOT a secret scanner, and said so
+// in the README: it knows five shapes, it cannot see a value split across SGR sequences, and a
+// format it has never heard of goes straight through. The honest framing is stripTokenBlock's.
+//
+// Cost matters here: the mirror sanitizes every row of every frame at up to 25 frames/s, so the
+// rules are compiled once at module load and gated behind ONE hint scan — a row with no
+// `AKIA`, no `TOKEN`, no `sk-` (i.e. essentially every row of a TUI) costs a single regex test
+// instead of seven. Measured on a real 40-row frame: see SPEC's v0.17 note.
+export const SECRET_MASK = '[masked]';
+const SECRET_HINT = /AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|PRIVATE[ _]KEY|sk-|pk-|rk-|gh[pousr]_|earer|SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|CREDENTIAL/;
+const SECRET_RULES = [
+  // AWS key ids: a documented prefix plus 16 upper-case/digit characters.
+  [/\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA)[0-9A-Z]{16}\b/g, SECRET_MASK],
+  // A whole PEM private-key block first, then a bare BEGIN line on its own — one mirror row is
+  // all the context a frame ever gives us, so the header alone still has to be caught.
+  // A CERTIFICATE block is deliberately NOT matched: a public certificate is not a secret.
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, SECRET_MASK],
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/g, SECRET_MASK],
+  // sk-/pk-/rk- API keys (OpenAI, Stripe, …) and GitHub's ghp_/gho_/ghs_/ghu_/ghr_ tokens.
+  [/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, SECRET_MASK],
+  [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, SECRET_MASK],
+  // A bearer credential in a header or a curl line; the word itself stays, so the line still reads.
+  [/\b([Bb]earer\s+)[A-Za-z0-9._~+/-]{16,}={0,2}/g, `$1${SECRET_MASK}`],
+  // .env-style KEY=value where the KEY says it is a secret. UPPER CASE only, on purpose: that is
+  // the .env convention, and it keeps prose ("check the token"), jam's own `--token abc` and
+  // every lower-case identifier out of the deny-list. The key is kept, only the value goes.
+  [/\b([A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*[:=]\s*)(?:"[^"\n]{4,}"|'[^'\n]{4,}'|[^\s"'#,;)]{4,})/g, `$1$2${SECRET_MASK}`],
+];
+
+export function maskSecrets(text) {
+  const s = String(text ?? '');
+  if (!SECRET_HINT.test(s)) return s; // the hot path: one scan, no allocation
+  let out = s;
+  for (const [re, to] of SECRET_RULES) out = out.replace(re, to);
+  return out;
+}
+
+// ------------------------------- v0.17 F1: Edit/Write calls render as a real diff ----
+// No diff library, and none needed: `old_string`/`new_string` in the tool arguments already ARE
+// the diff Claude is about to apply. Before this, every tool_use rendered as
+// `Edit: {"file_path":"/very/long/…` truncated at 120 characters, which is the least useful 120
+// characters of an edit. Capped the way tool results are capped (a per-line cap plus a line
+// budget), and it stays inside the /tools collapse machinery, so a turn full of edits still
+// folds into one `⚙ N tools (Edit ×3)` line instead of flooding anybody's transcript.
+export const DIFF_TOOLS = new Set(['Edit', 'MultiEdit', 'Write']);
+export const FILE_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'Read']);
+export const TOOL_DIFF_LINES = 20;
+export const TOOL_DIFF_LINE_MAX = TOOL_RESULT_MAX; // same 100 chars a tool result gets
+
+// Which path a tool call touched, for `/files`. Only the tools that name one file they read or
+// wrote: Grep/Glob's `path` is a directory to search, which is not "a file this session touched".
+export function toolFile(name, input) {
+  if (!FILE_TOOLS.has(name)) return null;
+  const v = input?.file_path;
+  return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+const diffBody = (oldS, newS) => [
+  ...(typeof oldS === 'string' && oldS !== '' ? String(oldS).split('\n').map((l) => `- ${l}`) : []),
+  ...(typeof newS === 'string' && newS !== '' ? String(newS).split('\n').map((l) => `+ ${l}`) : []),
+];
+
+// null = there was nothing diff-shaped in there, so the caller keeps the JSON summary.
+export function toolDiffText(name, input, maxLines = TOOL_DIFF_LINES) {
+  if (!DIFF_TOOLS.has(name)) return null;
+  const file = typeof input?.file_path === 'string' && input.file_path.trim() ? input.file_path.trim() : null;
+  const edits = name === 'MultiEdit' && Array.isArray(input?.edits) ? input.edits : null;
+  const body = name === 'Write' ? diffBody(null, input?.content)
+    : edits ? edits.flatMap((e) => diffBody(e?.old_string, e?.new_string))
+      : diffBody(input?.old_string, input?.new_string);
+  if (!file && !body.length) return null;
+  const head = `${name}: ${file ?? '?'}${edits ? ` (${edits.length} edit${edits.length === 1 ? '' : 's'})` : ''}`;
+  const kept = body.slice(0, maxLines)
+    .map((l) => (l.length > TOOL_DIFF_LINE_MAX ? `${l.slice(0, TOOL_DIFF_LINE_MAX - 1)}…` : l));
+  const more = body.length - kept.length;
+  return [head, ...kept, ...(more > 0 ? [`… ${more} more diff line(s)`] : [])].join('\n');
+}
+
+// The live region under the mirror is LIVE_TOOL_ROWS *rows*, not four tool calls — a 20-line
+// diff in there would shove the status and input rows off the screen. One line each while the
+// turn runs; the whole diff is in the transcript (and in `/tools`).
+export function toolLiveLine(text) {
+  const lines = String(text ?? '').split('\n');
+  return lines.length > 1 ? `${lines[0]}  (+${lines.length - 1} diff line(s))` : lines[0];
+}
+
+// ------------------------------- v0.17 F2: the files this session touched ----
+// Last touch wins the ordering, so `/files` reads newest first: delete before set, because a
+// Map keeps insertion order and re-setting an existing key does NOT move it.
+export function noteFilePath(map, file) {
+  if (!file) return map;
+  const n = (map.get(file) || 0) + 1;
+  map.delete(file);
+  map.set(file, n);
+  return map;
+}
+
+export function filesNewestFirst(map) {
+  return [...(map || [])].map(([path, n]) => ({ path, n })).reverse();
+}
+
+export const FILES_MAX = 25;
+export function filesReport(files = [], cwd = '') {
+  if (!files.length) return 'no files yet — nothing has read, written or edited one in this session';
+  // A path under the project reads better relative to it; anything else stays absolute.
+  const short = (p) => (cwd && String(p).startsWith(`${cwd}/`) ? String(p).slice(String(cwd).length + 1) : String(p));
+  const rows = files.slice(0, FILES_MAX).map(({ path: p, n }) => `  ×${n}  ${short(p)}`);
+  const more = files.length - rows.length;
+  return [`${files.length} file(s) touched this session, newest first:`, ...rows,
+    ...(more > 0 ? [`  … ${more} more`] : [])].join('\n');
+}
+
+// ------------------------------- v0.17 F3: /diff [path] ----
+// Ground truth from git, independent of whether the JSONL parsing above saw every change — a
+// `sed -i` from a Bash call touched files no Edit tool ever mentioned. argv only, never a shell
+// and never an interpolated string: a pathspec goes after `--`, and a leading `-` is refused
+// outright so a "path" can never become a git option.
+export const DIFF_PATH_MAX = 300;
+export function validDiffPath(p) {
+  if (p == null || p === '') return { ok: true, path: null };
+  if (typeof p !== 'string') return { ok: false, error: 'usage: /diff [path]' };
+  const t = p.trim();
+  if (!t) return { ok: true, path: null };
+  if (t.length > DIFF_PATH_MAX) return { ok: false, error: `a path over ${DIFF_PATH_MAX} characters is not a path` };
+  if (/[\x00-\x1f\x7f]/.test(t)) return { ok: false, error: 'a path with control characters in it is not a path' };
+  if (t.startsWith('-')) return { ok: false, error: 'a /diff path may not start with "-" — that would be a git option' };
+  if (t.split('/').includes('..')) return { ok: false, error: 'no ".." in a /diff path — it stays inside the project' };
+  return { ok: true, path: t };
+}
+
+export function gitDiffArgs(cwd, p = null) {
+  const at = ['-C', String(cwd)];
+  // Default is the summary: file names plus insertion/deletion counts, which is the answer to
+  // "what changed" in one screen. A named path gets the real hunks.
+  return p ? [...at, 'diff', '--', p] : [...at, 'diff', '--stat'];
+}
+
+export const OUT_MAX_LINES = 120;
+export const OUT_MAX_CHARS = 8000;
+export function capOutput(text, maxLines = OUT_MAX_LINES, maxChars = OUT_MAX_CHARS) {
+  const all = String(text ?? '').split('\n');
+  const kept = all.slice(0, Math.max(1, maxLines));
+  let out = kept.join('\n');
+  let note = all.length > kept.length ? `… ${all.length - kept.length} more line(s) — ask the host for the rest` : '';
+  if (out.length > maxChars) {
+    out = out.slice(0, maxChars);
+    note = `… truncated at ${maxChars} characters — ask the host for the rest`;
+  }
+  return note ? `${out}\n${note}` : out;
+}
+
+// ------------------------------- v0.17 H1: history backfilled from the JSONL ----
+// Until now `history` started EMPTY on every daemon boot and was fed only by live broadcasts —
+// so on `--resume`, where the daemon deliberately starts reading at EOF so old turns are not
+// re-broadcast, a guest joining a two-hour-old conversation got a blank room. This parses the
+// transcript that is already on disk into the same event shapes broadcast() produces, and the
+// daemon pushes them straight into the ring buffer BEFORE the WS server accepts anybody:
+// no busy/waiting toggle, no tool-collapse counter, no injection, nothing that would fire a
+// side effect at a live participant who is not there yet.
+// The event shapes are onTranscript's, deliberately duplicated — the live path owns turn and
+// status side effects this one must not have, and a test pins the two together.
+export const REPLAY_DEFAULT = 300;
+export const REPLAY_MAX = 5000;
+
+export function backfillHistory(text, { hostName = 'Host', cap = REPLAY_DEFAULT } = {}) {
+  const events = [];
+  const files = new Map();
+  let results = 0; // the same per-turn `⎿` budget the live path applies (toolResultAction)
+  for (const line of String(text ?? '').split('\n')) {
+    for (const e of parseJsonlLine(line)) {
+      noteFilePath(files, e.file);
+      const text_ = stripControl(e.text);
+      if (e.kind === 'user') {
+        results = 0; // a human turn starts a turn, exactly as startTurn() does live
+        // A bridged line was injected as `[Dana]: hello`, and the live broadcast of it carried
+        // the name in `from` with the prefix stripped — so the replay has to look the same.
+        events.push(e.bridged
+          ? { t: 'say', from: e.from, text: text_.replace(PREFIX_RE, '') }
+          : { t: 'say', from: hostName, text: text_ });
+      } else if (e.kind === 'text') events.push({ t: 'agent', kind: 'text', text: text_ });
+      else if (e.kind === 'tool') events.push({ t: 'agent', kind: 'tool', text: text_ });
+      else if (e.kind === 'tool-result') {
+        const act = toolResultAction(results++);
+        if (act !== 'skip') events.push({ t: 'agent', kind: 'tool-result', text: act === 'show' ? text_ : '…' });
+      }
+    }
+  }
+  const n = Math.floor(Number(cap));
+  const keep = Number.isFinite(n) && n >= 0 ? n : REPLAY_DEFAULT;
+  return { events: events.slice(events.length - Math.min(keep, events.length)), files, total: events.length };
+}
+
+// ------------------------------- v0.17 H2: where the replay ends ----
+// One line, so a joiner can tell backlog from what just happened. null when there was no
+// backlog at all — a divider over an empty replay would be a lie.
+export function historyDivider(count = 0, width = ONBOARD_W) {
+  const n = Math.floor(Number(count));
+  if (!(n > 0)) return null;
+  const label = ` history above (${n} replayed) · live from here `;
+  const pad = Math.max(2, Math.floor((width - label.length) / 2));
+  return `${'─'.repeat(pad)}${label}${'─'.repeat(pad)}`;
 }
 
 export function buildSettings(hooksPath) {
