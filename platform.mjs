@@ -79,16 +79,67 @@ export function notify(title, body) {
   } catch { return false; }
 }
 
-// The audible half. Nothing calls this yet — v0.25 (audible join events) is the batch that
-// will — and it is here now so that the batch which adds the sounds does not also have to add
-// the seam. Same contract as notify(): fire and forget, never throws, false when it did nothing.
-export const SOUNDS = { knock: 'Tink', join: 'Glass', leave: 'Bottle', alert: 'Funk' };
+// The audible half (v0.25). Same contract as notify(): fire and forget, never awaited, never
+// throws, `false` when it did nothing.
+//
+// THREE sounds, and they have to be distinguishable BY EAR, because the entire point is knowing
+// without looking whether somebody needs approving:
+//   knock  Submarine — a slow low "knock". Somebody is WAITING for you.
+//   join   Glass     — one short chime. They are already in; nothing is owed.
+//   nudge  Hero      — a person asking for you by name (v0.26).
+// Named by SPEC.md v0.25 (Roy picked them), not chosen here — the v0.32 W0 placeholder had
+// knock=Tink, and Tink next to Glass is two variations on the same short click.
+// Verified present on this machine 2026-08-29: `ls /System/Library/Sounds` has all three.
+export const SOUNDS = { knock: 'Submarine', join: 'Glass', nudge: 'Hero' };
+export const MAC_SOUND_DIR = '/System/Library/Sounds';
+
+// Linux, UNVERIFIED on this machine — said plainly rather than pretended. `paplay` takes the
+// freedesktop .oga set that ships with most desktops; `aplay` is ALSA and plays WAV only, so it
+// gets its own candidate list rather than being handed an .oga it would reject. Neither present,
+// or no file found: silence, which is an acceptable answer and never an error a user sees.
+// TODO(W1 — native Windows client): `System.Media.SoundPlayer` over a .wav, or the WinRT
+// notification sound; one more branch in soundFile()/playSound() and nothing else changes.
+const FD = '/usr/share/sounds/freedesktop/stereo';
+const LINUX_SOUNDS = {
+  paplay: { knock: [`${FD}/message-new-instant.oga`, `${FD}/bell.oga`],
+    join: [`${FD}/service-login.oga`, `${FD}/complete.oga`],
+    nudge: [`${FD}/message.oga`, `${FD}/bell.oga`] },
+  aplay: { knock: ['/usr/share/sounds/alsa/Front_Center.wav'],
+    join: ['/usr/share/sounds/alsa/Front_Left.wav'],
+    nudge: ['/usr/share/sounds/alsa/Front_Right.wav'] },
+};
+
+// "Verify the files exist at startup once and remember the answer" — a render path must not pay
+// a stat per sound, and a missing file must not be re-discovered forty times an hour. `null` is
+// a remembered NO, which is why the cache is checked with `in` rather than for truthiness.
+const soundCache = new Map();
+export function soundFile(kind) {
+  const k = String(kind ?? '');
+  if (soundCache.has(k)) return soundCache.get(k);
+  let hit = null;
+  if (SOUNDS[k]) {
+    if (IS_MAC) {
+      const f = `${MAC_SOUND_DIR}/${SOUNDS[k]}.aiff`;
+      if (fs.existsSync(f)) hit = { bin: 'afplay', file: f };
+    } else if (!IS_WINDOWS) {
+      for (const bin of ['paplay', 'aplay']) {
+        const found = (LINUX_SOUNDS[bin][k] || []).find((f) => fs.existsSync(f));
+        // The binary is on PATH or it is not; spawn's 'error' handler is what finds out, and a
+        // wrong guess here costs one silent child rather than an exception.
+        if (found) { hit = { bin, file: found }; break; }
+      }
+    }
+  }
+  soundCache.set(k, hit);
+  return hit;
+}
+
 export function playSound(kind) {
-  const name = SOUNDS[String(kind ?? '')];
-  if (!name || !IS_MAC) return false;
+  const s = soundFile(kind);
+  if (!s) return false;
   try {
-    const child = spawn('afplay', [`/System/Library/Sounds/${name}.aiff`], { stdio: 'ignore' });
-    child.on('error', () => { /* no afplay, or the sound is missing: silence is acceptable */ });
+    const child = spawn(s.bin, [s.file], { stdio: 'ignore' });
+    child.on('error', () => { /* no player installed: silence is acceptable */ });
     child.unref();
     return true;
   } catch { return false; }

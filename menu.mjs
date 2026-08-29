@@ -19,7 +19,9 @@ import { hostPlan, buildJoinArgv, remoteRows, ACCESS_MODES, resolveTailscale, fu
   sessionsTable, resolveTarget, validName,
   // v0.23: the Join screen starts with what is on this network, and Host names the jam.
   joinRows, joinPlanFor, JOIN_PASTE_VALUE, parseDnssdZone, discoveredJams,
-  DISCOVERY_TYPE, DISCOVERY_DOMAIN, FIND_MS, validJamName, defaultJamName } from './lib.mjs';
+  DISCOVERY_TYPE, DISCOVERY_DOMAIN, FIND_MS, validJamName, defaultJamName,
+  // v0.25: which exit code a non-tty gets, which depends on which screen was asked for.
+  menuNonTtyExit } from './lib.mjs';
 import { listRows } from './sessions.mjs';
 import { copyText, browseText } from './platform.mjs';
 
@@ -409,9 +411,16 @@ function App() {
 }
 
 // A menu nobody can answer is a hang, so a pipe/cron gets the usage text `--help` prints.
+//
+// The EXIT CODE is not the same for both ways in, and it used to be. `claude-jam` with no
+// arguments is a question, and printing its answer is success. `claude-jam join` with no
+// argument is a MISSING ARGUMENT — interactively the Join screen is how you supply it, and
+// where nothing can ask, it is an ordinary usage error and exits 2, like every other one the
+// launcher reports. Reproduced 2026-08-29: `claude-jam join </dev/null` exited 0, so a script
+// that checked the status believed it had joined something.
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
-  const r = spawnSync(JAM, ['--help'], { stdio: 'inherit' });
-  process.exit(r.status ?? 2);
+  spawnSync(JAM, ['--help'], { stdio: 'inherit' });
+  process.exit(menuNonTtyExit(START));
 }
 const app = inkRender(h(App), { patchConsole: false });
 await app.waitUntilExit();
