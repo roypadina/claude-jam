@@ -214,3 +214,16 @@ spec section is what was intended — say which one you changed, and why, in the
 - Nothing was pushed, amended or released.
 - Temporary files, worktrees and stub directories your run created are named, so the human can
   decide whether to keep them.
+
+## Testing policy (read TESTING.md)
+
+Small verification per batch, one big campaign at the end — Roy's call, 2026-08-29.
+
+- Per batch: `node --test test.mjs` green with a test per new pure helper, plus only the two or
+  three smoke suites covering what you changed. Not the full sweep.
+- Fixtures beat live `claude` turns whenever they prove the same thing (they also spend no quota).
+- Live pty evidence only for what a human must look at; logic that a unit test pins does not need
+  a pty capture.
+- **Anything you skip goes in TESTING.md's "Deferred" list in the same commit** — what, why, and
+  how it will be proven. An unrecorded skip is the failure this policy is designed to avoid.
+- The full sweep is the release gate, and TESTING.md's campaign section is the end-game.
