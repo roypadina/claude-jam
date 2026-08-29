@@ -270,15 +270,33 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   docs must not imply otherwise.
 
 
-- 2026-08-30 · **CAMPAIGN, NEW.** A just-STARTED claude and a just-`/clear`ed one draw the same
-  screen — same banner, same emptiness — so `contextLostSignal` returns `cleared` for both, and
-  `fixtures/pane/startup.txt` and `startup-one-turn.txt` (a real screen after a real turn) are
-  now in the corpus saying so. Mostly absorbed by `watchContext` only firing on a CHANGE from the
-  adoption baseline. Not absorbed: adopt a just-started claude, keep every exchange short enough
-  that the banner never scrolls away, and a later `/clear` does not change the signature — so no
-  re-brief fires and the agent has silently lost the two standing rules. Narrow, and the roster
-  re-brief is the backstop. Prove/fix: something other than the screen for "the context went" —
-  the transcript's own file is the obvious candidate — or accept it and say so in the docs.
+- ~~2026-08-30 · **CAMPAIGN, NEW.** A just-STARTED claude and a just-`/clear`ed one draw the same
+  screen — same banner, same emptiness — so `contextLostSignal` returns `cleared` for both …
+  a later `/clear` does not change the signature — so no re-brief fires and the agent has
+  silently lost the two standing rules.~~
+  **FIXED — 2026-08-30 (F7).** They are distinguishable from the pane after all, and the campaign's
+  own captures are what say so: `/clear` prints its own echo where the transcript it wiped used to
+  be (`❯ /clear`, row 8 of `fixtures/pane/cleared.txt`) and neither `startup.txt` nor
+  `startup-one-turn.txt` has such a row. The signature carries it — `cleared:/clear` against
+  `cleared` — so F7's exact repro (adopt at the startup screen, one short turn, then `/clear`)
+  now fires. Pinned by `F7: a STARTUP screen and a /clear are different signatures`, which asserts
+  against all three real captures and replays the repro as the watcher walks it; with the echo
+  term reverted it is one of exactly two tests that go red (checked, 403/2). `smoke-adopt` S7b
+  re-run and green — its `[brief] compacted:` assertion also covers the daemon log line, which
+  now prints the signature rather than the kind.
+  What is NOT covered, and why it is not: the `cleared` branch has no end-to-end smoke step. S7b
+  proves the watcher → decision → injection plumbing with the compaction marker, and nothing in
+  that plumbing changed — only the value of one signature, which the unit test pins against the
+  measured corpus. An end-to-end version needs a second adopted jam (adoption names its own
+  session `claude-jam`, so two at once make `claude-jam end <name>` ambiguous — S13's note) or a
+  restructure of S7b's guest lifetime, for a third proof of a path already proven twice. Prove:
+  fold a `cleared`-mode paint into S7b when that step is next touched.
+- 2026-08-30 · **F7's remaining ceiling, accepted and documented** (`host.mjs` `watchContext`,
+  the wiki's Hosting-a-Jam). The watch is edge detection over a screen signature, so two identical
+  losses with nothing observable between them read as one: `/clear`, then exchanges short enough
+  that the screen never leaves `cleared:/clear`, then `/clear` again. The roster re-brief is the
+  backstop. Prove/fix: something other than the pane for "the context went" — the transcript's own
+  file is still the obvious candidate — if it ever actually bites.
 - 2026-08-30 · **CAMPAIGN, NEW.** `--max-budget-usd` DOES exist on 2.1.251 (checked in `--help`,
   2026-08-30) and is a real spend cap, unlike the `--max-turns` the spec wanted. It is still not
   adopted, and the campaign did not adopt it: it is untestable without spending, and an inert or

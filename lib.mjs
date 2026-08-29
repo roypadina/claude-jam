@@ -4585,13 +4585,12 @@ export function briefUpdates(v) {
 // `/compact` summarises it out, `/clear` deletes it outright. Both are visible on the pane, which
 // is where v0.31 already reads everything else from — so the same classifier notices them.
 //
-// UNVERIFIED against a real compaction (2026-08-29): there is no capture of one in
-// `fixtures/pane/`, so these patterns come from claude 2.1.251's own wording rather than from a
-// measured corpus, and TESTING.md carries that as a deferred verification. They are deliberately
-// narrow. A false POSITIVE costs one extra injected message and one turn; a false NEGATIVE costs
-// an agent that has quietly forgotten the two standing rules while people are still talking to
-// it — so if the wording moves, this fails in the direction that matters, and the roster re-brief
-// is the backstop that eventually catches it.
+// VERIFIED against real captures (2026-08-30): `fixtures/pane/compacted.txt` and `cleared.txt`
+// are a real `/compact` and a real `/clear`, and the tests assert against them. They are
+// deliberately narrow. A false POSITIVE costs one extra injected message and one turn; a false
+// NEGATIVE costs an agent that has quietly forgotten the two standing rules while people are
+// still talking to it — so if the wording moves, this fails in the direction that matters, and
+// the roster re-brief is the backstop that eventually catches it.
 // CASE-SENSITIVE on the first alternative, and that is not a detail: claude writes `Compacted`
 // with a capital C as its own chrome, and claude-jam's re-brief has to be able to TALK about a
 // compaction without being read as one. Found by smoke-adopt: an earlier `/i` version matched the
@@ -4609,6 +4608,22 @@ const BANNER_GLYPH_RE = /[▐▛▜▝█]{2,}/;
 const BANNER_VERSION_RE = /Claude Code v\d/;
 const CONTEXT_ROWS = 30;   // how far up the screen the compaction line can be and still be new
 const CLEARED_MAX_ROWS = 14; // a just-cleared screen is nearly empty; a working one is not
+// v0.21.2 (campaign F7): the emptiness above is NOT enough on its own, because a claude that
+// started thirty seconds ago draws the same nearly-empty banner screen a `/clear` does — measured
+// side by side in `fixtures/pane/startup.txt` and `cleared.txt`. Read as the same signature, a
+// session adopted at its own startup screen could take a real `/clear` and never re-brief: the
+// state never CHANGED, so watchContext never fired, and the agent lost the two standing rules
+// with nobody told.
+//
+// The one row that differs is the command's own echo. `/clear` wipes the transcript and then
+// prints what caused it — `❯ /clear` — where the transcript used to be; a startup screen has no
+// such row. So the two are distinguishable from the pane alone after all, and the signature says
+// which one it is looking at.
+//
+// The echo must be in the TRANSCRIPT, above the input box: `❯ /clear` INSIDE the box is somebody
+// who has typed it and not pressed Enter, and a briefing pasted into a box holding their
+// half-typed command would submit the two glued together.
+const CLEAR_ECHO_RE = /^\s*(?:❯|>)\s*\/clear\s*$/;
 
 export function contextLostSignal(screen) {
   const lines = (Array.isArray(screen) ? screen : String(screen ?? '').split('\n'))
@@ -4618,7 +4633,17 @@ export function contextLostSignal(screen) {
   const filled = lines.filter((l) => l.trim()).length;
   if (filled <= CLEARED_MAX_ROWS
     && lines.some((l) => BANNER_GLYPH_RE.test(l)) && lines.some((l) => BANNER_VERSION_RE.test(l))) {
-    return { kind: 'cleared', sig: 'cleared' };
+    // Same rule inputAreaRows uses to find the box, so "above the box" means the same thing in
+    // both places: the last prompt row that is not a picker option.
+    let boxAt = lines.length;
+    for (let k = lines.length - 1; k >= 0; k--) {
+      if (PROMPT_ROW_RE.test(lines[k]) && !OPTION_ROW_RE.test(lines[k])) { boxAt = k; break; }
+    }
+    const echoed = lines.slice(0, boxAt).some((l) => CLEAR_ECHO_RE.test(l));
+    // Falling back to the bare `cleared` when the echo is not there is the SAFE direction: it is
+    // still not `null` and still not `compacted:…`, so a clear arriving on a screen that was
+    // showing anything else fires whether or not this build still prints the echo.
+    return { kind: 'cleared', sig: echoed ? 'cleared:/clear' : 'cleared' };
   }
   return null;
 }
