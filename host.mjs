@@ -14,7 +14,9 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
   // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
   backfillHistory, REPLAY_DEFAULT, REPLAY_MAX, noteFilePath, filesNewestFirst, filesReport,
-  validDiffPath, gitDiffArgs, capOutput, maskSecrets } from './lib.mjs';
+  validDiffPath, gitDiffArgs, capOutput, maskSecrets,
+  // v0.17 Batch P: the read-only allowlist, the permission relay, per-client RTT.
+  isSafeGuestCommand, parsePermOptions, permOptionsReport, validPermChoice, PERM_TEXT_MAX } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -802,7 +804,11 @@ function startHeartbeat(wss) {
       console.log(`[heartbeat] ${who} missed a ping round — terminating`);
       ws.terminate();
     }
-    for (const ws of ping) { ws.jamAlive = false; try { ws.ping(); } catch { /* closing */ } }
+    for (const ws of ping) {
+      ws.jamAlive = false;
+      ws.jamPingAt = Date.now(); // v0.17 P5: the round trip is already being paid for — time it
+      try { ws.ping(); } catch { /* closing */ }
+    }
   }, HEARTBEAT_GAP);
   timer.unref?.();
   console.log(`heartbeat: ping every ${HEARTBEAT_GAP}ms, terminate on a missed round`);
@@ -972,7 +978,16 @@ function onSocket(ws, req) {
   // jam client uses answers protocol pings automatically and gives the application no say in
   // it, so there is nothing to write on the client side — this is the whole client contract.
   ws.jamAlive = true;
-  ws.on('pong', () => { ws.jamAlive = true; });
+  ws.on('pong', () => {
+    ws.jamAlive = true;
+    // v0.17 P5: the same round trip, now also the connection-quality figure. Per socket, so it
+    // cannot ride on `status` (which is broadcast and kept in history) — its own tiny frame,
+    // carrying the heartbeat interval so the client can tell a slow link from a dead one.
+    if (ws.jamPingAt && clients.has(ws)) {
+      send(ws, { t: 'net', id: nextId++, ts: Date.now(), rtt: Date.now() - ws.jamPingAt, heartbeat: HEARTBEAT_GAP });
+    }
+    ws.jamPingAt = 0;
+  });
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return sendError(ws, 'bad JSON'); }
@@ -1067,6 +1082,12 @@ function onSocket(ws, req) {
       send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: filesReport(filesNewestFirst(touched), opts.cwd) });
     } else if (m.t === 'diff') {
       onDiff(ws, me, m);
+      // v0.17 P2: `/answer` — the numbered options claude is showing, and a request to answer
+      // with one of them. `permok` is the host's yes/no on the same ladder as everything else.
+    } else if (m.t === 'perm') {
+      onPerm(ws, me, m);
+    } else if (m.t === 'permok') {
+      onLadderAnswer('permission', ws, me, m);
     } else if (m.t === 'key') {
       // F3 passthrough: the host's keyboard, straight into the TUI. This is the one path
       // where bytes are NOT sanitized — driving a permission prompt or the /model picker is
@@ -1152,6 +1173,18 @@ const ladders = {
     denied: (r) => `${r.detail} was refused by ${opts.name}`,
     run: (r, always) => grantUpload(r, always),
   },
+  // v0.17 P2: ONE digit into a permission prompt that is up right now. The record carries the
+  // choice, the option text it stood for and how many options there were, because all three are
+  // re-checked against the live screen before anything is typed (see runPermission).
+  permission: {
+    label: 'permission',
+    frame: (r) => ({ t: 'permreq', name: r.name, choice: r.choice, option: r.optionText, options: r.count }),
+    ask: (r) => `${r.name} wants to answer the prompt with ${r.choice}. ${r.optionText} — /allow-perm ${r.name} | /allow-perm ${r.name} always | /deny-perm ${r.name}`,
+    busy: (r) => `your answer (${r.choice}) is still waiting for the host — one at a time`,
+    expired: (r) => `answering ${r.choice} expired — nobody approved it, and nothing was typed`,
+    denied: () => `${opts.name} answered the prompt themselves — nothing of yours was typed`,
+    run: (r, always) => runPermission(r, always),
+  },
 };
 // requests: ws -> record {name, ws, detail?, size?, timer, popped}. always: lowercased names.
 for (const l of Object.values(ladders)) { l.requests = new Map(); l.always = new Set(); }
@@ -1230,7 +1263,11 @@ function onSlash(ws, me, text) {
       return sendError(ws, `${slashName(v.text)} ends or wipes the session for everyone — ` +
         'the host runs that one, and it cannot be approved for a guest');
     case 'run':
-      return runSlash(me.name, v.text, ` (${opts.name} approved ${me.name}'s commands for this jam)`);
+      // v0.17 P1: two ways to get here now, and everybody is told which one it was — an
+      // allowlisted read-only command never involved the host at all.
+      return runSlash(me.name, v.text, isSafeGuestCommand(v.text)
+        ? ' (read-only — no approval needed)'
+        : ` (${opts.name} approved ${me.name}'s commands for this jam)`);
     default:
       return askHost('cmd', ws, me, { detail: v.text });
   }
@@ -1255,6 +1292,85 @@ async function typeSlash(text) {
   // a beat to settle on the exact match before submitting.
   await sleep(300);
   tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+}
+
+// ------------------------------------ v0.17 P2: the permission relay ----
+// The ceiling this lifts: "guests cannot answer permission prompts". NOT by giving a guest F3's
+// raw key passthrough — arbitrary bytes into the host's TUI from off-box is a security regression,
+// and it stays refused. Instead the daemon reads the prompt's own numbered options off the pane,
+// shows them to the guest who asked, puts ONE chosen digit on the same approval ladder as a
+// command, and — only after the host says yes — types that digit and nothing else.
+//
+// Five gates, and all five have to hold: `status.waiting` (there is a prompt), the options parse
+// (we know what is on screen), the digit is one of them, the host approved THAT digit, and the
+// screen still says the same thing at the moment of typing. Any of them missing is a refusal;
+// none of them guesses.
+
+// `/answer` and `/answer <n>` from any client.
+function onPerm(ws, me, m) {
+  // No prompt, no relay. This is the difference between answering a question and typing into
+  // claude's input box, and it is the guard that makes the rest safe.
+  if (!status.waiting) {
+    return sendError(ws, 'nothing is waiting for a permission answer right now — '
+      + `the ⚠ in the status row is when /answer works${trusted(me) ? '' : ', and the host can always answer with F3'}`);
+  }
+  const options = parsePermOptions(capture());
+  if (!options.length) {
+    return sendError(ws, 'I cannot read numbered options off claude\'s screen, so there is nothing '
+      + 'I could safely answer — the host answers this one (F3 attaches the real TUI)');
+  }
+  // Bare `/answer`: what IS on the screen. Read-only, so it needs no approval — it describes a
+  // screen the asker is already watching in the mirror. Only they see it (orientation, not news).
+  if (m.choice == null || m.choice === '') {
+    return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: permOptionsReport(options) });
+  }
+  const v = validPermChoice(m.choice, options);
+  if (!v.ok) return sendError(ws, v.error);
+  const rec = { name: me.name, ws, choice: v.n, optionText: v.text, count: options.length };
+  // The host already drives this pane directly; their own /answer is the same validated digit,
+  // just with nobody to ask. A guest with standing approval (`/allow-perm … always`) likewise —
+  // and both still go through runPermission's re-check.
+  if (trusted(me) || standing('permission', me)) return runPermission(rec, standing('permission', me));
+  askHost('permission', ws, me, { ...rec, detail: `answer ${v.n}: ${v.text}`.slice(0, PERM_TEXT_MAX + 12) });
+}
+
+// Approved (or the host's own). The last gate is here, not at request time: the host approved ONE
+// option of ONE prompt, and a prompt that moved on in between would take that digit as the answer
+// to a different question. So the screen is read again and has to still say the same thing.
+function runPermission(rec, always = false) {
+  if (!status.waiting) {
+    return sendError(rec.ws, 'that prompt was already answered — nothing was typed');
+  }
+  const options = parsePermOptions(capture());
+  const v = validPermChoice(rec.choice, options);
+  if (!v.ok || v.text !== rec.optionText || options.length !== rec.count) {
+    console.log(`[permission] ${rec.name}'s ${rec.choice} dropped: the screen changed under it`);
+    return sendError(rec.ws, 'claude\'s screen changed after you asked, so your answer would have '
+      + 'gone to a different question — nothing was typed. Look again and /answer once more');
+  }
+  broadcast({ t: 'sys', text: `${rec.name} answered the permission prompt: ${rec.choice}. ${rec.optionText}`
+    + ` (approved by ${opts.name}${always ? ' — standing' : ''})` });
+  // Serialized on the injection queue, like a slash command: a digit typed while a message is
+  // mid-paste would interleave two inputs.
+  queue = queue.then(() => typePermChoice(rec.choice)).catch((e) => console.error('permission answer failed:', e.message));
+}
+
+// The one write. `sendKeyArgs` is F3's own encoder (hex per ASCII character, never a shell), fed
+// exactly one digit — the cap and the encoding are the same ones raw passthrough has always used.
+// Measured on claude 2.1.251: the bare digit answers the prompt on its own. The Enter is sent only
+// if the same options are STILL up afterwards, so a picker that needs it gets it and a prompt that
+// already closed never receives a stray submit into claude's input box.
+async function typePermChoice(n) {
+  for (const args of sendKeyArgs(String(n))) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
+  bumpActivity(); // the answer wants its echo on the next 40 ms frame
+  await sleep(300);
+  if (parsePermOptions(capture()).length) {
+    tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+    console.log(`[permission] typed ${n} and Enter (the options were still up)`);
+  } else {
+    console.log(`[permission] typed ${n} — the prompt took the digit on its own`);
+  }
+  bumpActivity();
 }
 
 // ----------------------------------------------- v0.12/v0.13: file transfers ----
