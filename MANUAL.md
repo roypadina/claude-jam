@@ -31,7 +31,11 @@ to `--replay` events, 300 by default) and prints
 the whole earlier conversation, which is why they may already know things nobody told them.
 
 The status row shows which view they are in (`⧉ live TUI` / `≡ transcript`), whether you are
-working (`✻ claude is working…`), and whether you are waiting for a permission answer.
+working (`✻ claude is working…`), whether you are waiting for a permission answer, who is typing,
+and — dim, on the right — that person's own connection round trip (`~120ms`, or `⚠ stale 8s` once
+their link has gone quiet longer than it should). As soon as they type a `/`, a dim row lists
+jam's own commands that match. Only jam's: the client cannot know yours (they depend on the host's
+plugins, MCP servers and version), so nothing there is a guess.
 
 ## Roles
 
@@ -58,16 +62,16 @@ left off. Until v0.15 F3 proxied each keystroke over the network and waited for 
 which was 300-500 ms per key; now there is no proxy at all. While the host is attached their
 mirror is paused, so guests keep watching but the host's own client is not on screen.
 
-Guests never get F3 (host + loopback only, enforced by the daemon) — if a guest asks, tell them
-to ask the host, or to send a `/command` request. `tmux attach -t jam` by hand does the same
-thing as F3 and always did.
+Guests never get F3 (host + loopback only, enforced by the daemon) — if a guest asks, tell them to
+ask the host, to send a `/command` request, or (for a permission prompt specifically) to use
+`/answer`, below. `tmux attach -t jam` by hand does the same thing as F3 and always did.
 
 ## Slash commands
 
 - **jam's own** (everyone): `/c` `/who` `/help` `/quit` `/mirror` `/tools` `/export` `/send`
-  `/paste` `/get` `/files` `/diff`.
+  `/paste` `/get` `/files` `/diff` `/answer`.
   Host-only: `/join` `/accept` `/deny` `/token` `/allow-cmd` `/deny-cmd` `/allow-export`
-  `/deny-export` `/accept-file` `/deny-file`.
+  `/deny-export` `/accept-file` `/deny-file` `/allow-perm` `/deny-perm`.
 - **yours** (`/model`, `/compact`, `/mcp`, `/status`, …): anything jam does not own.
   - From the **host's** client it is typed into this TUI verbatim (no `[Name]:` prefix), so
     your own command palette runs it; any picker it opens shows up in everyone's mirror and
@@ -78,9 +82,59 @@ thing as F3 and always did.
     Approved, it runs and everybody is told who approved it. `always` is standing approval for
     that guest for this jam only. Default is deny; requests expire after 2 minutes and only one
     at a time per guest.
+  - **Three of yours are read-only and need no approval at all: `/cost`, `/status`, `/context`.**
+    A guest runs those directly and everybody sees `* Dana ran /cost in the TUI (read-only — no
+    approval needed)`. Exactly those three and exactly bare: `/cost --json` carries an argument
+    nobody vetted, so it goes back to being a request. If a guest asks why `/cost` "did not ask",
+    that is why. Their output appears on the shared screen like anything else, so a guest can put
+    your `/status` panel in front of the whole jam.
   - **`/exit`, `/clear` and `/resume` are host-only, hard**: they end or wipe the session for
     everyone, so a guest cannot request them at all and `always` never covers them. (`/exit`
     and `/quit` in a client just leave that client — the session keeps running.)
+
+## Answering your permission prompts (`/answer`)
+
+When you ask for permission — a `Bash` command, an edit, a tool — everyone sees the prompt on their
+mirror, and the status row says `⚠ waiting for permission`. Until v0.17 only the host could answer
+it. Now a guest can too, and it is worth knowing exactly how far that goes, because you may be
+asked:
+
+- **`/answer`** (no number) — the daemon reads the numbered options off your screen and shows them
+  to whoever asked, and to nobody else. Nothing is typed; looking is not acting.
+- **`/answer <number>`** — that person offers that one option. The host sees
+  `⏎ Dana wants to answer 2. Yes, and always allow access to /tmp — /allow-perm Dana ·
+  /allow-perm Dana always · /deny-perm Dana`, and the same request in their approval bar, where
+  `a` allows it once. Approved, the daemon types **that single digit and nothing else**, and
+  everybody is told: `* Dana answered the permission prompt: 2. … (approved by Roy)`.
+- **A guest never gets raw keys.** That is F3, and it is host-only on purpose. The relay can type
+  one digit that was on the screen, for one prompt, with the host's yes — and nothing else, ever.
+- Five things all have to be true or nothing is typed: you are actually waiting; the daemon can
+  read numbered options off the screen; the number is one of them; the host approved that number;
+  and the screen still shows the same options when the key goes in. If your screen moved on in
+  between, the answer is dropped and the guest is told to look again — better a wasted request
+  than a digit answering a different question.
+- It refuses rather than guesses. No prompt up, a screen it cannot parse (it wants your own `❯`
+  marker or a question line above the options), a number that is not on screen, more than nine
+  options: all refused, and the host can always answer with F3. If somebody says `/answer` "does
+  nothing", it is one of those, and the exact reason went to their own client as a `!` line.
+- `always` (`/allow-perm Dana always`) lets that guest answer prompts for the rest of the jam
+  without asking. It is the widest grant in the tool — say so plainly if anyone asks — though even
+  then it is still one on-screen digit, re-checked against the live screen every time. A one-key
+  `a` on the bar never grants it; only the typed command does.
+
+## Bells and notifications
+
+Two moments ring a participant's terminal bell (`\x07`) and, on macOS, raise a desktop
+notification:
+
+- **You start waiting for a permission answer** — the host's client only, since the host is who can
+  always answer.
+- **Somebody says their name** in a message or in `/c` chat — whole word, case-insensitive,
+  `@Dana` included, and never their own line. So "Dana, can you look?" pings Dana; "bandana" does
+  not.
+
+At most one nudge every three seconds, so a burst is one bell. There is no jam setting to turn it
+off — that is the terminal's own bell setting.
 
 ## Joining: token or knock
 
@@ -89,7 +143,8 @@ thing as F3 and always did.
   `⚑ Dana wants to join — /accept Dana | /deny Dana` in their client. Knocks expire after
   2 minutes.
 - **The approval bar (v0.16).** Every request waiting for the host — a knock, a guest's
-  `/command`, an `/export`, a file — also raises one row just above the host's status row:
+  `/command`, an `/export`, a file, a permission answer (`⏎`) — also raises one row just above the
+  host's status row:
   `⚑ Dana wants to join (100.86.8.97) · [a]ccept [d]eny [i]gnore · 2:00`, counting down to that
   request's expiry, with `+N more` when several wait. **`a` accepts, `d` denies, `i` or Esc
   hides the bar** (the request keeps waiting). Those keys work only while the host's input line
@@ -230,12 +285,14 @@ to be told anything.
 `/c <text>` humans-only chat · `/who` participants · `/help` reprint the onboarding block ·
 `/mirror` (or F2) swap views · `/tools [on|off]` tool log / collapse mode · `/quit` leave ·
 `/files` paths this session touched · `/diff [path]` git diff of the working tree ·
+`/answer [n]` answer a permission prompt (host approves) ·
 `/send <path>` send a file (host: offer one) · `/paste [caption]` the clipboard's image ·
 `/get [name]` take an offered file · `/export` this session's transcript ·
 Shift+Enter, Option+Enter or a trailing `\` for multi-line.
 Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` · `/join` ·
 `/allow-cmd [name] [always]` · `/deny-cmd <name>` · `/allow-export [name] [always]` ·
 `/deny-export <name>` · `/accept-file [name] [always]` · `/deny-file <name>` ·
+`/allow-perm [name] [always]` · `/deny-perm <name>` ·
 **F3** attach the real TUI (`Ctrl-b d` back) · **a**/**d**/**i** answer the approval bar.
 Any other `/command` is one of yours — see Slash commands above.
 
@@ -267,7 +324,7 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   installed, otherwise osascript). Elsewhere, save the image and use `/send <path>`.
 - F3 does nothing → they are a guest (host + loopback only), or their terminal sends a
   different F3 sequence; the host can `tmux attach -t jam` instead — that is exactly what F3
-  does for them.
+  does for them. A guest who only needs to answer a permission prompt wants `/answer`.
 - Host is stuck inside the TUI after F3 → `Ctrl-b d` detaches and their jam client comes back.
   If they launched jam from inside another tmux, the outer prefix takes the first `Ctrl-b`, so
   it is `Ctrl-b Ctrl-b d`.
@@ -284,6 +341,22 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   Tailscale.app cannot change funnel config at all — its CLI replies `The Tailscale GUI failed
   to start … (Tailscale.CLIError error 3.)`; the standalone build from tailscale.com can.
   `--tunnel` is always available as the fallback.
+- A guest's `/answer` says "nothing is waiting for a permission answer" → you are not asking for
+  anything right now. The `⚠` in the status row is the moment it works.
+- `/answer` says it cannot read numbered options → your prompt is not one this can drive (or what
+  is on screen is not a prompt at all). The host answers that one with F3.
+- `/answer` says "claude's screen changed after you asked" → the prompt was answered or replaced
+  between the request and the host's approval, so nothing was typed. Look at the screen and ask
+  again.
+- A guest ran `/cost`, `/status` or `/context` and nobody was asked → correct, those three are
+  read-only and need no approval. Anything with an argument (`/cost --json`) asks again.
+- Somebody's terminal beeped → a permission prompt started waiting (host), or their name was
+  mentioned. See "Bells and notifications".
+- The status row says `⚠ stale 40s` → no heartbeat pong has come back from that client for more
+  than a couple of intervals. Their link is degraded or gone; the client reconnects on its own.
+- Somebody's name colour changed since an earlier jam → v0.17 swapped one palette colour (a pale
+  green that was too close to the green every client uses for *itself*). Colours are still stable
+  per name; that one slot is rose now.
 - `/diff` says "not inside a git repository" → the host's `--cwd` is not in one. `/files` still
   works; it just reports what tool calls named rather than what git sees.
 - `/diff` says "no unstaged changes" → the work is already committed or staged; `/diff` only
