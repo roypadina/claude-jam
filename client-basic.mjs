@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // claude-jam terminal client. No dependencies: global WebSocket + readline.
 import readline from 'node:readline';
-import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames, reconnectMessage, historyDivider } from './lib.mjs';
-import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
+import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames, reconnectMessage, historyDivider,
+  // v0.17 Batch P: the bell, @mentions and the RTT chip work here too (P6's hint list does not —
+  // this renderer only ever appends lines, it has no live region to draw one in).
+  BELL, bellAllowed, mentionsMe, rttText } from './lib.mjs';
+import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const argv = process.argv.slice(2);
 const url = argv.find((a) => a.startsWith('ws'));
@@ -45,8 +48,19 @@ let lastTurn = null; // turnKey of the last emitted block, so blocks get a blank
 let block = null; // current open message block (nextBlock in lib.mjs), drives lastTurn/turnKey
 let spin = 0;
 let spinTimer = null;
+let net = null; // v0.17 P5: the last heartbeat round trip the daemon measured for this socket
+let lastBell = 0;
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: '' });
+
+// v0.17 P3/P4: claude needs an answer, or somebody said your name. The bell is the portable half;
+// macOS gets a real notification with it. Rate-gated, so a burst is one nudge.
+function nudge(title, body) {
+  if (!bellAllowed(lastBell, Date.now())) return;
+  lastBell = Date.now();
+  try { process.stdout.write(BELL); } catch { /* stdout closed */ }
+  desktopNotify(title, body);
+}
 
 function statusLine() {
   const t = [...typing.entries()].filter(([, at]) => Date.now() - at < 4000).map(([n]) => n);
@@ -54,7 +68,9 @@ function statusLine() {
   if (t.length) bits.push(`${t.join(', ')} ${t.length > 1 ? 'are' : 'is'} typing…`);
   // Back to dim after the orange bit: the whole status sits inside one dim bracket.
   if (state.busy) bits.push(`${C.accent}${SPIN[spin]} claude is working…${C.off}${C.dim}`);
-  if (state.waiting) bits.push('⚠ waiting for host permission');
+  if (state.waiting) bits.push(`⚠ waiting for permission${IS_HOST ? '' : ' — /answer shows the options'}`);
+  const rtt = rttText(net, Date.now(), net?.heartbeat);
+  if (rtt) bits.push(rtt);
   return bits.join(' · ');
 }
 
@@ -137,6 +153,8 @@ function logOnboarding() {
 function render(ev) {
   switch (ev.t) {
     case 'say': {
+      // v0.17 P3: somebody said your name — never your own line.
+      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) nudge(`${ev.from} in the jam`, ev.text);
       // Self is always green; everybody else gets a stable color hashed from their name, so
       // it survives reconnects and roster churn instead of depending on join order.
       const c = ev.from === NAME ? C.me : fg256(userColor(ev.from));
@@ -144,7 +162,10 @@ function render(ev) {
     }
     // Human-only: the agent never sees it, so it renders unmissable — label, prefix and text
     // all in the one color nothing else uses.
-    case 'chat': return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat });
+    case 'chat': {
+      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) nudge(`${ev.from} in the jam`, ev.text);
+      return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat });
+    }
     case 'agent': {
       if (ev.kind === 'tool') return emit({ turnKey: blockKey('agent'), glyph: '⚙', text: ev.text, textColor: C.dim });
       if (ev.kind === 'tool-result') return emit({ turnKey: blockKey('agent'), glyph: '⎿', glyphColor: C.dimmer, text: ev.text, textColor: C.dimmer });
@@ -158,7 +179,19 @@ function render(ev) {
       return;
     }
     case 'typing': if (ev.from !== NAME) { typing.set(ev.from, Date.now()); reprompt(); } return;
-    case 'status': state = { busy: ev.busy, waiting: ev.waiting }; setSpinner(state.busy); return reprompt();
+    case 'status': {
+      // v0.17 P3: the host is who can always answer a prompt, so the host is who gets rung.
+      if (IS_HOST && ev.waiting && !state.waiting) {
+        nudge('claude needs an answer', 'a permission prompt is waiting in the jam');
+      }
+      state = { busy: ev.busy, waiting: ev.waiting };
+      setSpinner(state.busy);
+      return reprompt();
+    }
+    // v0.17 P5: this socket's own round trip, from the daemon's heartbeat.
+    case 'net':
+      net = { rtt: Number(ev.rtt), at: Date.now(), heartbeat: Number(ev.heartbeat) || undefined };
+      return reprompt();
     // Knocks: `state` means it is about us waiting, `name` means somebody wants in.
     case 'knock': {
       if (ev.state === 'pending') return sys('waiting for host approval…');
@@ -177,6 +210,10 @@ function render(ev) {
     case 'filereq':
       return emit({ glyph: '⇪', glyphColor: C.accent,
         text: `${ev.name} wants to send ${ev.file} (${humanBytes(ev.size)}) — /accept-file ${ev.name} · /accept-file ${ev.name} always · /deny-file ${ev.name}` });
+    // v0.17 P2: a guest wants one digit typed into the permission prompt (host clients only).
+    case 'permreq':
+      return emit({ glyph: '⏎', glyphColor: C.accent,
+        text: `${ev.name} wants to answer the prompt with ${ev.choice}. ${ev.option} — /allow-perm ${ev.name} · /allow-perm ${ev.name} always · /deny-perm ${ev.name}` });
     case 'offer':
       return emit({ glyph: '⇩', glyphColor: C.accent,
         text: `${ev.from} offers ${ev.name} (${humanBytes(ev.size)}) — /get ${ev.name} saves it to ./${DOWNLOAD_DIR}/` });
@@ -336,6 +373,16 @@ rl.on('line', (raw) => {
     // v0.17 F2/F3: the daemon owns both answers — the transcript and the cwd are its.
     case 'files': sendMsg({ t: 'files' }); break;
     case 'diff': sendMsg({ t: 'diff', path: act.path || undefined }); break;
+    // v0.17 P2: only the daemon can see claude's screen, so it reads the options and does the
+    // typing. A bare `/answer` asks what they are; `/answer <n>` offers one to the host.
+    case 'perm':
+      sendMsg({ t: 'perm', choice: act.choice ?? undefined });
+      if (act.choice != null && !IS_HOST) sys(`asked the host to answer ${act.choice} — nothing is typed until they say yes`);
+      break;
+    case 'perm-ok':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'permok', op: act.op, name: act.name || undefined, always: act.always });
+      break;
     case 'token':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'token', op: act.op, value: act.value });
