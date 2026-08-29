@@ -1,5 +1,75 @@
 # Changelog
 
+## Unreleased
+
+### The menu is the product surface
+
+`claude-jam` **with no arguments** is now a launcher menu, and **`/menu`** inside a client is a
+live control panel. Neither is a feature of its own: both are renderers over one tree of data,
+and every row builds a command that already existed.
+
+- **The launcher** (`claude-jam`, no arguments — `@inkjs/ui` on the ink 5 + React 18 stack
+  already shipped, no other new dependency): Host a jam · Join a jam · My jams · End a jam. The
+  Host screen collects the directory, name, jam name, access mode (knock / token /
+  invite-only), remote relay, browser view and extra claude args, and **prints the exact
+  `claude-jam host …` command line before it runs it** — so the menu teaches the CLI instead of
+  hiding it. A relay that cannot run here is greyed with the reason and the exact fix. Join
+  takes an invite link *or* a `ws://` URL, and the name/token fields appear only for the URL,
+  because a link already carries both. My jams is the v0.18 table with attach / copy-an-invite
+  (minted and put on the clipboard) / end. `--no-menu` or any argument keeps today's behaviour;
+  a non-tty prints the usage.
+- **`/menu`**: People (who is here, everything pending, and the standing `always` grants —
+  **listed and individually revocable for the first time**, they were invisible once given —
+  plus `/kick`), Invites, Access, Session, and Help & guides (MANUAL.md rendered inline and
+  scrollable, the keyboard reference, the wiki pages, and every command with a one-line
+  description and one key to run it). It shows the jam's current state next to every toggle, so
+  it doubles as the status page. A guest's `/menu` lists exactly what a guest may do.
+- **Completeness is a test, not a habit.** A unit test asserts every `JAM_COMMANDS` entry and
+  every documented `host` flag appears in the menu tree with a description, and that the guest
+  menu lists exactly the guest commands. Adding a command without a menu entry fails the suite.
+
+### Relays are runtime-controllable
+
+- `/menu → Access → Remote`, `/remote off|tunnel|funnel` in a client, and
+  `claude-jam remote <off|tunnel|funnel> [--jam NAME] [--reissue]` from a shell (loopback
+  control endpoint, same guard as `/admit`). One code path: the relay mode is runtime state and
+  the same `startTunnels`/`stopTunnels` the launcher uses do the work. **Nobody already
+  connected is dropped** — a relay change touches the relay children and the URLs, never a
+  socket. Preconditions are re-probed in the daemon and shown inline with the exact fix.
+- **Re-issuing every invite link** is offered in the same step, and says how many were
+  re-issued. A re-issue mints a new link per name and revokes the old one (the daemon keeps only
+  the hash of each secret, so an old link cannot be re-encoded) — and it **waits for the relay's
+  hostname**: doing it at switch time, as the first cut did and a live run proved, mints links
+  carrying exactly the address the re-issue exists to replace.
+
+### A relay coming up is now said out loud
+
+Observed live: the host's welcome printed only the LAN invite line, nothing announced the tunnel
+~10 s later, and a later `/join` left three near-identical blocks with no way to tell which was
+current.
+
+- **Reproduced, and it was not the push.** Against a stub daemon: the `{t:'token'}` frame *does*
+  reach a connected host client. The client rendered it into the **mirror view's three-row
+  deferred strip** — the mirror is the default view — where the next three system lines pushed it
+  off within 1.5 s. So the line arrived and then scrolled away unseen.
+- A relay that comes up is now its own event: `tunnel ready: <the whole join command>`, rendered
+  where the host is actually looking (and repeated in the daemon log). A respawn to the same
+  hostname stays quiet; a change says `moved`.
+- At boot with `--tunnel`/`--funnel` the welcome says **`tunnel: starting…`** under the LAN line
+  instead of printing a set that is about to be wrong.
+- `/join` (and every `{t:'token'}` refresh) prints **one dated block** — `── invite 17:29 ───` —
+  with `(earlier invite lines above are stale)` when the log already holds some.
+
+### Also
+
+- **`--invite-only`** (and `/token invite-only on|off` at runtime): a knock is refused outright
+  with "ask the host for a claude-jam invite link", rather than left waiting for a host who has
+  decided not to be asked. A valid token and the host's own client still come in above it.
+- The **browser view (ttyd)** can be turned on and off while the jam runs, from
+  `/menu → Access`, not only with `--view` at launch.
+- `claude-jam remote` with no mode is a question, not a mistake: it prints what is running and
+  what could be, with the reasons for what cannot.
+
 ## 0.18.0
 
 ### A message is never lost, and big pastes stop failing
