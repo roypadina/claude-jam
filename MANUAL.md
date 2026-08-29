@@ -97,8 +97,9 @@ ask the host, to send a `/command` request, or (for a permission prompt specific
 
 ## Slash commands
 
-- **claude-jam's own** (everyone): `/c` `/who` `/help` `/menu` `/quit` `/mirror` `/tools` `/export`
-  `/send` `/paste` `/get` `/files` `/diff` `/answer` `/outbox` `/retry`.
+- **claude-jam's own** (everyone): `/c` `/who` `/help` `/menu` `/quit` `/exit` `/mirror` `/tools`
+  `/export` `/send` `/paste` `/get` `/files` `/diff` `/answer` `/outbox` `/retry` `/history`
+  `/ping` `/nudge` `/sound` `/peer` `/peers`.
   Host-only: `/join` `/accept` `/deny` `/token` `/remote` `/allow-cmd` `/deny-cmd`
   `/allow-export` `/deny-export` `/accept-file` `/deny-file` `/allow-perm` `/deny-perm`
   `/invite` `/invites` `/kick` `/end`.

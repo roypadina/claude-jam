@@ -3756,6 +3756,17 @@ test('v0.21 no user-visible string emits a bare `jam ` command form', () => {
   assert.doesNotMatch(alias, /^\s*echo\b/m);
 });
 
+// MANUAL.md is the text claude ITSELF is given, so a command missing from it is not a typo —
+// it is the agent answering "what can I do here?" with a shorter list than the tool has. Six
+// were missing by the 0.21.0 gate, `/peer` and `/peers` among them, on the release that shipped
+// them. Membership only: where in the file a command is documented is a writer's business.
+test('v0.21.0 MANUAL.md names every command the tool has', () => {
+  const manual = fs.readFileSync(new URL('./MANUAL.md', import.meta.url), 'utf8');
+  for (const c of JAM_COMMANDS) {
+    assert.match(manual, new RegExp(`\`${c}(?![\\w-])`), `MANUAL.md never mentions ${c}`);
+  }
+});
+
 // ============================== v0.21.0: --help and /menu name the same host flags ==========
 // The third lint, and it exists because the thing it checks cannot be caught by running the
 // program once: `--help` comes from the bash launcher's `echo` lines and `/menu → Help & guides`

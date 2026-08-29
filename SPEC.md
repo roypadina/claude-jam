@@ -752,7 +752,7 @@ The public README keeps a short list. This is all of them.
 
 ## Running the end-to-end smokes
 
-Seventeen end-to-end smokes, verified 2026-08-29 on node 24.15 / tmux 3.7c /
+Eighteen end-to-end smokes, verified 2026-08-29 on node 24.15 / tmux 3.7c /
 claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -836,6 +836,16 @@ node scripts/smoke-invite.mjs
 # name. ~1 min, costs nothing.
 node scripts/smoke-answer.mjs
 
+# v0.23: the fourteenth smoke. NO arguments, no daemon of yours, no real claude. Own $TMPDIR,
+# ports 7891/7893/7895, sessions jamdisco*, killed by exact name. ~1 min, costs nothing.
+#
+# It REALLY DOES advertise on the local network while it runs — that is the thing under test.
+# Every registration is a child of a daemon it started; its teardown FAILS the run if anything
+# is left advertising, and step 9 counts the `dns-sd -R` processes for one port across a real
+# re-announce, because a leaked advertisement is the one failure this project can inflict on
+# somebody else's network. Needs /usr/bin/dns-sd, and skips cleanly when there is none.
+node scripts/smoke-discover.mjs
+
 # v0.25/v0.26/v0.27: the fifteenth smoke. NO arguments, no daemon of yours, no real claude — and
 # a cwd of its own as well as a $TMPDIR of its own, because it writes real uploads and they must
 # land in jam-uploads/ under a directory it made. Its own port (7881) and two tmux sessions,
@@ -875,6 +885,21 @@ node scripts/smoke-scroll.mjs
 # (filing under its own process.cwd()) and tmux (#{pane_current_path}) report the resolved path.
 # Verified 2026-08-29: all 12 steps pass.
 node scripts/smoke-adopt.mjs
+
+# v0.29: the eighteenth smoke. NO arguments, no daemon of yours, no real claude AND no real peer
+# executor. Own $TMPDIR, a second $TMPDIR+$HOME for the guest, ports 7941/7943, sessions jampeer
+# and jampeeroff. ~40 s, costs nothing.
+#
+# It is the trust-boundary smoke: the executor is scripts/fake-claude.mjs, which emits the same
+# stream-json shapes and writes down the argv, the cwd, the stdin and its own pid — so "no
+# bypassPermissions in the argv", "the prompt never reached an argv", "the cwd was a fresh
+# scratch dir and it is gone" and "the wall clock killed that pid" are facts on disk rather than
+# claims. It runs a REAL --basic client as the guest, because the guest half is the half that
+# spawns. It asserts the scratch directory by BASENAME: on macOS $TMPDIR is a symlink, so the
+# argv carries /var/folders/… while the child's own process.cwd() reports /private/var/folders/…
+# — the same trap smoke-adopt's fixtures hit.
+# Verified 2026-08-29: all 15 steps pass.
+node scripts/smoke-peer.mjs
 ```
 
 ### What each smoke covers of v0.25/v0.26/v0.27

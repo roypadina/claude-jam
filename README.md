@@ -650,11 +650,12 @@ Everything that is only true of one operating system lives in `platform.mjs` —
 the desktop notification, sounds, `$TMPDIR`, `~/.config`, and writing a file only its owner can
 read. It is the only module allowed to spawn a platform binary, and a test says so.
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **325 tests**. Fifteen
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **388 tests**. Eighteen
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
 in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs`, `smoke-perm.mjs`,
-`smoke-lifecycle.mjs`, `smoke-invite.mjs`, `smoke-answer.mjs`, `smoke-discover.mjs` and
-`smoke-nudge.mjs` bring their own — most of them run under a `TMPDIR` of their own and start by
+`smoke-lifecycle.mjs`, `smoke-invite.mjs`, `smoke-answer.mjs`, `smoke-discover.mjs`,
+`smoke-nudge.mjs`, `smoke-scroll.mjs`, `smoke-adopt.mjs` and `smoke-peer.mjs` bring their own —
+most of them run under a `TMPDIR` of their own and start by
 proving they will not touch a session they did not create). `smoke-nudge.mjs` asserts the sounds
 **through the platform seam**, with a stub `afplay` on each client's own `PATH`: a knock and an
 auto-join have to produce two different calls, and only the client a nudge is addressed to may
