@@ -82,10 +82,15 @@ ask the host, to send a `/command` request, or (for a permission prompt specific
 
 ## Slash commands
 
-- **jam's own** (everyone): `/c` `/who` `/help` `/quit` `/mirror` `/tools` `/export` `/send`
-  `/paste` `/get` `/files` `/diff` `/answer`.
-  Host-only: `/join` `/accept` `/deny` `/token` `/allow-cmd` `/deny-cmd` `/allow-export`
-  `/deny-export` `/accept-file` `/deny-file` `/allow-perm` `/deny-perm`.
+- **jam's own** (everyone): `/c` `/who` `/help` `/menu` `/quit` `/mirror` `/tools` `/export`
+  `/send` `/paste` `/get` `/files` `/diff` `/answer` `/outbox` `/retry`.
+  Host-only: `/join` `/accept` `/deny` `/token` `/remote` `/allow-cmd` `/deny-cmd`
+  `/allow-export` `/deny-export` `/accept-file` `/deny-file` `/allow-perm` `/deny-perm`
+  `/invite` `/invites` `/kick` `/end`.
+  **If somebody asks "what can I do here?", the answer is `/menu`** — it lists every one of
+  these with a one-line description and runs it with one key, shows the jam's current state
+  next to each toggle, and renders this manual inline. A guest's `/menu` shows exactly what a
+  guest may do. Nothing in it is a separate feature: every row is one of the commands above.
 - **yours** (`/model`, `/compact`, `/mcp`, `/status`, …): anything jam does not own.
   - From the **host's** client it is typed into this TUI verbatim (no `[Name]:` prefix), so
     your own command palette runs it; any picker it opens shows up in everyone's mirror and
@@ -210,6 +215,25 @@ notification:
 At most one nudge every three seconds, so a burst is one bell. There is no jam setting to turn it
 off — that is the terminal's own bell setting.
 
+## The menu (`/menu`, and `claude-jam` with no arguments)
+
+Two menus, and neither is a feature of its own — both build the command that already exists.
+
+- **`claude-jam` with no arguments** opens the launcher: Host a jam · Join a jam · My jams ·
+  End a jam. The Host screen collects the directory, your name, the jam name, the access mode
+  (knock / token / invite-only), the remote relay, the browser view and any extra claude args —
+  and shows the exact `claude-jam host …` command line **before** it runs it. Options that
+  cannot work on this machine are greyed with the reason and the fix. Any argument at all
+  (including `--no-menu`) skips it, and a non-tty prints the usage.
+- **`/menu` inside a client** is the live control panel: People, Invites, Access, Session, and
+  Help & guides. It shows the jam's current state next to each toggle (who is here, what is
+  pending, the standing `always` grants, the access mode, the relay and its URL, the replay
+  depth), runs any command with one key, and renders this manual inline. A guest's `/menu` is
+  the reduced version: exactly what a guest may do, and no host controls.
+
+Every user-visible feature has to appear in `/menu` — that is enforced by a test, not by
+memory, so if a command exists it is in there.
+
 ## Joining: invite link, token, or knock
 
 - **Invite link (v0.22, the easy one).** The host runs `claude-jam invite Dana` (or `/invite Dana`
@@ -231,10 +255,16 @@ off — that is the terminal's own bell setting.
   - A link's addresses are fixed when it is minted: tunnel first, LAN second, tried in that order.
     If the host's `--tunnel` restarted, its hostname changed and older links only reach the jam
     over the LAN address — mint fresh ones (or use `--funnel`, whose hostname never changes).
+    Switching the relay from `/menu → Access → Remote` offers to re-issue them all for you.
 - Token set → guests with `--token` enter directly.
 - No token (default) → a guest "knocks": they wait, and the host sees
   `⚑ Dana wants to join — /accept Dana | /deny Dana` in their client. Knocks expire after
   2 minutes.
+- **Invite-only (v0.24)** — `claude-jam host --invite-only`, or `/token invite-only on` while the
+  jam runs, or the access row on the launcher's Host screen. A knock is then **refused outright**
+  with "this jam is invite-only — ask the host for a claude-jam invite link", rather than left
+  waiting for a host who has decided not to be asked. A valid token (and the host's own client)
+  still comes in above it, and nobody already connected is affected.
 - **The approval bar (v0.16).** Every request waiting for the host — a knock, a guest's
   `/command`, an `/export`, a file, a permission answer (`⏎`) — also raises one row just above the
   host's status row:
@@ -410,6 +440,28 @@ connected on the old one has to be sent the new line (`/join` reprints it); thei
 as much after five failed reconnects. With `--funnel` the hostname is unchanged, so nobody has
 to be told anything.
 
+**Neither is launch-only (v0.24.1).** A jam started plain can go remote later, and come back:
+`/menu → Access → Remote`, `/remote off|tunnel|funnel` in a client, or
+`claude-jam remote <off|tunnel|funnel> [--jam NAME]` from a shell. It spawns the same relay
+children the launcher does, so there is one code path; a mode that cannot run here is shown with
+the reason and the exact fix (no `cloudflared` on PATH, Funnel not enabled for the tailnet, a
+sandboxed App Store Tailscale) instead of failing quietly. **Nobody already connected is
+dropped** — a relay change touches the relay children and the URLs, never a socket.
+
+**Links minted before the change carry the old address**, so the switch offers to re-issue every
+live invite link in the same step (`--reissue` on the command line). A re-issue mints a NEW link
+per name — the daemon keeps only the hash of each secret, so an old link cannot be re-encoded —
+and revokes the old one, so the old links stop working and the new ones have to be sent out. It
+**waits for the relay's hostname** before minting, or the new links would carry exactly the
+address they exist to replace.
+
+**When a relay comes up you are told (v0.24b).** Host clients get a one-line event —
+`tunnel ready: <the whole join command>` — rather than a silent state refresh; at boot the
+welcome says `tunnel: starting…` under the LAN line instead of printing a set that is about to
+be wrong; and `/join` prints ONE block with the time in its heading, with
+`(earlier invite lines above are stale)` when the log already holds some. If somebody asks
+"which of these invite lines is the live one", it is the one in the newest dated block.
+
 ## Client commands (everyone)
 
 `/c <text>` humans-only chat · `/who` participants · `/help` reprint the onboarding block ·
@@ -420,8 +472,11 @@ to be told anything.
 `/retry` send the newest kept message again · `↑`/`↓` recall your own last 50 submissions ·
 `/send <path>` send a file (host: offer one) · `/paste [caption]` the clipboard's image ·
 `/get [name]` take an offered file · `/export` this session's transcript ·
+`/menu` the control panel: every feature, its state, and one key to run it ·
 Shift+Enter, Option+Enter or a trailing `\` for multi-line.
-Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` · `/join` ·
+Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` ·
+`/token invite-only on|off` refuse knocks outright ·
+`/remote off|tunnel|funnel` put the jam on a public relay, or take it back off · `/join` ·
 `/invite <Name> [--uses N] [--expires 24h]` mint a link · `/invites` list them ·
 `/invite revoke <Name|id>` · `/kick <name> [revoke]` remove somebody already in ·
 `/allow-cmd [name] [always]` · `/deny-cmd <name>` · `/allow-export [name] [always]` ·
@@ -446,13 +501,21 @@ joining guest is replayed (default 300, `0` for none) · `--tmux <name>` a secon
 ttyd) · `--no-popup` no tmux knock popup · `--no-token-in-context` don't tell you the token ·
 `--tunnel` two Cloudflare quick tunnels · `--funnel` Tailscale Funnel instead, with a stable
 URL (`--funnel-cli <path>` if the CLI is not on PATH — on macOS it lives inside
-Tailscale.app) · `--no-attach` set everything up without opening the
+Tailscale.app) — and neither is launch-only any more: `/menu → Access → Remote` (or
+`/remote <off|tunnel|funnel>`, or `claude-jam remote <off|tunnel|funnel>` from a shell) switches
+them while the jam runs, without dropping anybody who is already connected ·
+`--invite-only` no knocking at all, so an invite link is the only door
+(`/token invite-only on|off` at runtime) · `--no-attach` set everything up without opening the
 host's client · `--attach` reopen the client on a jam that is already running ·
 `--no-prompt` / `--keep-on-exit` / `--end-on-exit` decide the "keep it running?" question up
 front · `-- <args>` passed to claude (e.g. `-- --model haiku`).
 Other subcommands: `jam sessions [--json]` / `jam ls`, `jam end [name] [--all]` / `jam kill`,
 `jam clean [--yes]`, `jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]`,
-`jam invites [--json]`, `jam invite revoke <Name|id>`, and `jam --help`.
+`jam invites [--json]`, `jam invite revoke <Name|id>`,
+`claude-jam remote <off|tunnel|funnel> [--jam NAME] [--reissue]`, and `jam --help`.
+**`claude-jam` with NO arguments opens a launcher menu** — Host a jam, Join a jam, My jams, End
+a jam — which builds the command line and shows it to you before running it, so it teaches the
+CLI rather than hiding it. `--no-menu` (or any argument) prints the usage instead.
 Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `--no-view`.
 
 ## Troubleshooting quickies
