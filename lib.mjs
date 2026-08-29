@@ -3391,8 +3391,11 @@ export const KEY_HELP = [
   { key: 'Ctrl-C', desc: 'leave the client (the jam keeps running)' },
 ];
 
-export const WIKI_PAGES = ['Install', 'Hosting', 'Joining-a-Jam', 'Remote-Access',
-  'Files-and-Export', 'Security-Model', 'Peer-Tasks', 'Troubleshooting'];
+// These are the wiki's real page SLUGS, so what /menu prints is what a URL takes. It had said
+// `Hosting` for a page whose slug is `Hosting-a-Jam` and omitted two pages that exist.
+export const WIKI_PAGES = ['Install', 'Agent-Install', 'Hosting-a-Jam', 'Joining-a-Jam',
+  'Remote-Access', 'Files-and-Export', 'Peer-Tasks', 'Security-Model', 'Architecture',
+  'Troubleshooting'];
 
 // The manual `/menu → Help & guides` renders inline. It is the SAME file claude is given
 // (v0.8), which is the point: a human and the agent read one source, so an answer from one

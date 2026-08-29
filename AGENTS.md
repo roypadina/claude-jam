@@ -65,17 +65,20 @@ the tool's dependencies, spelled the same everywhere, and they stay where they a
 node --test test.mjs      # the whole unit suite; must be green before every commit
 ```
 
-356 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
+388 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
 framework. Add tests to `test.mjs` next to the ones for the same version heading.
 
-Two of them are lints rather than assertions about behaviour, and both exist because the thing
-they check cannot be caught by running the program once:
+Three of them are lints rather than assertions about behaviour, and all three exist because the
+thing they check cannot be caught by running the program once:
 
 - **no user-visible string emits a bare `jam ` command form** — the product is `claude-jam`
   everywhere a human or an agent reads. It scans string literals in every module in the repo
   root plus the launcher's `echo` lines.
 - **no module outside `platform.mjs` spawns a platform binary** — the Windows seam only pays for
   itself if it is the only door. `dns-sd` and the avahi tools are in that list too (v0.23).
+- **`--help` and `/menu` name the same host flags** (v0.21.0) — the launcher's usage text is a
+  bash `echo` and `/menu → Help & guides` is `HOST_FLAGS` in `lib.mjs`, so the two can disagree
+  indefinitely with nothing failing. They had, on three real flags, by the 0.21.0 gate.
 
 **`tmux`, `claude`, `git`, `curl`, `cloudflared`, `tailscale` and `ttyd` are NOT platform
 binaries** and stay where they are used — see §1.
@@ -185,7 +188,7 @@ real tokens, so run them once, at the end, and use `--model haiku`.
    decision, `host.mjs`/`sessions.mjs` for the effect, both clients for the surface. A small
    diff in the wrong place is a second bug, not a lazy fix.
 2. **Put the decision in `lib.mjs`** as a pure function, and the effect in the impure file. That
-   is what makes it testable, and it is why the suite is 338 fast tests and not a mock farm.
+   is what makes it testable, and it is why the suite is 388 fast tests and not a mock farm.
 3. **One commit per discrete change**, on `main`, with a message that says what changed and why
    it is that way. No amend, no rebase, no push.
 4. **The docs are part of the change, not after it** (see §4).
