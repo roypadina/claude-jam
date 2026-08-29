@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { UPLOAD_MAX, safeBaseName, humanBytes, exportFileName } from './lib.mjs';
 
 export const DOWNLOAD_DIR = 'jam-downloads';
@@ -79,6 +79,29 @@ const OSASCRIPT_PNG = [
 ].join('\n');
 
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+
+// ------------------------------------------------- v0.17 P4: the desktop nudge ----
+// Fired alongside P3's bell, because a bell only helps if the terminal is somewhere you can hear
+// it. Same `osascript` precedent /paste below already sets and documents: macOS only, argv only —
+// the title and the body arrive as arguments to a `run` handler, never interpolated into the
+// script, so a message containing a quote, a backslash or a `$` cannot become AppleScript.
+// Fire and forget by design: never awaited, output dropped, every failure swallowed. This is
+// called from a render path, and a notification must not be able to cost a frame or throw.
+export const NOTIFY_TITLE_MAX = 60;
+export const NOTIFY_BODY_MAX = 200;
+export function desktopNotify(title, body) {
+  if (process.platform !== 'darwin') return false;
+  try {
+    const child = spawn('osascript', ['-e', 'on run argv',
+      '-e', 'display notification (item 1 of argv) with title (item 2 of argv)',
+      '-e', 'end run',
+      String(body ?? '').slice(0, NOTIFY_BODY_MAX), String(title ?? 'claude-jam').slice(0, NOTIFY_TITLE_MAX)],
+    { stdio: 'ignore', detached: false });
+    child.on('error', () => { /* no osascript, or notifications are off: the bell still rang */ });
+    child.unref();
+    return true;
+  } catch { return false; }
+}
 
 export function clipboardPng() {
   if (process.platform !== 'darwin') {

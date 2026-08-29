@@ -25,8 +25,10 @@ import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
 import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
-import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage, historyDivider, toolLiveLine } from './lib.mjs';
-import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
+import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage, historyDivider, toolLiveLine,
+  // v0.17 Batch P: the bell and its gate, @mentions, the RTT chip, jam's own autocomplete.
+  BELL, bellAllowed, mentionsMe, rttText, commandMatches, COMMAND_HINTS_MAX } from './lib.mjs';
+import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
 
@@ -94,6 +96,9 @@ const store = {
   armed: true,
   hiddenKey: null,
   input: '', // what is in the input line, mirrored out of React for the single-key rule
+  // v0.17 P5: the last heartbeat round trip the daemon measured for THIS socket, plus when it
+  // arrived (this client's own clock, so a skewed daemon clock cannot make the link look stale).
+  net: null,
   xfers: new Map(), // v0.12/v0.13: incoming transfers, xfer id -> assembling record
   upload: null, // a file read and waiting for the host's yes: {name, data, caption}
   offers: new Map(), // v0.13: what the host has offered, name -> {from, size}
@@ -205,6 +210,22 @@ function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.d
 const sys = (text) => emit({ glyph: '*', text, textColor: C.dim, strip: true });
 const err = (text) => emit({ glyph: '!', glyphColor: C.err, text, textColor: C.err, strip: true });
 
+// ------------------------------------------- v0.17 P3/P4: being told you are needed ----
+// Two moments are worth interrupting somebody for: claude is waiting for a permission answer, and
+// somebody said your name. `\x07` is the portable half — every terminal already turns it into
+// whatever that user configured — and on macOS a real notification goes with it, because a bell in
+// a terminal on another desktop is a bell nobody hears. Rate-gated, so a burst is one nudge.
+// Writing the bell straight to the real stdout is safe next to ink: it paints no cell, so it
+// cannot land inside a frame and corrupt it.
+let lastBell = 0;
+let lastRtt = ''; // v0.17 P5: the RTT chip as last rendered, so only a CHANGE costs a redraw
+function nudge(title, body) {
+  if (!bellAllowed(lastBell, Date.now())) return;
+  lastBell = Date.now();
+  try { process.stdout.write(BELL); } catch { /* stdout closed: nothing to ring */ }
+  desktopNotify(title, body); // macOS only, fire and forget, never throws
+}
+
 // The host's invite lines, wherever they are shown (welcome, /join, a /token reply) —
 // including the `--tunnel` pair, which used to reach only the daemon log and token.json.
 function logJoin() {
@@ -241,6 +262,8 @@ function render(ev) {
       // v0.15: the daemon has it. The echo stays up — the gap it exists to cover is the one
       // until the claude pane itself shows the line — but it stops saying "sending".
       if (ev.from === NAME && store.echo) store.echo = { ...store.echo, acked: true };
+      // v0.17 P3: somebody said your name. Never your own line, whoever the daemon echoed it to.
+      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) nudge(`${ev.from} in the jam`, ev.text);
       // Self is always green; everybody else gets a stable color hashed from their name, so
       // it survives reconnects and roster churn instead of depending on join order.
       const c = ev.from === NAME ? C.me : fg256(userColor(ev.from));
@@ -248,7 +271,10 @@ function render(ev) {
     }
     // Human-only: the agent never sees it, so it renders unmissable — label, prefix and text
     // all in the one color nothing else uses.
-    case 'chat': return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat, strip: true });
+    case 'chat': {
+      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) nudge(`${ev.from} in the jam`, ev.text);
+      return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat, strip: true });
+    }
     case 'agent': {
       if (ev.kind === 'tool' || ev.kind === 'tool-result') {
         // Collapse mode (default): the turn's tool lines live in the live region until the
@@ -269,8 +295,20 @@ function render(ev) {
     }
     case 'typing': if (ev.from !== NAME) { store.typing.set(ev.from, Date.now()); touch(); } return;
     case 'status':
+      // v0.17 P3: the transition into waiting is the single most actionable moment in a jam, and
+      // it used to be silent for anyone not looking. The host is who can always answer, so the
+      // host is who gets rung — a guest may only ASK to answer (P2), and a bell for a request
+      // they might not be allowed to make is noise.
+      if (IS_HOST && ev.waiting && !store.status.waiting) {
+        nudge('claude needs an answer', 'a permission prompt is waiting — F3 attaches the TUI');
+      }
       store.status = { busy: ev.busy, waiting: ev.waiting };
       if (!ev.busy) flushTools(); // the turn is over: collapse what it ran
+      return touch();
+    // v0.17 P5: this socket's own round trip, measured by the daemon's heartbeat. Live state, not
+    // transcript — the newest one replaces the last and nothing is kept.
+    case 'net':
+      store.net = { rtt: Number(ev.rtt), at: Date.now(), heartbeat: Number(ev.heartbeat) || undefined };
       return touch();
     // v0.7: the host's real screen. Live state, never transcript — the newest frame replaces
     // the previous one and nothing is kept.
@@ -307,6 +345,16 @@ function render(ev) {
         glyph: '⇩',
         glyphColor: C.accent,
         text: `${ev.name} requests the session transcript — /allow-export ${ev.name} · /allow-export ${ev.name} always · /deny-export ${ev.name}`,
+      });
+    // v0.17 P2: a guest wants ONE digit typed into the permission prompt that is up. Host clients
+    // only, and the line is the answer — including which option that digit actually stands for,
+    // because the host is approving the option, not the number.
+    case 'permreq':
+      return emit({
+        glyph: '⏎',
+        glyphColor: C.accent,
+        text: `${ev.name} wants to answer the prompt with ${ev.choice}. ${ev.option} `
+          + `— /allow-perm ${ev.name} · /allow-perm ${ev.name} always · /deny-perm ${ev.name}`,
       });
     // v0.13: a guest wants to send a file in. Host clients only.
     case 'filereq':
@@ -696,6 +744,16 @@ function submit(raw) {
     // give. `/files` comes back to this client alone; `/diff` is broadcast to everyone.
     case 'files': sendMsg({ t: 'files' }); break;
     case 'diff': sendMsg({ t: 'diff', path: act.path || undefined }); break;
+    // v0.17 P2: only the daemon can see claude's screen, so it reads the options and it does the
+    // typing; this end sends a digit and waits. A bare `/answer` just asks what the options are.
+    case 'perm':
+      sendMsg({ t: 'perm', choice: act.choice ?? undefined });
+      if (act.choice != null && !IS_HOST) sys(`asked the host to answer ${act.choice} — nothing is typed until they say yes`);
+      break;
+    case 'perm-ok':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'permok', op: act.op, name: act.name || undefined, always: act.always });
+      break;
     case 'token':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'token', op: act.op, value: act.value });
@@ -751,10 +809,12 @@ function Entry({ e }) {
 
 // v0.7: the host pane's own cells. Each row is printed verbatim (SGR intact, truncated
 // ANSI-aware by ink) — no colors of our own, or they would fight the captured ones.
-function Mirror({ frame }) {
+// `reserve` is rows something else below has taken this render (v0.17 P6's hint row): the frame
+// gives one up rather than pushing the status and input rows off the bottom of the screen.
+function Mirror({ frame, reserve = 0 }) {
   const cols = process.stdout.columns || 80;
   if (!frame) return h(Text, { color: C.dim }, 'waiting for the host\'s screen…');
-  const fit = fitFrame(frame, cols, process.stdout.rows);
+  const fit = fitFrame(frame, cols, (process.stdout.rows || 24) - reserve);
   const hints = [
     fit.wider ? `host pane is ${frame.w} cols wide, yours is ${cols}` : '',
     fit.croppedRows ? `${fit.croppedRows} row(s) above cut off` : '',
@@ -772,10 +832,14 @@ function ApprovalBar({ items, armed, now }) {
   return h(Box, null, h(Text, { color: C.accent, wrap: 'truncate' }, bar.text));
 }
 
-function StatusBar({ status, typing, spin, mirror, passthrough }) {
+function StatusBar({ status, typing, spin, mirror, passthrough, net }) {
   const now = Date.now();
   const who = [...typing.entries()].filter(([, at]) => now - at < 4000).map(([n]) => n);
-  const right = who.length ? `${who.join(', ')} ${who.length > 1 ? 'are' : 'is'} typing…` : '';
+  // v0.17 P5: who is typing, and how this connection is doing — both dim, on the right.
+  const right = [
+    who.length ? `${who.join(', ')} ${who.length > 1 ? 'are' : 'is'} typing…` : '',
+    rttText(net, now, net?.heartbeat),
+  ].filter(Boolean).join('  ·  ');
   // Which view you are in is always on screen: the mirror IS the default (v0.14), so the
   // chip's job is to make the F2 alternate discoverable long after the onboarding block
   // has scrolled away.
@@ -783,7 +847,9 @@ function StatusBar({ status, typing, spin, mirror, passthrough }) {
   // A permission prompt is the one moment the host must leave the jam layer, so the status
   // row says which key does it. v0.15: F3 now attaches the real TUI, so it says so — and
   // names the way back, which is tmux's, not jam's. Guests are told who to wait for instead.
-  const waiting = `⚠ waiting for permission${IS_HOST ? ' — F3 attaches the TUI (Ctrl-b d back)' : ' — the host answers'}`;
+  // v0.17 P2: a guest is no longer only a spectator here — `/answer` shows them the options and
+  // offers one to the host — so the row says that instead of "wait for somebody else".
+  const waiting = `⚠ waiting for permission${IS_HOST ? ' — F3 attaches the TUI (Ctrl-b d back)' : ' — /answer shows the options'}`;
   return h(Box, { minHeight: 1 },
     h(Box, { flexGrow: 1 },
       passthrough
@@ -826,7 +892,12 @@ function App() {
     const t = setInterval(() => {
       const before = s.typing.size;
       for (const [n, at] of s.typing) if (Date.now() - at >= 4000) s.typing.delete(n);
-      if (s.typing.size !== before) touch();
+      let redraw = s.typing.size !== before;
+      // v0.17 P5: `⚠ stale Ns` has to appear, and count up, with no frame arriving to trigger a
+      // render — but a healthy `~120ms` is the same string every tick, so it costs no redraw.
+      const rtt = rttText(s.net, Date.now(), s.net?.heartbeat);
+      if (rtt !== lastRtt) { lastRtt = rtt; redraw = true; }
+      if (redraw) touch();
     }, 1000);
     t.unref?.();
     return () => clearInterval(t);
@@ -872,9 +943,15 @@ function App() {
   // v0.15: only the mirror view needs the echo — the transcript prints the daemon's own copy
   // of the line within a round trip, and two of them would just read as a double send.
   const echo = s.mirror && s.echo && Date.now() - s.echo.at < ECHO_TTL ? s.echo : null;
+  // v0.17 P6: jam's own commands, dim, while what is typed is a command NAME and nothing else.
+  // claude's are not in here — the client cannot know them (they come from the host's plugins,
+  // MCP servers and version), and guessing would be worse than showing nothing. The row costs the
+  // mirror one frame row rather than pushing the input line off the screen, and it changes no
+  // arming rule: an input starting with `/` is already non-empty, so the v0.16 single keys are off.
+  const hints = s.passthrough ? [] : commandMatches(input);
   return h(Box, { flexDirection: 'column' },
     h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
-    s.mirror ? h(Mirror, { frame: s.frame }) : null,
+    s.mirror ? h(Mirror, { frame: s.frame, reserve: hints.length ? 1 : 0 }) : null,
     liveTools.length
       // Index keys on purpose: this region is redrawn every render (never <Static>), and two
       // identical tool lines in one turn are perfectly normal.
@@ -901,10 +978,14 @@ function App() {
       : null,
     // v0.16: host-only, and gone while the TUI has the keyboard — a proxied keystroke must
     // not be able to answer a knock by accident.
+    hints.length
+      ? h(Box, null, h(Text, { color: C.dimmer, wrap: 'truncate' },
+        `${hints.join('  ')}${hints.length >= COMMAND_HINTS_MAX ? '  …' : ''}`))
+      : null,
     IS_HOST && !s.passthrough
       ? h(ApprovalBar, { items: barHidden() ? [] : s.pending, armed: barArmed(), now: Date.now() })
       : null,
-    h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough }),
+    h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough, net: s.net }),
     s.cont.length && !s.passthrough
       ? h(Box, { flexDirection: 'column' },
         s.cont.map((l, i) => h(Text, { key: `cont-${i}`, color: C.dim }, l === '' ? ' ' : l)))

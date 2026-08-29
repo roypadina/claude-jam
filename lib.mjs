@@ -872,9 +872,11 @@ export function onboardingLines(name = 'You', host = false) {
       'F2                → transcript ⇄ live TUI (this screen)',
       '/who /files /diff → participants · files · git diff',
       '/send <path>      → give claude a file · /paste · /export',
+      // v0.17 P2: a guest CAN answer a permission prompt now, so the block that teaches the
+      // client has to say so — it is the one thing they used to have to wait for the host for.
+      '/answer [n]       → answer claude\'s ⚠ prompt (host oks)',
       'Shift+Enter or \\  → multi-line · /tools /help /quit',
-      'Lost? just ask claude — e.g. "how does this jam work?",',
-      '"how do I chat privately?" — it knows the full manual.'];
+      'Lost? just ask claude — it knows this jam\'s whole manual.'];
   return [head, ...rows, '─'.repeat(ONBOARD_W)];
 }
 
@@ -1377,18 +1379,31 @@ export function historyDivider(count = 0, width = ONBOARD_W) {
 export const PERM_OPTIONS_MAX = 9; // one digit, because one digit is all that is ever typed
 export const PERM_TEXT_MAX = 80;
 export const PERM_ROW_GAP = 3; // rows an option may sit below the previous one (its text wraps)
-// The prompt is drawn inside a box, so the frame characters come with the capture.
+export const PERM_QUESTION_ROWS = 4; // how far above option 1 the question line may sit
+// A prompt may be drawn inside a box, so frame characters come with the capture. (Claude Code
+// 2.1.251 uses horizontal rules instead — measured — but earlier and later versions box it.)
 const PERM_BOX_RE = /^[\s│┃|╎┆┊╭╰]+|[\s│┃|╎┆┊╮╯]+$/g;
 // `❯ 1. Yes` / `2) No, and tell Claude…` — an optional cursor marker, the number, `.` or `)`,
 // then text. A row with a number and nothing after it is not an option.
 const PERM_OPTION_RE = /^(?:([❯▶>*])\s*)?([1-9])[.)]\s+(\S.*)$/;
+// Two structural signals tell claude's option picker apart from a numbered list that merely
+// happens to be on the screen (a plan, a file being read, `git log --oneline`): the picker always
+// marks its highlighted row, and a question line always sits right above the first option.
+// Verified against the real thing (2.1.251): ` Do you want to proceed?` then ` ❯ 1. Yes`.
+const PERM_QUESTION_RE = /do you want|proceed\?|permission|do you approve/i;
+// `10.` next to the block means the prompt has more options than one digit can pick, so it is not
+// a prompt this can drive at all — and saying so is better than silently offering the first nine.
+const PERM_MULTI_RE = /^(?:[❯▶>*]\s*)?\d\d+[.)]\s/;
 
 export function parsePermOptions(screen) {
   const hits = [];
+  const multi = [];
   const lines = String(screen ?? '').split('\n');
   for (let i = 0; i < lines.length; i++) {
-    const m = PERM_OPTION_RE.exec(lines[i].replace(PERM_BOX_RE, ''));
+    const row = lines[i].replace(PERM_BOX_RE, '');
+    const m = PERM_OPTION_RE.exec(row);
     if (m) hits.push({ i, n: Number(m[2]), marked: !!m[1], text: m[3].trim().slice(0, PERM_TEXT_MAX) });
+    else if (PERM_MULTI_RE.test(row)) multi.push(i);
   }
   // The options are the BOTTOM-most numbered block on the screen, counting up from the last
   // numbered row to `1.` with no number missing and no big gap between rows. Strict on purpose:
@@ -1409,6 +1424,12 @@ export function parsePermOptions(screen) {
     if (h.n === 1) break;
   }
   if (run.length < 2 || run.length > PERM_OPTIONS_MAX || run[0].n !== 1) return [];
+  // Either signal is enough; with neither, we do not know what we are looking at — and a digit
+  // typed into something that is not a picker lands in claude's input box as text.
+  const question = lines.slice(Math.max(0, run[0].i - PERM_QUESTION_ROWS), run[0].i)
+    .some((l) => PERM_QUESTION_RE.test(l));
+  if (!question && !run.some((o) => o.marked)) return [];
+  if (multi.some((i) => i >= run[0].i - PERM_ROW_GAP && i <= run.at(-1).i + PERM_ROW_GAP)) return [];
   return run.map(({ n, text, marked }) => ({ n, text, marked }));
 }
 
