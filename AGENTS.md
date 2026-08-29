@@ -49,7 +49,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `platform.mjs` | the platform seam. The **only** module allowed to spawn a platform binary (`osascript`, `pngpaste`, `afplay`, `pbcopy`, `open`, …) or to decide where `$TMPDIR`/`~/.config` are. |
 | `popup.mjs` | the one-key `tmux display-popup` approval. |
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
-| `test.mjs` | the unit suite. `scripts/` holds the thirteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
+| `test.mjs` | the unit suite. `scripts/` holds the fourteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
 
 **tmux, claude, git, curl, cloudflared, tailscale and ttyd are not platform binaries** — they are
 the tool's dependencies, spelled the same everywhere, and they stay where they are used.
@@ -62,7 +62,7 @@ the tool's dependencies, spelled the same everywhere, and they stay where they a
 node --test test.mjs      # the whole unit suite; must be green before every commit
 ```
 
-283 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
+306 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
 framework. Add tests to `test.mjs` next to the ones for the same version heading.
 
 Two of them are lints rather than assertions about behaviour, and both exist because the thing
@@ -72,11 +72,14 @@ they check cannot be caught by running the program once:
   everywhere a human or an agent reads. It scans string literals in every module in the repo
   root plus the launcher's `echo` lines.
 - **no module outside `platform.mjs` spawns a platform binary** — the Windows seam only pays for
-  itself if it is the only door.
+  itself if it is the only door. `dns-sd` and the avahi tools are in that list too (v0.23).
+
+**`tmux`, `claude`, `git`, `curl`, `cloudflared`, `tailscale` and `ttyd` are NOT platform
+binaries** and stay where they are used — see §1.
 
 If you add a module to the repo root, both lints pick it up automatically. That is deliberate.
 
-### The thirteen smokes, and the order
+### The fourteen smokes, and the order
 
 They are end-to-end and they are the only thing that proves the tmux/injection/WS half works.
 The full recipe — driver session, ports, arguments — is in `SPEC.md` under **"Running the
@@ -108,8 +111,19 @@ Then, in any order, the ones that bring their own everything:
 13. `smoke-answer.mjs` — no arguments, no real claude at all (the pane is
     `scripts/fake-tui.mjs`, painted with the real captures from `fixtures/pane/`). Own `$TMPDIR`,
     port 7871, session `jamanswer`. ~1 min, costs nothing.
+14. `smoke-discover.mjs` — no arguments, no real claude. Own `$TMPDIR`, ports 7891/7893/7895,
+    sessions `jamdisco*`. ~1 min, costs nothing. **It really does advertise on the local network
+    while it runs** — that is the thing under test. Every registration is a child of a daemon it
+    started, its teardown FAILS the run if anything is left advertising, and it needs
+    `/usr/bin/dns-sd` (it skips cleanly when there is none).
 
-Prefer 8–13 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
+    Note for anyone writing a smoke that starts more than one jam: `tmuxSocketFor()` gives each
+    jam a tmux server named for its **port**, so a session and its socket are a pair. Killing
+    `=name` on the wrong socket silently does nothing and leaves the daemon running — which, in
+    this smoke's case, leaves an advertisement on somebody's network. Ask for the socket by
+    session name.
+
+Prefer 8–14 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
 real tokens, so run them once, at the end, and use `--model haiku`.
 
 ---

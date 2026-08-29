@@ -1530,6 +1530,52 @@ Guests on the same network should be able to find jams instead of being handed a
    `Joining-a-Jam` + `Security-Model` (the privacy note), CHANGELOG. `/menu` gains the
    announce toggle and shows the jam name.
 
+#### v0.23 — shipped 2026-08-29
+
+All five items. 306 unit tests (283 + 23) and a fourteenth smoke,
+`scripts/smoke-discover.mjs`. What is worth knowing beyond the item text:
+
+- **`dns-sd -Z` shipped, not `bonjour-service`, and not an avahi fallback.** The parsing was
+  verified against the real /usr/bin/dns-sd before a line of it was written, and `-Z` was chosen
+  over `-B`/`-L` on measured grounds: it is the only mode that returns the instance name, the
+  port, the target host and the whole TXT record together, in one child, in a stable zone-file
+  layout. `-B` returns names with neither port nor TXT (a second `-L` per name to fill them in);
+  `-L` prints TXT backslash-escaped, which is strictly harder to read back than `-Z`'s quoted
+  strings. Two other measurements decided design points: dns-sd **flushes on a pipe** (first
+  chunk within milliseconds, complete), so a streaming parse works and no pty is needed; and a
+  browse for a type nobody advertises **prints nothing at all**, so "no output" is the empty
+  answer rather than a failure to detect. The npm fallback was never needed. The avahi half of
+  item 2 is a **stated deviation**: avahi-browse prints a different format, there is no avahi
+  here to verify a parser against, and a parser written from a man page is the confident wrong
+  fix the `-Z` parser exists to avoid. `dns-sd` is looked for on any platform (Bonjour ships it
+  on Windows, avahi's compat package on Linux), and a machine with none skips discovery with one
+  line and the fix — which is what the item asked for in that case anyway.
+- **The TXT record is an allow-list, not a redaction pass.** `discoveryTxt()` builds six keys out
+  of whatever object it is handed, so a caller who spreads a whole session in — token, hook
+  secret, view key, invite links, cwd, state dir — still publishes six keys. A deny-list would
+  have to be remembered; this cannot be forgotten. Asserted twice: against that exact object in
+  the unit suite, and against the RAW record dns-sd hands back, with a token set and an invite
+  minted, in the smoke.
+- **Two names, deliberately.** `--tmux` stays the identifier (a tmux-legal word, what `end`
+  takes) and `--jam-name` is the label. They are usually different words, so `sessions` grew a
+  column, session.json records both, and the Host screen has a row for each. The launcher
+  resolves the cwd default ONCE and passes it to the re-exec'd daemon already resolved — two
+  processes computing it independently is how they end up disagreeing about the jam's name.
+- **An access mode the TXT did not state is `?`, never a cheerful "knock".** A refusal carries
+  its own reason in this codebase, and so does an unknown; the Join screen then offers a knock as
+  the thing to try, because the daemon is the one that decides and it will say no if it means no.
+- **Re-announcing compares first.** The TXT states the access mode, so a token rotation, an
+  invite-only flip and a view toggle must all re-register (dns-sd takes its TXT on the argv).
+  Comparing before acting is what makes it safe to call from `onTunnelChange()`, which also fires
+  on every relay flap and would otherwise drop the jam off the network and put it back each time
+  cloudflared reconnects.
+- **The smoke's teardown found a real leak — in the smoke.** `killMine` used one socket for every
+  session, but `tmuxSocketFor()` names a server per port, so three of four kills silently did
+  nothing and left daemons running with live advertisements on the network. Every step had
+  already passed; nothing else would have noticed. The teardown check is now a FAILING step
+  rather than a warning, because an advertisement left on somebody's network is not a note to
+  read later.
+
 ## v0.24 — the menu is the whole product surface (amends v0.22C)
 
 Two additions Roy asked for explicitly.

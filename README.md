@@ -109,7 +109,9 @@ Keep it and the daemon, the TUI and every guest stay exactly where they were —
 `claude-jam host --attach` reopens your client, `claude-jam sessions` lists what is running, `claude-jam end` stops
 it. See **Session lifecycle** below.
 
-Useful flags: `--port`, `--tmux <name>` (a second jam), `--token <value>`, `--view`,
+Useful flags: `--port`, `--tmux <name>` (a second jam), `--jam-name <X>` (what the jam is
+CALLED — default: this directory's name), `--no-announce` (keep it off the local network),
+`--token <value>`, `--view`,
 `--tunnel`, `--funnel`, `--resume <session-id>` (continue an existing session),
 `--replay <N>` (how much of an existing transcript a joining guest is shown, default 300 events,
 `0` for none), `--config-dir <dir>` (run
@@ -121,6 +123,10 @@ the ones you will actually reach for.
 ## Guest quickstart
 
 ```sh
+# on the same network as the host? just look.
+claude-jam find                    # or: claude-jam discover
+claude-jam join                    # no argument: pick one off the list, or paste a link
+
 # an invite link — the whole command. No name to type, no token, no approval to wait for.
 claude-jam join cjam1_eyJ2IjoxLCJqYW0iOiJhYmMx…
 # knock-only host: no token, you wait to be accepted
@@ -137,6 +143,57 @@ as `[Dana]: …`; `/c <text>` is human-only chat; **F2** flips to the transcript
 approves); `/help` reprints the onboarding block. Typing `/` raises a dim list of claude-jam's own
 commands. `--basic` swaps ink for a plain readline client (transcript
 only, no live view, no F2/F3, no command list) and is picked automatically when stdin is not a tty.
+
+## Finding a jam on your network
+
+A jam has a **name** — `--jam-name "reeco debugging"`, defaulting to the directory's own name,
+so it is never nameless — and by default it says so on the local network over mDNS/DNS-SD.
+Guests stop needing a URL:
+
+```sh
+claude-jam find                  # jams announcing themselves on this network
+claude-jam find --json           # the same facts, for a script
+claude-jam join                  # the launcher menu's Join screen: pick one, or paste a link
+```
+
+```
+# jam             host access view address
+1 reeco debugging Roy  knock  no   roys-mac.local:7777
+2 the other one   Dana token  no   roys-mac.local:7779
+
+  reeco debugging: claude-jam join ws://roys-mac.local:7777 --name <you>
+  the other one: claude-jam join ws://roys-mac.local:7779 --name <you> --token <token>
+
+finding a jam is not being let into it: a knock still waits for the host, a token jam
+still wants its token, and an invite-only jam still wants a link.
+```
+
+**Finding is not entering.** Discovery tells you a jam exists and where; every door in the
+table above is exactly as shut as it was. Picking a jam in the Join screen fills in the
+address and nothing else — a knock jam still waits for the host to accept you, a token jam
+still asks you for the token, and an invite-only jam says so and sends you to the paste row.
+
+**What the advertisement contains, and what it deliberately does not.** Six fields: the jam
+name, the host's display name, eight characters of the session id, which kind of door it is
+(`knock`/`token`/`invite`), whether a browser view exists, and the version. **Never** the
+token, never an invite secret, never the working directory, never any path. That is enforced
+by construction — the record is built from an allow-list of those six keys, so handing the
+builder a whole session object still publishes six fields — and asserted against the real
+wire in `scripts/smoke-discover.mjs`.
+
+**It is still a disclosure, and on an untrusted network you may not want it.** Everyone on
+the LAN learns that this jam exists, what it is called and who is hosting it. That is the
+point on your own network and a leak on café wifi:
+
+```sh
+claude-jam host --no-announce    # run normally, say nothing on the network
+```
+
+`/menu → Access → Announce on the network` flips it while the jam runs, and the row shows
+whether the LAN is actually being told — not merely whether it was asked for. Tunnels are
+never advertised: mDNS is link-local by design, and a tunnel exists for people who are not
+here. A machine with no mDNS tool skips discovery with one line naming the fix; everything
+else works exactly as before.
 
 ## Access: token, knock, invite-only, tunnel, funnel
 
@@ -221,7 +278,8 @@ claude-jam creates the tmux session, so claude-jam cleans it up — no `tmux kil
 
 | command | what it does |
 | --- | --- |
-| `claude-jam sessions`, `claude-jam ls` | claude-jam's own sessions: name, port, state, uptime, session id, who is here, which relays are on, cwd. `--json` for scripting. A `!` marks an `orphan` state dir (its tmux session is gone) or a `no-daemon` session (nothing answers on its port) |
+| `claude-jam sessions`, `claude-jam ls` | claude-jam's own sessions: tmux name, jam name, port, state, uptime, session id, who is here, which relays are on, cwd. `--json` for scripting. A `!` marks an `orphan` state dir (its tmux session is gone) or a `no-daemon` session (nothing answers on its port) |
+| `claude-jam find`, `claude-jam discover` | jams announcing themselves on **this network**: name, host, access mode, view, address, and the exact join command per row. `--json` for scripting. Talks to no daemon and holds no credential — and finding a jam is not being let into one |
 | `claude-jam end [name]`, `claude-jam kill` | end one jam: every client is told and exits 0, the daemon stops its children (ttyd, tunnel, popups), the tmux session is killed and its state dir removed. No name and one jam → that one; several → a numbered picker; `--all` after an explicit confirmation |
 | `claude-jam clean` | remove state dirs whose session is gone, and only those, after listing exactly what will go |
 | `claude-jam host --attach` | reopen your client on a jam that is already running |

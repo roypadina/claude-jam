@@ -234,8 +234,45 @@ Two menus, and neither is a feature of its own — both build the command that a
 Every user-visible feature has to appear in `/menu` — that is enforced by a test, not by
 memory, so if a command exists it is in there.
 
+## Finding a jam on the local network (v0.23)
+
+If somebody asks **"how do I find Roy's jam?"**, this is the answer.
+
+- **A jam has a name.** `--jam-name "reeco debugging"`, defaulting to the directory's own name,
+  so it is never nameless. It is what shows in the welcome line, in `claude-jam sessions`, at the
+  top of `/menu`, and to anyone on this network. It is **cosmetic** — never used for auth,
+  never used to build a path. It is NOT the same as `--tmux <name>`, which is the tmux session
+  and the identifier `claude-jam end` takes.
+- **`claude-jam find`** (or `claude-jam discover`) lists the jams announcing themselves on this
+  network — name, host, access mode, whether a browser view exists, and the address — plus the
+  exact join command for each row. `--json` for a script.
+- **`claude-jam join` with no argument** opens the launcher's Join screen, which is that same
+  list: pick a jam, or take the last row, **paste a link or URL**, which never disappears
+  (a link is still how you join a jam that is not on your LAN, or one that is deliberately
+  silent).
+- **FINDING IS NOT ENTERING — say this clearly if asked.** Discovery tells you that a jam exists
+  and where it is. Every door is exactly as shut as it was: a knock jam still waits for the host
+  to accept you, a token jam still asks you for the token, and an invite-only jam says so and
+  sends you back to the paste row. Picking a jam fills in an address; it does not admit anybody.
+- **What is advertised, exactly.** Six fields: the jam name, the host's display name, eight
+  characters of the session id, which kind of door it is (`knock`/`token`/`invite`), whether a
+  browser view exists, and the version. **Never** the token, never an invite secret, never the
+  working directory, never any path. If somebody asks whether discovery leaks the token: it does
+  not, and it cannot — the record is built from an allow-list of those six keys.
+- **It IS a disclosure, and the honest answer says so.** Everyone on the local network learns
+  that this jam exists, what it is called and who is hosting it. On your own network that is the
+  point; on café wifi it is a leak. `claude-jam host --no-announce` runs the jam normally and says
+  nothing on the network, and `/menu → Access → Announce on the network` flips it while the jam
+  runs. The row shows whether the LAN is actually being told, not merely whether it was asked for.
+- **Tunnels are never advertised.** mDNS is link-local by design, and a tunnel exists for people
+  who are not here. A remote guest needs a link or a URL, as before.
+- A machine with no mDNS tool (`dns-sd`) simply skips discovery, with one line naming the fix.
+  Nothing else about the jam changes, and it is not an error.
+
 ## Joining: invite link, token, or knock
 
+- **Found it on the network?** See the section above — `claude-jam find`, then `claude-jam join`.
+  Whichever door the jam has is still the door.
 - **Invite link (v0.22, the easy one).** The host runs `claude-jam invite Dana` (or `/invite Dana`
   in their client) and sends the one line it prints. `claude-jam join cjam1_…` is then the guest's
   **whole command** — no name to type, no token, no approval to wait for: the link carries the
@@ -488,7 +525,11 @@ Any other `/command` is one of yours — see Slash commands above.
 
 ## Host launch flags (most useful)
 
-`--name` display name · `--token <t>` fixed token · `--cwd <dir>` project dir ·
+`--name` display name · `--jam-name <X>` what the jam is CALLED (default: this directory's
+name; shown in the welcome, in `claude-jam sessions`, in `/menu` and on the network) ·
+`--no-announce` do not announce this jam on the local network (announcing is ON by default;
+`/menu → Access → Announce on the network` flips it at runtime) ·
+`--token <t>` fixed token · `--cwd <dir>` project dir ·
 `--config-dir <dir>` run under another claude profile (e.g. `~/.claude3`) ·
 `--tmux-socket <name>` which tmux server to build on (default: `claude-jam-<port>`, claude-jam's own;
 `default` puts it on the shared server and leaves F3-out unbound) ·
@@ -509,13 +550,16 @@ them while the jam runs, without dropping anybody who is already connected ·
 host's client · `--attach` reopen the client on a jam that is already running ·
 `--no-prompt` / `--keep-on-exit` / `--end-on-exit` decide the "keep it running?" question up
 front · `-- <args>` passed to claude (e.g. `-- --model haiku`).
-Other subcommands: `claude-jam sessions [--json]` / `claude-jam ls`, `claude-jam end [name] [--all]` / `claude-jam kill`,
+Other subcommands: `claude-jam find [--json]` / `claude-jam discover` (jams on this network),
+`claude-jam sessions [--json]` / `claude-jam ls`, `claude-jam end [name] [--all]` / `claude-jam kill`,
 `claude-jam clean [--yes]`, `claude-jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]`,
 `claude-jam invites [--json]`, `claude-jam invite revoke <Name|id>`,
 `claude-jam remote <off|tunnel|funnel> [--jam NAME] [--reissue]`, and `jam --help`.
 **`claude-jam` with NO arguments opens a launcher menu** — Host a jam, Join a jam, My jams, End
 a jam — which builds the command line and shows it to you before running it, so it teaches the
 CLI rather than hiding it. `--no-menu` (or any argument) prints the usage instead.
+`claude-jam join` with no argument goes straight to the Join screen, which opens on the jams it
+can see on this network.
 Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `--no-view`.
 
 ## Troubleshooting quickies

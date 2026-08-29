@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+### v0.23 — named jams, and finding one on your network
+
+A jam has a name, and by default it says so on the local network, so a guest on the same LAN
+stops needing a URL.
+
+- **`--jam-name "reeco debugging"`**, defaulting to the **directory's own name**, so a jam is
+  never nameless. It shows in the client's welcome, in `claude-jam sessions` (a column of its
+  own), at the top of `/menu`, in the launcher menu and in discovery. It is cosmetic: never used
+  for auth, never used to build a path. It is **not** `--tmux <name>`, which stays the tmux
+  session and the identifier `claude-jam end` takes — the Host screen now has a row for each,
+  labelled for what it is, because the old single "jam name" row meant only the second.
+- **`claude-jam find`** (alias `discover`) browses `_claude-jam._tcp` for ~3s and prints jam,
+  host, access mode, view and address, plus the exact join command per row — the listing teaches
+  the join. `--json` for scripting, `--for N` for a flaky network. It talks to no daemon and
+  holds no credential.
+- **`claude-jam join` with no argument** opens the launcher's Join screen, which now leads with
+  the discovered list. **"paste a link or URL" is the last row and never disappears** — a link is
+  still how you join a jam that is not on your LAN or is deliberately silent. Picking a jam asks
+  for what is actually still missing: a name always, the token only for a token jam; an
+  invite-only jam is refused there, with the reason, instead of connecting and being turned away
+  at the door. Each screen says what happens next before it happens, because a knock is a wait
+  and an unannounced wait reads as a hang.
+- **Discovery never bypasses a gate.** Finding a jam tells you it exists and where; every door is
+  as shut as it was. The `find` table states this on every listing it prints, and
+  `scripts/smoke-discover.mjs` proves it against a real daemon: a found token jam refuses a
+  connection that only knows its address.
+- **The advertisement carries six fields and nothing else**: jam name, host display name, eight
+  characters of the session id, the access mode, whether a browser view exists, and the version.
+  Never the token, never an invite secret, never the cwd, never any path. Enforced **by
+  construction** — the record is built from an allow-list, so handing the builder a whole session
+  object still publishes six fields — and asserted against the real wire, with a token set and an
+  invite minted, in the smoke.
+- **`--no-announce`**, plus `/menu → Access → Announce on the network` at runtime. Announcing is
+  on by default because being findable is the point of naming a jam, and it is a real disclosure
+  — everyone on the LAN learns the jam exists, its name and the host's name — which is exactly
+  what you want at home and a leak on café wifi. The menu row shows whether the LAN is actually
+  being told, not merely whether it was asked for. **Tunnels are never advertised**: mDNS is
+  link-local by design and a tunnel is for people who are not here.
+- **The advertisement is a tracked child with cloudflared's discipline** — killed by its own pid
+  on every exit path, respawned on death with the same 1s→30s backoff, our own SIGTERM never
+  treated as a death. Deregistering is not optional, and killing the child is what does it;
+  verified live, and asserted by the smoke, that a jam which ended stops advertising.
+  Re-announcing compares the record it would publish against the live one first, so a token
+  rotation re-registers and a relay flap does not.
+- **mDNS lives behind the platform seam.** `dns-sd` is a platform binary like `osascript` and
+  `pbcopy`, so it sits in `platform.mjs` with them and the lint that keeps every other module
+  away from them now covers it. A machine with no mDNS tool skips discovery with one line naming
+  the fix for all three platforms; nothing else changes and it is not an error.
+- The `dns-sd` output parser was written against the **real binary** (macOS 26, 2026-08-29), not
+  from a man page. `-Z` is used rather than `-B`/`-L` because it returns the instance name, port,
+  target host and whole TXT record together, in one child, in a stable layout. The parser is
+  total: a half-written line at the tail of a stream, dns-sd's banner and comment block, another
+  service's records and a nonsense port all produce no row rather than a wrong one.
+- `scripts/smoke-discover.mjs` is the **fourteenth smoke**, and it costs nothing (no real claude,
+  no ttyd, no cloudflared). It advertises on your network for about a minute, which is the thing
+  under test, and says so on the way in.
+
 ### One name: `claude-jam`
 
 The product, the executable, the tmux session and the ownership marker all say **claude-jam**
