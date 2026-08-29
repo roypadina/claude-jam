@@ -176,6 +176,22 @@ Two ceilings are inherent and are not worked around:
   leaves its size alone; a guest on a much smaller terminal sees it letterboxed rather than
   reflowed.
 
+### `/jam`, if you want a shorter way to type it
+
+`integrations/claude-plugin/` is a three-file Claude Code plugin — a command, a skill and a
+manifest, no code — that maps `/jam`, `/jam invite <Name>`, `/jam end` and `/jam status` onto the
+CLI:
+
+```sh
+/plugin marketplace add roypadina/claude-jam     # this repo doubles as a one-plugin marketplace
+/plugin install claude-jam@claude-jam
+```
+
+**Installing it is entirely optional.** `claude-jam adopt` from the Bash tool works without it —
+ask claude to run it. The plugin exists because `/jam` is shorter than a sentence, and because
+the skill in it carries the two standing rules (about links, and about `/c` chat) to a claude
+that has not been briefed yet. See `integrations/claude-plugin/README.md`.
+
 ## Guest quickstart
 
 ```sh

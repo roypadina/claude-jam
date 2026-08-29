@@ -5205,3 +5205,34 @@ test('v0.33 a re-brief is never typed into a prompt, never mid-turn, and never a
   assert.equal(briefUpdateDecision({ ...base, reason: 'because' }).brief, false);
   assert.equal(BRIEF_MIN_GAP, 10 * 60 * 1000);
 });
+
+test('v0.33 the /jam plugin is a real plugin, and the marketplace points at it', () => {
+  // Three files and a manifest, no code — but two manifests that disagree is a plugin nobody can
+  // install, and nothing else in this repo would notice.
+  const read = (p) => fs.readFileSync(new URL(`./${p}`, import.meta.url), 'utf8');
+  const market = JSON.parse(read('.claude-plugin/marketplace.json'));
+  const plugin = JSON.parse(read('integrations/claude-plugin/.claude-plugin/plugin.json'));
+  assert.equal(market.plugins.length, 1);
+  const entry = market.plugins[0];
+  assert.equal(entry.name, plugin.name, 'the marketplace and the plugin disagree about its name');
+  assert.equal(entry.source, './integrations/claude-plugin');
+  assert.ok(fs.existsSync(new URL(`./${entry.source.replace(/^\.\//, '')}/.claude-plugin/plugin.json`, import.meta.url)),
+    'the marketplace points at a directory with no plugin in it');
+  assert.match(plugin.version, /^\d+\.\d+\.\d+$/);
+  // The command and the skill exist, are non-trivial, and carry frontmatter.
+  const cmd = read('integrations/claude-plugin/commands/jam.md');
+  assert.match(cmd, /^---\n/);
+  assert.match(cmd, /description:/);
+  assert.match(cmd, /claude-jam adopt/);
+  assert.match(cmd, /--yes/);
+  // The safety half: the command must refuse to hand a link to a participant, and must ask before
+  // adopting. Both are the reason this file is prose rather than a shell alias.
+  assert.match(cmd, /\[Name\]: ` prefix/);
+  assert.match(cmd, /never print a link or a token|never repeat them to a/);
+  const skill = read('integrations/claude-plugin/skills/claude-jam/SKILL.md');
+  assert.match(skill, /^---\nname: claude-jam\n/);
+  assert.match(skill, /Never reveal the join token/);
+  assert.match(skill, /Never claim to have seen `\/c` chat/);
+  // Installing it is optional, and that has to be said where somebody deciding would read it.
+  assert.match(read('integrations/claude-plugin/README.md'), /entirely optional/);
+});
