@@ -74,7 +74,13 @@ await step('host slash: /cost is typed into the real TUI, everybody is told', as
   host.send({ t: 'slash', text: '/cost' });
   const line = await guest.want('the sys line', (f) => f.t === 'sys' && /ran \/cost in the TUI/.test(f.text));
   console.log(`      ${JSON.stringify(line.text)}`);
-  await until('/cost on the claude pane', () => /\/cost/.test(pane()));
+  // Either the echo of the command or the panel it opens. /cost redraws the WHOLE pane,
+  // scrollback included, so the echo has a few hundred ms of life — and if a previous smoke
+  // (smoke-popup runs /cost too) left that panel up, the echo is never visible at all. The
+  // panel itself is the same proof: nothing but /cost puts it there.
+  const hit = await until('/cost, or the panel it opens, on the claude pane',
+    () => /\/cost/.exec(pane())?.[0] || /Total cost:|Current session/.exec(pane())?.[0]);
+  console.log(`      pane shows ${JSON.stringify(hit)}`);
 });
 
 await step('a guest\'s raw {t:key} is refused — F3 is host+loopback only', async () => {

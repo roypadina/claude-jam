@@ -744,7 +744,9 @@ node scripts/smoke-xfer.mjs  ws://127.0.0.1:7799 smoketoken jamtest smokehooksec
 node scripts/smoke.mjs       ws://127.0.0.1:7799 smoketoken
 node scripts/smoke-mirror.mjs ws://127.0.0.1:7799 smoketoken
 node scripts/smoke-popup.mjs ws://127.0.0.1:7799 jamtest 7799 smokehooksecret
-node scripts/smoke-slash.mjs ws://127.0.0.1:7799 smoketoken jamtest   # last: see below
+node scripts/smoke-slash.mjs ws://127.0.0.1:7799 smoketoken jamtest   # last, and ONCE per
+#   daemon: it grants Guest standing approval (`/allow-cmd always`), which lives in daemon
+#   memory, so a second run against the same daemon gets no cmdreq to answer.
 tmux kill-session -t jamtest          # exact names only, never a pattern
 tmux kill-session -t jamdrive
 rm -rf "$TMPDIR/claude-jam-7799" jam-uploads
