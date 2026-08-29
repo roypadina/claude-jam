@@ -12,6 +12,11 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   parseFunnelUrl, FUNNEL_URL_RE, funnelPrecheck, FUNNEL_CAP, FUNNEL_PORTS,
   // v0.17 Batch H: history backfill + the divider. Batch F: diffs, /files, /diff, masking.
   backfillHistory, REPLAY_DEFAULT, REPLAY_MAX, historyDivider,
+  // v0.28: real scrollback — the page maths, the cache, the scroll state, the ring, the edges.
+  SCREEN_HISTORY_MAX, SCREEN_PAGE_MAX, SCREEN_CACHE_MS, historyPageRange, historyCacheKey,
+  historyCacheDecision, scrollStep, SCROLL_KEYS, scrollStatusText, historyEdgeLine,
+  HISTORY_DEFAULT, HISTORY_CAP, historyLimit, parseReplay, replayCount,
+  HISTORY_PAGE, parseHistoryCommand, historyPageDivider, wheelKey, WHEEL_LINES,
   toolDiffText, toolFile, toolLiveLine, DIFF_TOOLS, FILE_TOOLS, TOOL_DIFF_LINES, TOOL_DIFF_LINE_MAX,
   noteFilePath, filesNewestFirst, filesReport, FILES_MAX,
   validDiffPath, gitDiffArgs, capOutput, OUT_MAX_LINES, OUT_MAX_CHARS, DIFF_PATH_MAX,
@@ -4574,4 +4579,226 @@ test('v0.25/26/27 every new command and flag is reachable from /menu (completene
   const g = Object.fromEntries(menuItems(menuTree({ host: false })).map((i) => [i.id, i]));
   assert.ok(g['notify.ping'] && g['notify.sound'] && g['notify.phone']);
   assert.equal(g['access.uploads'], undefined);
+});
+
+// --- v0.28: real scrollback ------------------------------------------------------
+
+test('v0.28 historyPageRange: one capture-pane range, whether the window straddles the join', () => {
+  // Live: the visible pane, 0..rows-1. This is the same thing captureFrame() already sends.
+  const live = historyPageRange({ before: 0, rows: 40, historySize: 500 });
+  assert.equal(live.start, 0);
+  assert.equal(live.end, 39);
+  // Scrolled back 10: the window starts 10 rows above the pane top and ENDS inside the visible
+  // pane. tmux takes a negative -S and a positive -E, so it is still one range.
+  const straddle = historyPageRange({ before: 10, rows: 40, historySize: 500 });
+  assert.equal(straddle.start, -10);
+  assert.equal(straddle.end, 29);
+  // Scrolled clear of the screen: both ends are in the history.
+  const deep = historyPageRange({ before: 100, rows: 40, historySize: 500 });
+  assert.equal(deep.start, -100);
+  assert.equal(deep.end, -61);
+  assert.equal(deep.end - deep.start + 1, 40, 'the range is exactly as many rows as were asked for');
+});
+
+test('v0.28 historyPageRange clamps to what the pane actually kept, and says it did', () => {
+  // The pane has 30 lines of history; asking for 900 back is answered with 30, flagged.
+  const r = historyPageRange({ before: 900, rows: 20, historySize: 30 });
+  assert.equal(r.before, 30);
+  assert.equal(r.maxBefore, 30);
+  assert.equal(r.atTop, true);
+  assert.equal(r.clamped, true);
+  assert.equal(r.start, -30);
+  // A pane with no history at all is at the top the moment it is asked — the honest answer.
+  const none = historyPageRange({ before: 5, rows: 20, historySize: 0 });
+  assert.equal(none.before, 0);
+  assert.equal(none.atTop, true);
+  assert.equal(none.maxBefore, 0);
+  // And the protocol's own ceiling wins over a pane that kept more than it.
+  const capped = historyPageRange({ before: 99999, rows: 20, historySize: 100000 });
+  assert.equal(capped.maxBefore, SCREEN_HISTORY_MAX);
+  assert.equal(capped.before, SCREEN_HISTORY_MAX);
+});
+
+test('v0.28 historyPageRange: a page is never bigger than the cap and never smaller than a row', () => {
+  assert.equal(historyPageRange({ before: 0, rows: 5000, historySize: 9000 }).rows, SCREEN_PAGE_MAX);
+  assert.equal(historyPageRange({ before: 0, rows: 0, historySize: 9000 }).rows, 1);
+  assert.equal(historyPageRange({ before: -4, rows: -4, historySize: 9000 }).rows, 1);
+  assert.equal(historyPageRange({ before: -4, rows: 10, historySize: 9000 }).before, 0);
+  // Junk in is a usable range out: this is answering a client, not trusting one.
+  const junk = historyPageRange({ before: 'lots', rows: 'many', historySize: 'deep' });
+  assert.equal(junk.before, 0);
+  assert.equal(junk.rows, 1);
+  assert.equal(junk.maxBefore, 0);
+});
+
+test('v0.28 the history cache: same range is one capture, a different range never is', () => {
+  const range = historyPageRange({ before: 40, rows: 40, historySize: 500 });
+  const key = historyCacheKey(range);
+  assert.equal(key, '-40:-1');
+  // Nothing cached yet.
+  assert.equal(historyCacheDecision({ key, entry: null, now: 1000 }), 'capture');
+  const entry = { key, at: 1000, rows: ['x'] };
+  // Held-down PgUp, inside the window: one capture serves all of it.
+  assert.equal(historyCacheDecision({ key, entry, now: 1000 }), 'use');
+  assert.equal(historyCacheDecision({ key, entry, now: 1000 + SCREEN_CACHE_MS - 1 }), 'use');
+  // Past the window: the pane may have moved, so look again.
+  assert.equal(historyCacheDecision({ key, entry, now: 1000 + SCREEN_CACHE_MS }), 'capture');
+  // A DIFFERENT range is never served from it, however fresh it is.
+  const other = historyCacheKey(historyPageRange({ before: 80, rows: 40, historySize: 500 }));
+  assert.notEqual(other, key);
+  assert.equal(historyCacheDecision({ key: other, entry, now: 1000 }), 'capture');
+});
+
+test('v0.28 scrollStep: before === 0 is live, and every move clamps to what the pane kept', () => {
+  const max = 120;
+  assert.equal(scrollStep({ key: 'pageup', before: 0, page: 30, maxBefore: max }), 30);
+  assert.equal(scrollStep({ key: 'pageup', before: 100, page: 30, maxBefore: max }), max, 'clamped at the top');
+  assert.equal(scrollStep({ key: 'pagedown', before: 30, page: 30, maxBefore: max }), 0, 'one page down from one page up is live');
+  assert.equal(scrollStep({ key: 'pagedown', before: 10, page: 30, maxBefore: max }), 0, 'and it never goes past live');
+  assert.equal(scrollStep({ key: 'lineup', before: 5, maxBefore: max }), 6);
+  assert.equal(scrollStep({ key: 'linedown', before: 5, maxBefore: max }), 4);
+  assert.equal(scrollStep({ key: 'linedown', before: 0, maxBefore: max }), 0);
+  assert.equal(scrollStep({ key: 'top', before: 0, maxBefore: max }), max);
+  assert.equal(scrollStep({ key: 'live', before: max, maxBefore: max }), 0);
+  // A pane with no history cannot be scrolled at all — every key is a no-op rather than a
+  // number the daemon then has to refuse.
+  for (const key of SCROLL_KEYS) assert.equal(scrollStep({ key, before: 0, maxBefore: 0 }), 0, key);
+  // An unknown key changes nothing.
+  assert.equal(scrollStep({ key: 'nonsense', before: 7, maxBefore: max }), 7);
+});
+
+test('v0.28 the status row says how far back, how many frames are held, and the way out', () => {
+  assert.equal(scrollStatusText({ before: 0, paused: 9 }), '', 'live has no scroll row at all');
+  assert.equal(scrollStatusText({ before: 1 }), '⧉ mirror · scrolled back 1 line — End/G returns to live');
+  assert.equal(scrollStatusText({ before: 40 }), '⧉ mirror · scrolled back 40 lines — End/G returns to live');
+  const held = scrollStatusText({ before: 40, paused: 12 });
+  assert.match(held, /scrolled back 40 lines/);
+  assert.match(held, /12 live frames waiting/, 'a held frame is never dropped in silence');
+  assert.match(held, /End\/G returns to live$/);
+  assert.match(scrollStatusText({ before: 2, paused: 1 }), /1 live frame waiting/);
+});
+
+test('v0.28 the top-of-history line is printed exactly once, and only at the top', () => {
+  assert.equal(historyEdgeLine({ atTop: false, shown: false, events: 12 }), null, 'not at the top');
+  assert.equal(historyEdgeLine({ atTop: true, shown: true, events: 12 }), null, 'already said');
+  const line = historyEdgeLine({ atTop: true, shown: false, events: 1200, paneLines: 2000 });
+  assert.match(line, /that is as far back as this jam kept/);
+  assert.match(line, /1200 events/);
+  assert.match(line, /host pane 2000 lines/);
+  assert.match(line, /\/export for the full transcript/);
+  assert.match(historyEdgeLine({ atTop: true, shown: false, events: 1 }), /1 event ·/, 'one event is not "1 events"');
+  // The "once" rule is here, not in the client: the second call with the flag set is null.
+  let shown = false;
+  const first = historyEdgeLine({ atTop: true, shown, events: 5 });
+  if (first) shown = true;
+  assert.equal(historyEdgeLine({ atTop: true, shown, events: 5 }), null);
+});
+
+test('v0.28 --history sizes the ring: default, cap, zero, and a refusal that names the cap', () => {
+  assert.equal(HISTORY_DEFAULT, 2000);
+  assert.equal(HISTORY_CAP, 20000);
+  assert.deepEqual(historyLimit(undefined), { ok: true, n: HISTORY_DEFAULT });
+  assert.deepEqual(historyLimit(''), { ok: true, n: HISTORY_DEFAULT });
+  assert.deepEqual(historyLimit('500'), { ok: true, n: 500 });
+  assert.deepEqual(historyLimit(0), { ok: true, n: 0 }, 'keep nothing is a legal wish');
+  assert.deepEqual(historyLimit(HISTORY_CAP), { ok: true, n: HISTORY_CAP });
+  const over = historyLimit(HISTORY_CAP + 1);
+  assert.equal(over.ok, false);
+  assert.match(over.error, new RegExp(String(HISTORY_CAP)), 'the refusal carries the cap');
+  assert.equal(historyLimit(-1).ok, false);
+  assert.equal(historyLimit('lots').ok, false);
+});
+
+test('v0.28 --replay accepts all, and all means exactly what the ring can hold', () => {
+  assert.deepEqual(parseReplay(undefined), { ok: true, n: REPLAY_DEFAULT, all: false });
+  assert.deepEqual(parseReplay('all'), { ok: true, n: REPLAY_MAX, all: true });
+  assert.deepEqual(parseReplay('ALL'), { ok: true, n: REPLAY_MAX, all: true });
+  assert.deepEqual(parseReplay(' all '), { ok: true, n: REPLAY_MAX, all: true });
+  assert.deepEqual(parseReplay('50'), { ok: true, n: 50, all: false });
+  assert.deepEqual(parseReplay(0), { ok: true, n: 0, all: false });
+  assert.equal(REPLAY_MAX, HISTORY_CAP, 'a replay smaller than the ring it is cut from was a second, arbitrary ceiling');
+  const bad = parseReplay('everything');
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /"all"/, 'the refusal says which word does work');
+  assert.equal(parseReplay(-3).ok, false);
+  assert.equal(parseReplay(REPLAY_MAX + 1).ok, false);
+});
+
+test('v0.28 a joiner gets min(--replay, what the ring is holding) — never a promise it cannot keep', () => {
+  assert.equal(replayCount(300, 1000), 300);
+  assert.equal(replayCount(300, 12), 12, 'a big replay cannot conjure events the ring never kept');
+  assert.equal(replayCount(20000, 2000), 2000, '--replay all on a default ring is the ring');
+  assert.equal(replayCount(0, 1000), 0, '--replay 0 turns it off entirely');
+  assert.equal(replayCount(300, 0), 0);
+  assert.equal(replayCount('junk', 50), 0);
+});
+
+test('v0.28 /history [n|all] parses, and the dim divider says what is still behind it', () => {
+  assert.deepEqual(parseClientLine('/history'), { kind: 'history', n: HISTORY_PAGE, all: false });
+  assert.deepEqual(parseClientLine('/history 40'), { kind: 'history', n: 40, all: false });
+  assert.deepEqual(parseClientLine('/history all'), { kind: 'history', n: HISTORY_CAP, all: true });
+  assert.equal(parseClientLine('/history 0').kind, 'error');
+  assert.equal(parseClientLine('/history -2').kind, 'error');
+  assert.equal(parseClientLine('/history lots').kind, 'error');
+  // A person asking for more than exists is asking for everything, not making a mistake.
+  assert.equal(parseHistoryCommand('999999').n, HISTORY_CAP);
+  assert.equal(historyPageDivider({ shown: 0, older: 5 }), null, 'an empty page gets no rule');
+  assert.match(historyPageDivider({ shown: 40, older: 160 }), /40 earlier events · 160 older still kept/);
+  assert.match(historyPageDivider({ shown: 1, older: 0 }), /1 earlier event · that is everything kept/);
+  // It is a rule, so it looks like one on both sides of the label.
+  assert.match(historyPageDivider({ shown: 3, older: 0 }), /^─+ .* ─+$/);
+});
+
+test('v0.28 the scroll keys are real key sequences, and the wheel is read out of its own bytes', () => {
+  // Every spelling a terminal can send, so a key that works in one is not missing in another.
+  const named = (seq) => extractKeys(seq).keys[0];
+  assert.equal(named('\x1b[5~'), 'pageup');
+  assert.equal(named('\x1b[6~'), 'pagedown');
+  assert.equal(named('\x1b[1;2A'), 'lineup');
+  assert.equal(named('\x1b[1;2B'), 'linedown');
+  assert.equal(named('\x1b[1;5A'), 'lineup');
+  assert.equal(named('\x1bOF'), 'scrolllive');
+  assert.equal(named('\x1b[4~'), 'scrolllive');
+  assert.equal(named('\x1b[H'), 'scrolltop');
+  // The plain arrows stay input recall — v0.30-3's keys are not taken away by v0.28's.
+  assert.equal(named('\x1b[A'), 'histprev');
+  assert.equal(named('\x1b[B'), 'histnext');
+  // The wheel: SGR (1006) and X10, both directions, coordinates and all.
+  assert.equal(named('\x1b[<64;10;20M'), 'wheelup');
+  assert.equal(named('\x1b[<65;10;20M'), 'wheeldown');
+  assert.equal(named('\x1b[<65;999;999m'), 'wheeldown');
+  assert.equal(named('\x1b[M\x60!!'), 'wheelup');
+  assert.equal(named('\x1b[M\x61!!'), 'wheeldown');
+  assert.equal(wheelKey('\x1b[<64;1;1M'), 'wheelup');
+  assert.equal(wheelKey('\x1b[M\x61AB'), 'wheeldown');
+  assert.ok(WHEEL_LINES >= 1);
+  // A wheel report split across two chunks is HELD, not typed into the message.
+  const half = extractKeys('\x1b[<64;10');
+  assert.deepEqual(half, { keys: [], text: '', hold: '\x1b[<64;10' });
+  assert.deepEqual(extractKeys(half.hold + ';20M'), { keys: ['wheelup'], text: '', hold: '' });
+  // …but the narrow X10 pattern must not hold an ordinary arrow (it did, on the first attempt).
+  assert.deepEqual(extractKeys('\x1b[C'), { keys: [], text: '\x1b[C', hold: '' });
+  assert.deepEqual(extractKeys('\x1b[D'), { keys: [], text: '\x1b[D', hold: '' });
+  // And while the TUI has the keyboard, a scroll key is claude's like every other key.
+  assert.deepEqual(extractKeys('\x1b[5~', PASSTHROUGH_SEQS), { keys: [], text: '\x1b[5~', hold: '' });
+});
+
+test('v0.28 every new key is in the keyboard reference, and /history and --history are in /menu', () => {
+  const keys = KEY_HELP.map((k) => k.key).join(' · ');
+  for (const k of ['PgUp / PgDn', 'Shift+↑ / ↓', 'End / G']) assert.ok(keys.includes(k), k);
+  // The v0.24 completeness rule: a feature that is not reachable from the menu fails the suite.
+  assert.deepEqual(menuGaps({ host: true }), { commands: [], flags: [], extra: [] });
+  assert.deepEqual(menuGaps({ host: false }), { commands: [], flags: [], extra: [] });
+  assert.ok(JAM_COMMANDS.includes('/history'));
+  assert.ok(String(COMMAND_HELP['/history'] || '').length >= 8);
+  assert.equal(HOST_MENU_ONLY.includes('/history'), false, 'a guest who cannot look back is the whole complaint');
+  assert.ok(HOST_FLAGS.some((f) => f.flag === '--history'));
+  assert.match(HOST_FLAGS.find((f) => f.flag === '--replay').arg, /all/);
+  const by = Object.fromEntries(menuItems(menuTree({ host: true, state: { replay: 300, history: 2000 } })).map((i) => [i.id, i]));
+  assert.equal(by['session.depth'].value, '2000');
+  assert.equal(by['session.replay'].value, '300');
+  assert.match(by['session.scroll'].desc, /PgUp/);
+  // A guest sees the same three rows: the feature is read-only and theirs too.
+  const g = Object.fromEntries(menuItems(menuTree({ host: false })).map((i) => [i.id, i]));
+  assert.ok(g['session.history'] && g['session.scroll']);
 });
