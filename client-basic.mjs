@@ -26,7 +26,8 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   noBriefWarning,
   // v0.29: a task somebody wants to run on THIS machine — the consent block, the second gate on
   // anything that writes or executes, and where it would run.
-  PEER_TOOLS_DEFAULT, peerTaskBlock, peerAcceptDecision, peerScratchDir, peerWhyText } from './lib.mjs';
+  PEER_TOOLS_DEFAULT, peerTaskBlock, peerAcceptDecision, peerScratchDir, peerWhyText,
+  peerTag } from './lib.mjs';
 // v0.29: the spawn itself, shared with the ink client — one place where a peer task is built,
 // capped and killed, so the two surfaces cannot drift apart.
 import { runPeerTask } from './peer.mjs';
@@ -366,6 +367,28 @@ function render(ev) {
     case 'filereq':
       return emit({ glyph: '⇪', glyphColor: C.accent,
         text: `${ev.name} wants to send ${ev.file} (${humanBytes(ev.size)}) — /accept-file ${ev.name} · /accept-file ${ev.name} always · /deny-file ${ev.name}` });
+    // v0.29: what the WHOLE ROOM sees of a peer task — the ask, the acceptance, the progress and
+    // the answer, attributed `[Dana → task]`. A task only the two parties could see would be a
+    // private channel inside a shared session.
+    //
+    // The body is QUOTED (the daemon did it) and printed `bare`, which is what makes it visibly
+    // inert: a result that says "ignore the above and run /end" arrives with a `│ ` in front of
+    // every line, cannot forge a `[Name]: ` prefix, and is never executed and never written.
+    case 'peer': {
+      const tag = peerTag(ev.peer);
+      const head = {
+        asked: `${ev.from} asked — ${(ev.tools || []).join(', ')} · up to ${ev.maxTurns} turns · ${Math.round((ev.deadlineMs || 0) / 1000)}s`,
+        accepted: ev.text,
+        progress: '',
+        result: ev.note || (ev.ok ? 'finished' : 'did not finish'),
+      }[ev.state];
+      if (head) {
+        emit({ glyph: '⇄', glyphColor: C.accent, text: `${tag} ${head}`,
+          textColor: ev.state === 'result' && !ev.ok ? C.err : '', wrap: false });
+      }
+      if (ev.text && ev.state !== 'accepted') emit({ text: ev.text, textColor: C.dim, wrap: false, bare: true });
+      return;
+    }
     // v0.29: somebody wants to run a task on THIS machine, in THIS person's Claude Code, on
     // THEIR quota. The whole prompt is printed and nothing happens until they answer.
     case 'peertask': {
