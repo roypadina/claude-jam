@@ -504,8 +504,11 @@ function render(ev) {
       const mine = ev.to === NAME || (ev.to === NUDGE_ALL && ev.from !== NAME);
       if (ev.from === NAME) return sys(`you nudged ${ev.to}${ev.again ? ' again' : ''}`);
       if (!mine) return sys(`${ev.from} nudged ${ev.to}`);
+      // The leading space is deliberate: 👋 is a DOUBLE-width cell and the glyph gutter is one
+      // column wide, so without it the emoji and the name run together (measured on tmux 3.7c,
+      // 2026-08-29). Every other glyph in this client is single-width and needs no such thing.
       emit({ glyph: '👋', glyphColor: C.chat, textColor: C.chat, strip: true,
-        text: `${ev.from} is asking for you${ev.again ? ' (again)' : ''}${ev.text ? `: ${ev.text}` : ''}` });
+        text: ` ${ev.from} is asking for you${ev.again ? ' (again)' : ''}${ev.text ? `: ${ev.text}` : ''}` });
       return alert(`👋 ${ev.from}`, ev.text || 'is asking for you',
         { event: 'nudge', phone: !!jamConfig.ntfy, force: true });
     }
@@ -759,6 +762,7 @@ function connect() {
       sys(`here: ${store.roster.join(', ')}`);
       toTranscript--;
       sendResize(); // host only: fit the claude window to this terminal
+      reportIdle(); // v0.26: say `active` now rather than at the next tick, so /who is useful at once
       return;
     }
     // Screen frames are a live view at 4/s: they must never enter the dedupe set (it would
