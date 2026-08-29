@@ -38,13 +38,26 @@ Run when the feature list is done. Not a smoke re-run — an adversarial pass ov
 - Fresh-install rehearsal: `brew install` and `npm i -g` on a clean machine, following the wiki's
   `Install` and `Agent-Install` pages literally, including the agent-driven path.
 
+## Release gates that have actually run
+
+- **0.21.0 — 2026-08-29.** All eighteen suites, in the documented order, one at a time, on node
+  24.15 / tmux 3.7c / claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2. Every one green; unit
+  suite 389/0. Nothing was left behind: no tmux server on a socket the gate created, no `dns-sd`
+  child still advertising, no state dir but the two that pre-dated the run.
+  This discharges four of the deferrals below — the v0.28, v0.33 and v0.29 "not re-run, prove at
+  the next release gate" entries, and the 0.20.0 one. They are kept, struck through, because what
+  a skip cost is only visible next to what it was.
+  It also found real drift no suite covers: `--help` and `/menu` disagreeing on three flags,
+  `SPEC.md`'s recipe invoking sixteen of eighteen suites, and `MANUAL.md` missing six commands.
+  Two new lints now fail on the first two.
+
 ## Deferred (owed to the campaign)
 
 Append one line per skip: what, why, and how it will be proven. Newest last.
 
-- 2026-08-29 · smoke.mjs, smoke-xfer, smoke-popup, smoke-slash, smoke-perm, smoke-knock not
+- ~~2026-08-29 · smoke.mjs, smoke-xfer, smoke-popup, smoke-slash, smoke-perm, smoke-knock not
   re-run after the v0.28 scrollback batch (judged unaffected; token cost). Prove: full sweep at
-  the 0.20.0 release.
+  the 0.20.0 release.~~ **DISCHARGED — 0.21.0 gate, 2026-08-29: all six re-run, all green.**
 - 2026-08-29 · Linux sound path (`paplay`/`aplay`) never executed — no Linux box. Prove: a Linux
   run in the campaign, or mark the platform unsupported in the docs.
 - 2026-08-29 · The nudge phone tier (ntfy) has no end-to-end run — the URL matcher is https-only,
@@ -70,6 +83,8 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   ordinary jam — so the non-adopted path is unchanged by construction — and `smoke-lifecycle`
   (which builds real jams and drives the launcher's prompts) plus the new `smoke-adopt` cover the
   paths that did change. Prove: full sweep at the next release gate.
+  **DISCHARGED — 0.21.0 gate, 2026-08-29: all fourteen re-run, all green. The judgement held —
+  the `tmux()` → `ptmux()` move broke nothing on the non-adopted path.**
 - 2026-08-29 · Adoption has never been run against a REAL claude in a REAL pane on the default
   tmux socket — `smoke-adopt` uses `scripts/fake-tui.mjs` for the pane, and the one default-socket
   case it runs uses a session the smoke created itself. So the injected briefing has never been
@@ -102,6 +117,7 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   types and one loopback endpoint, the clients gained commands and a frame case, `peer.mjs` and
   `peer-mcp.mjs` are new files) and six of them spend tokens. Prove: full sweep at the next
   release gate.
+  **DISCHARGED — 0.21.0 gate, 2026-08-29: all thirteen re-run, all green. The judgement held.**
 - 2026-08-29 · The peer executor has NEVER been a real `claude`. `smoke-peer` drives
   `scripts/fake-claude.mjs`, so five flags on the spawn argv are unverified against the real
   binary even though they are documented in its `--help` on 2.1.251: `--restricted`,
