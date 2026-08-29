@@ -984,7 +984,9 @@ export const HEARTBEAT_MS = 30000;
 export function heartbeatSweep(peers = []) {
   const ping = [];
   const terminate = [];
-  for (const [key, rec] of peers) (rec && rec.alive ? ping : terminate).push(key);
+  // Strictly true, not merely truthy: a socket whose liveness we cannot vouch for must be
+  // terminable, or a garbage record would make a dead peer immortal in the roster.
+  for (const [key, rec] of peers) (rec?.alive === true ? ping : terminate).push(key);
   return { ping, terminate };
 }
 
