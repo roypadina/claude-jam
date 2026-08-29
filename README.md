@@ -221,7 +221,11 @@ approves.
 | `/tools`, `/tools on\|off` | anyone | reprint the last turn's full tool log · stop/resume collapsing tool lines |
 | `/files` | anyone | every path this session read, wrote or edited — newest first, with a count |
 | `/diff [path]` | anyone | `git diff --stat` of the host's working tree, or the real hunks for one path |
-| `/answer`, `/answer <n>` | anyone | list the options on claude's permission prompt · offer one of them (the host approves before a key is typed) |
+| `/answer`, `/answer <n>` | anyone | show what claude is asking · answer it. **A question** (claude's own `AskUserQuestion`) goes straight through, first answer wins. **A permission** (a tool wanting approval) is offered to the host, who approves before a key is typed |
+| `/answer <q> <n>` | anyone | one question of a multi-question form — only the one on screen |
+| `/answer other <text>` | host | the free-text option. Host-only whatever `--answers` says: arbitrary text into the terminal is raw keyboard access |
+| `/outbox`, `/retry` | anyone | what jam kept when it could not confirm a message landed · send the newest kept one again (yours; the host may send anybody's) |
+| `↑` / `↓` | anyone | recall your own last 50 submissions — per client, and they survive a restart |
 | `/join`, `/token new\|set\|off` | host | reprint the invite lines · rotate or drop the token |
 | `/invite <Name> [--uses N] [--expires 24h]` | host | mint a link that joins as that name with no approval |
 | `/invites`, `/invite revoke <Name\|id>` | host | list the links (never reprinting one) · take one back |
@@ -246,10 +250,22 @@ three, and exactly bare — `/cost --json` is an argument this list has not read
 anything else. Their output lands on the shared screen like any other command, so a guest can put
 the host's `/status` panel in front of everybody; that is the whole cost of it.
 
-**Answering a permission prompt** (`/answer`) is the one guest action that reaches the real TUI, so
-it is the narrowest: only while claude is actually waiting, only a digit the daemon can see on the
-screen, only after the host approves that digit, and only if the screen still says the same thing
-when the key is typed. A guest never gets raw keys — that is F3, and it stays host-only.
+**A question is not a permission.** jam classifies claude's *current screen* — `question` ·
+`permission` · `dialog` · nothing — 2.5 times a second, and drives the status row from that, so the
+`⚠` says what is really there and clears itself when the prompt goes. A **question** is a product
+decision, so anyone may `/answer <n>` it: no approval, first answer wins, and the room is told who
+answered what (`--answers host` locks it to the host). A **permission** is a security grant and
+keeps the v0.17 ladder exactly: only while the prompt is really up, only a digit the daemon can see
+on the screen, only after the host approves *that* digit, and only if the screen still says the
+same thing when the key is typed. A **dialog** with nothing numbered on it is nobody's to relay —
+the host takes the keyboard with F3. A guest never gets raw keys, and the free-text option
+(`Type something.`) counts as raw keys, so it stays the host's in every mode.
+
+**Your message is never lost.** Every message is written to `<state>/outbox/` (0600) before it is
+pasted and deleted only once the input box is seen to empty. If jam cannot confirm it landed you
+get `couldn't confirm your message reached claude — kept at <path> · /retry to send it again`,
+nothing is retyped or wiped behind your back, and `/outbox` · `/retry` · `↑`/`↓` are three ways to
+get it back.
 
 Multi-line input: `Shift+Enter` (kitty/CSI-u), `Option/Alt+Enter`, or a trailing `\` (works
 everywhere).
@@ -291,11 +307,19 @@ your own name in a message or in `/c` chat. At most one per three seconds. The s
 carries this connection's own round trip, measured by the 30 s heartbeat: a dim `~120ms`, or
 `⚠ stale Ns` once a pong is overdue.
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **245 tests**. Twelve
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **265 tests**. Thirteen
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
 in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs`, `smoke-perm.mjs`,
-`smoke-lifecycle.mjs` and `smoke-invite.mjs` bring their own — the last two run under a `TMPDIR`
-of its own and start by proving they will not touch a session they did not create).
+`smoke-lifecycle.mjs`, `smoke-invite.mjs` and `smoke-answer.mjs` bring their own — the last three
+run under a `TMPDIR` of their own and start by proving they will not touch a session they did not
+create).
+
+`fixtures/pane/` holds thirteen real `tmux capture-pane -p` captures of claude 2.1.251 — the empty
+input box, short text, a wrapped line, a 3-line and an 18-line paste (both collapsed to
+`[Pasted text #N +M lines]`), the trust dialog, a real `Bash` permission prompt, and the
+`AskUserQuestion` picker in all four of its states. They are the corpus the paste verification and
+the prompt classifier are judged against, so a future Claude Code that draws differently fails a
+test instead of somebody's message.
 
 ## Known ceilings (deliberate)
 
@@ -309,6 +333,26 @@ of its own and start by proving they will not touch a session they did not creat
   line above the options, and a 10-option prompt is more than one digit can pick), and a prompt
   that changed between the request and the approval is refused rather than answered. Guests still
   never get raw keys.
+- **The prompt classifier reads pixels, not intentions.** It knows an `AskUserQuestion` picker by
+  three measured signals (a checkbox header, a `Type something.` option, a `to navigate` footer)
+  and a permission prompt by what is left. A numbered picker with none of those is called a
+  *permission* — deliberately the safe way to be wrong, since the cost is one host approval rather
+  than a tool grant handed to a guest. A future Claude Code that drops all three signals would make
+  questions host-gated again, not the reverse, and `fixtures/pane/` is the corpus that would fail
+  first.
+- **`/answer <q> <n>` can only answer the question that is on screen.** Moving between the tabs of
+  a multi-question form is a Tab keypress — raw keyboard, host-only — so the other questions are
+  refused by name rather than guessed at.
+- **A pty drops what a busy TUI does not read in time.** Measured on macOS 15 / tmux 3.7c: an 8 KB
+  `paste-buffer` into a pane mid-redraw arrived 4.2 KB short, silently. So pastes go in as 2 KB
+  pieces and each one is checked against the count in claude's own `[Pasted text +N lines]` marker;
+  a piece that arrives short is treated as a truncation and the whole message is kept rather than
+  half-sent. If a slower machine ever comes up short anyway, `PASTE_CHUNK_MAX` is the knob.
+- **A message is capped at 20 000 characters on the wire** (`sanitize`), so chunking covers roughly
+  2 KB to 20 KB. A bigger brief goes in as a file (`/send`), not as a message.
+- **The outbox is a safety net, not a queue.** It keeps the last 20 payloads, in the host's state
+  dir, and a `/retry` is a fresh attempt — nothing re-sends on its own, and ending the jam takes
+  the state dir (and anything still kept in it) with it.
 - The host answers a prompt with F3 — which *is* a `tmux attach`.
   While the host is attached their own mirror is paused, and coming back re-feeds only the last
   40 transcript lines to the client: the rest stays in the terminal's own scrollback, because

@@ -750,9 +750,9 @@ The public README keeps a short list. This is all of them.
   while claude is still booting still lands.
 
 
-## Running the twelve end-to-end smokes
+## Running the thirteen end-to-end smokes
 
-Twelve end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
+Thirteen end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
 ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -827,7 +827,28 @@ node scripts/smoke-lifecycle.mjs
 # and from `/invite`, joins with only a link, and spends most of its length on the refusals.
 # ~10s.
 node scripts/smoke-invite.mjs
+
+# v0.30/v0.31: the thirteenth smoke. NO arguments, no daemon of yours, and no real claude at all —
+# the pane is scripts/fake-tui.mjs, a stand-in built from the measured behaviour of 2.1.251, and
+# the prompt steps paint the REAL captures in fixtures/pane/ into it. So tmux, capture-pane,
+# paste-buffer, send-keys, the daemon and both wire protocols are real; only claude's redraw is
+# imitated. Its own $TMPDIR, its own port (7871) and one tmux session, jamanswer, killed by exact
+# name. ~1 min, costs nothing.
+node scripts/smoke-answer.mjs
 ```
+
+### What each smoke covers of v0.30/v0.31
+
+- `smoke-answer.mjs` — the whole of both, deterministically: the probe rule, the placeholder rule,
+  a chunked payload arriving whole, a message that cannot land being KEPT with its exact bytes,
+  `/outbox` and `/retry`, the four classifications, a GUEST answering a question with no approval,
+  first-answer-wins, free text going to the host, `/answer <q> <n>`, and a permission still being
+  host-gated.
+- `smoke.mjs` — the same two rules against a REAL claude and a REAL transcript: one message that is
+  both multi-line (so it renders as a placeholder) and over the chunk cap, asserted byte-for-byte
+  against the JSONL.
+- `smoke-ink.mjs` — `↑`/`↓` recall on a real pty, through the real ink client, including that the
+  draft survives the walk and that nothing is submitted by it.
 
 ## v0.15 — native-speed host TUI control + faster frames (Roy: F3 typing feels remote)
 
@@ -1682,6 +1703,27 @@ opt-in (`/peer on`) before they can be dispatched to at all.
 
 ## v0.30 — big pastes must not fail, and a message must never be lost (URGENT, observed live)
 
+**SHIPPED 2026-08-29.** All four items, plus the fixture corpus. Three things the implementation
+found that the spec did not know:
+
+1. It is not only *big* pastes. Measured on 2.1.251, **any** paste carrying a newline collapses to
+   `[Pasted text #N +M lines]` — from three lines up — so every multi-line message ever sent had
+   this failure available to it.
+2. **The last three rows of the pane are not the input box.** They are chrome that changes on its
+   own (`⏸ manual mode on · ← for agents` becomes `paste again to expand` after a paste), so
+   diffing them as the spec described would have reported a landed paste that never landed.
+   `inputAreaRows()` finds the real box instead — from the last prompt row to the rule that closes
+   it.
+3. **A pty drops what a busy TUI does not read in time.** An 8 KB `paste-buffer` into a pane
+   mid-redraw arrived 4.2 KB short with no error anywhere. So the chunk is 2 KB, not the ~8 KB the
+   spec asked for, and each piece is verified against the count in its own placeholder — a short
+   count is a truncation, and the message is kept rather than half-sent.
+
+Also measured and worth keeping: one `Ctrl-U` kills one visual line rather than the whole input, so
+clearing a wrapped box means repeating it; the box writes `❯` + U+00A0 while an option row writes
+`❯` + a plain space; and `sanitize`'s 20 000-character cap, not the paste path, is what limits how
+big a message can be — the spec's "200 KB brief" is a file, not a message.
+
 Observed 2026-08-29 15:20: a long multi-line message failed with `injection failed: pasted text
 never appeared in the claude pane`, and `Ctrl-U` then wiped it from the input box. Cause: Claude
 Code 2.1.x renders a large paste as `[Pasted text +NN lines]`, so the echo probe — the first ~40
@@ -1713,6 +1755,24 @@ possible because `broadcast()` runs before `enqueueInject()`, i.e. by luck, not 
    `↑`/`↓` recall go in `/menu` (v0.24 completeness test).
 
 ## v0.31 — questions are not permissions: classify the prompt, let anyone answer (observed live)
+
+**SHIPPED 2026-08-29.** All five items. What the implementation learned from the real pickers:
+
+- An `AskUserQuestion` is recognised by any ONE of three measured signals — a checkbox header, a
+  `Type something.` free-text option, or a `to navigate` footer. A numbered picker with none of
+  them is classified as a **permission**, deliberately: being wrong that way costs the host one
+  approval; being wrong the other way would hand a guest a tool grant.
+- A multi-question form draws a tab bar whose answered tabs flip from an empty box to a crossed
+  one, and focus advances to the first unanswered on its own — so "which question is on screen" is
+  observable rather than guessed. Only that one can be answered, because moving between tabs is a
+  Tab keypress, i.e. raw keyboard.
+- The review step at the end of a form ("Ready to submit your answers?") is still a question, and
+  has no focused tab, so it is not given one.
+- Measured: a bare digit answers an `AskUserQuestion` picker on its own, exactly as it answers a
+  permission prompt — so the v0.17 typing path needed no change.
+- The hook was demoted further than the spec asked: it does not trigger a sound of its own, it
+  triggers a *look at the screen*. The bell then fires on the classified transition, so it too can
+  never be about a prompt that is not there.
 
 Observed 2026-08-29 15:26: the status row said `⚠ waiting for permission` while the pane was
 actually showing an **AskUserQuestion** picker, and the flag stayed up after the questions were
