@@ -22,9 +22,10 @@ import { copyToClipboard } from './xfer.mjs';
 
 const h = React.createElement;
 const HERE = path.dirname(new URL(import.meta.url).pathname);
-const JAM = path.join(HERE, 'jam');
-// Every NEW string in this batch names the product, not the binary (the rename batch ships
-// `claude-jam` as the real bin with `jam` kept as an alias, so both resolve).
+// v0.21: the real executable. `jam` is still installed beside it as a deprecated alias that
+// execs this same file, so both resolve — but nothing here, and nothing printed anywhere, uses
+// that name.
+const JAM = path.join(HERE, 'claude-jam');
 const BIN = 'claude-jam';
 
 const C = { accent: 'yellow', dim: 'gray', dimmer: '#6b6b6b', err: 'red', ok: 'green' };

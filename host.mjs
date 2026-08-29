@@ -101,9 +101,10 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv.slice(2));
-// The launcher owns the usage text (one wording for `jam` and for `node host.mjs`), so ask it.
+// The launcher owns the usage text (one wording for `claude-jam` and for `node host.mjs`), so
+// ask it.
 if (opts.help) {
-  const r = spawnSync(path.join(HERE, 'jam'), ['--help'], { stdio: 'inherit' });
+  const r = spawnSync(path.join(HERE, 'claude-jam'), ['--help'], { stdio: 'inherit' });
   process.exit(r.status ?? 0);
 }
 opts.name ||= 'Host';
