@@ -1000,6 +1000,9 @@ function pumpPrompt() {
   if (now.sig === prompt.sig) return prompt;
   prompt = now;
   status.waiting = now.kind !== 'none';
+  // A picker that went away and came back is a NEW question, so the first-answer-wins lock goes
+  // with it. Nothing else clears it: while one prompt is up, one answer is what it gets.
+  if (now.kind === 'none') answered = {};
   console.log(`[prompt] ${now.kind}${now.header ? ` (${now.header})` : ''}`
     + `${now.question ? ` — ${now.question.slice(0, 70)}` : ''}`);
   pushStatus();
@@ -2333,7 +2336,7 @@ const outboxDrop = (file) => { if (file) try { fs.rmSync(file, { force: true });
 const PASTE_POLLS = 24; // × 250 ms — the same budget the single-shot version had
 const SUBMIT_POLLS = 12;
 
-async function pasteChunk(chunk, probe) {
+async function pasteChunk(chunk, probe, lines = null) {
   const before = capture();
   const buf = `jam${++bufN}`;
   const file = path.join(opts.state, 'inject.txt');
@@ -2342,7 +2345,7 @@ async function pasteChunk(chunk, probe) {
     tmux('load-buffer', '-b', buf, file);
     tmux('paste-buffer', '-b', buf, '-d', '-p', '-t', CLAUDE_PANE);
     for (let i = 0; i < PASTE_POLLS; i++) {
-      const how = injectLanded({ probe, before, after: capture() });
+      const how = injectLanded({ probe, before, after: capture(), lines });
       if (how) return how;
       await sleep(250);
     }
@@ -2384,11 +2387,15 @@ async function inject(name, text, ws = null, kept = null) {
   // makes being wrong survivable.
   const width = Number(tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width}').stdout) || 80;
   const chunks = chunkPayload(payload);
+  let sent = 0;
   for (let c = 0; c < chunks.length; c++) {
     // Only the FIRST chunk starts at the box's left edge; a later one lands wherever the previous
     // one left the cursor, so its own first line is not a line claude will draw on its own.
     const probe = c === 0 ? chunks[c].split('\n')[0].slice(0, Math.max(8, Math.min(40, width - 12))) : '';
-    const how = await pasteChunk(chunks[c], probe);
+    // How many newlines the box should be showing once this chunk has landed, counting every
+    // chunk before it: the placeholders in one box sum, and a total that is short is a truncation.
+    sent += (chunks[c].match(/\n/g) || []).length;
+    const how = await pasteChunk(chunks[c], probe, sent || null);
     if (!how) {
       // NOT a blind Ctrl-U. Capture the box, clear it only if something is actually in it (a half
       // -landed chunk would glue itself to the next message), and keep the payload either way.

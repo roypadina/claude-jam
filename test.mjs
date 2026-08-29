@@ -46,6 +46,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   OUTBOX_DIR, OUTBOX_KEEP, outboxSlug, outboxName, parseOutboxName, outboxEntries, resolveOutbox,
   outboxReport, keptMessageText,
   historyPush, historyMove, parseHistoryFile, serializeHistory, HISTORY_LIVE, HISTORY_FILE_MAX,
+  pastedLines,
   // v0.31: classify the pane, and let anyone answer a question.
   PROMPT_KINDS, classifyPrompt, promptSig, questionBlock, promptStatusText,
   ANSWERS_MODES, answersMode, answerDecision, parseAnswerCommand, ANSWER_USAGE, ANSWER_TEXT_MAX,
@@ -3037,6 +3038,15 @@ test('v0.30-1 a landed paste is accepted by whichever of the three shapes it has
   assert.equal(injectLanded({ probe: '[Zed]: nothing like this at all', before: empty, after: pane('box-wrapped') }), 'changed');
   // And the real failure: nothing was pasted at all.
   assert.equal(injectLanded({ probe: '[Roy]: hello there', before: empty, after: empty }), null);
+  // A rule is evidence only if it was not ALREADY true. Without this the second chunk of a
+  // chunked payload "lands" on the first chunk's placeholder and a repeat lands on its own echo.
+  assert.equal(injectLanded({ probe: '', before: pane('box-placeholder'), after: pane('box-placeholder') }), null,
+    'a placeholder that was already there proves nothing');
+  assert.equal(injectLanded({ probe: '[Roy]: hello there', before: pane('box-short'), after: pane('box-short') }), null,
+    'and neither does a probe that was already on screen');
+  // The same second chunk, when it really does land, is caught by the diff rule.
+  const grown = pane('box-placeholder').replace('[Pasted text #2 +18 lines]', '[Pasted text #2 +18 lines][Pasted text #3 +9 lines]');
+  assert.equal(injectLanded({ probe: '', before: pane('box-placeholder'), after: grown }), 'changed');
   assert.equal(injectLanded({ probe: 'x', after: empty }), null, 'no before = no diff rule, not a crash');
   // The chrome below the box moves on its own; that must never read as a landed paste.
   const noisy = pane('box-empty').replace('⏸ manual mode on · ← for agents', 'paste again to expand');
@@ -3070,7 +3080,29 @@ test('v0.30-4 a big payload is chunked on line boundaries and rejoins byte for b
   const cut = chunkPayload(huge, 10);
   assert.equal(cut.join(''), huge);
   for (const p of cut) assert.ok(p.length <= 10);
-  assert.equal(PASTE_CHUNK_MAX, 8 * 1024);
+  // Measured, not chosen: a pty hands the TUI 1022 bytes at a time and an 8 KB paste into a
+  // mid-redraw pane arrived 4.2 KB short with no error. 2 KB is inside the queue.
+  assert.equal(PASTE_CHUNK_MAX, 2 * 1024);
+  assert.ok(PASTE_CHUNK_MAX > 1022, 'and comfortably bigger than one pty read');
+});
+
+test('v0.30-4 a short placeholder count is a truncation, not a landing', () => {
+  // The pty drops silently, so the ONLY on-screen evidence a paste arrived whole is the count in
+  // its placeholder. Measured on 2.1.251: the number is the NEWLINE count.
+  assert.equal(pastedLines(pane('box-placeholder')), 18, 'a 19-line paste shows +18');
+  assert.equal(pastedLines(pane('box-multiline-small')), 3);
+  assert.equal(pastedLines(pane('box-empty')), null, 'no placeholder, no number');
+  assert.equal(pastedLines('[Pasted text]'), null, 'a placeholder with no number is not a count');
+  assert.equal(pastedLines('[Pasted text #1 +5 lines][Pasted text #2 +7 lines]'), 12, 'several pastes sum');
+  const empty = pane('box-empty');
+  // The exact truncation this was written for: 137 newlines went in, the box says 61.
+  const short = empty.replace('❯\u00a0', '❯\u00a0[Pasted text #1 +61 lines]');
+  assert.equal(injectLanded({ probe: '', before: empty, after: short, lines: 137 }), null,
+    'short of what was sent is NOT a landing');
+  const whole = empty.replace('❯\u00a0', '❯\u00a0[Pasted text #1 +137 lines]');
+  assert.equal(injectLanded({ probe: '', before: empty, after: whole, lines: 137 }), 'placeholder');
+  // And with nothing expected (a message small enough not to be chunked), the count is not used.
+  assert.equal(injectLanded({ probe: '', before: empty, after: short }), 'placeholder');
 });
 
 test('v0.30-2 the outbox names a payload by when and by whom, and parses back', () => {
