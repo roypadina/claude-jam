@@ -46,8 +46,10 @@ request.
 
 ## Slash commands
 
-- **jam's own** (everyone): `/c` `/who` `/help` `/quit` `/mirror` `/tools`.
-  Host-only: `/join` `/accept` `/deny` `/token` `/allow-cmd` `/deny-cmd`.
+- **jam's own** (everyone): `/c` `/who` `/help` `/quit` `/mirror` `/tools` `/export` `/send`
+  `/paste` `/get`.
+  Host-only: `/join` `/accept` `/deny` `/token` `/allow-cmd` `/deny-cmd` `/allow-export`
+  `/deny-export` `/accept-file` `/deny-file`.
 - **yours** (`/model`, `/compact`, `/mcp`, `/status`, …): anything jam does not own.
   - From the **host's** client it is typed into this TUI verbatim (no `[Name]:` prefix), so
     your own command palette runs it; any picker it opens shows up in everyone's mirror and
@@ -87,6 +89,46 @@ request.
   `⚙ N tools (Bash ×3, Read ×1)` line. `/tools` reprints the last turn's full log, `/tools on`
   stops collapsing, `/tools off` collapses again (the default). A one-tool turn stays inline.
 
+## Sending you files (`/send`, `/paste`)
+
+A guest cannot put a file on the host's disk by themselves — the host has to accept it, once
+per file:
+
+- Guest runs `/send <path>` (or `/paste`, which grabs an **image off their macOS clipboard**;
+  `/paste <caption>` adds a note). They see "waiting for the host to accept it".
+- The host sees `⇪ Dana wants to send photo.png (2.1 MB) — /accept-file Dana ·
+  /accept-file Dana always · /deny-file Dana`, plus a tmux popup if they are attached.
+  `always` = that guest's later files are accepted without asking, for this jam only.
+- Accepted, the file is written to **`<cwd>/jam-uploads/<name>`** and you are told about it as a
+  normal attributed message: `[Dana]: sent a file: jam-uploads/photo.png have a look`. **That
+  path is for you to `Read`** — the file is on your disk, nothing was executed or opened.
+- Names are sanitized by the daemon (basename only, `[A-Za-z0-9._-]`, a name with a `/` in it is
+  refused outright), a collision gets a `-1` suffix, the cap is 20 MB, and one file at a time
+  per person. If someone asks why their file "did nothing", it is one of those.
+
+The host's own `/send <path>` is the other direction: it **offers** the file to everyone
+(`⇩ Roy offers notes.md (12 KB) — /get notes.md`), and each guest's `/get <name>` saves it into
+their own `./jam-downloads/`. Nothing is pushed onto anybody. The host's `/paste` still uploads
+into `jam-uploads/` — that is how an image with no path reaches you.
+
+## Taking the transcript home (`/export`)
+
+`/export` asks the host for a copy of **this session's transcript** — the JSONL file you are
+writing as we talk.
+
+- The host sees `⇩ Dana requests the session transcript — /allow-export Dana ·
+  /allow-export Dana always · /deny-export Dana`. Default is no; `always` = that person may
+  export again for the rest of this jam.
+- Approved, the guest's client writes `./jam-session-<session-id>.jsonl` and prints the recipe
+  to continue the conversation on their own machine: copy it into
+  `~/.claude/projects/<their cwd with every non-alphanumeric turned into "-">/<session-id>.jsonl`
+  and run `claude --resume <session-id>`.
+- **Say this plainly if anyone asks:** the transcript is everything you saw here — file contents
+  you read, tool output, your whole context. jam strips its own join-token block from the copy
+  (best effort, by regex), but nothing else is filtered. After an export the host should run
+  `/token new`. A guest could already read the conversation on screen; what changes is that they
+  now have the files and tool output too, in a form they can keep.
+
 ## Watching your screen from elsewhere
 
 - Every client already has it: the default view IS this screen.
@@ -111,9 +153,13 @@ host relaunches with `--tunnel`.
 
 `/c <text>` humans-only chat · `/who` participants · `/help` reprint the onboarding block ·
 `/mirror` (or F2) swap views · `/tools [on|off]` tool log / collapse mode · `/quit` leave ·
+`/send <path>` send a file (host: offer one) · `/paste [caption]` the clipboard's image ·
+`/get [name]` take an offered file · `/export` this session's transcript ·
 Shift+Enter, Option+Enter or a trailing `\` for multi-line.
 Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` · `/join` ·
-`/allow-cmd [name] [always]` · `/deny-cmd <name>` · **F3** TUI control.
+`/allow-cmd [name] [always]` · `/deny-cmd <name>` · `/allow-export [name] [always]` ·
+`/deny-export <name>` · `/accept-file [name] [always]` · `/deny-file <name>` ·
+**F3** TUI control.
 Any other `/command` is one of yours — see Slash commands above.
 
 ## Host launch flags (most useful)
@@ -133,6 +179,12 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
 - Lost the invite → host runs `/join`.
 - Guest's `/command` seems ignored → it is waiting for the host's `/allow-cmd`, or it is on the
   hard host-only list (`/exit`, `/clear`, `/resume`), or it expired after 2 minutes.
+- A guest's file or `/export` "did nothing" → it is waiting for the host's `/accept-file` /
+  `/allow-export`, or it expired after 2 minutes, or the daemon refused it: a name with a path
+  in it, over 20 MB (files) / 50 MB (transcript, offers), or a second one while the first is
+  still in flight. The exact reason went to that person's own client as a `!` line.
+- `/paste` says it is macOS-only → it is: it reads a PNG off the mac clipboard (pngpaste if
+  installed, otherwise osascript). Elsewhere, save the image and use `/send <path>`.
 - F3 does nothing → they are a guest (host + loopback only), or their terminal sends a
   different F3 sequence; the host can `tmux attach -t jam` instead.
 - F2, Shift+Enter or the live view do nothing → they are running `--basic`, which is
