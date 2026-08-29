@@ -227,3 +227,21 @@ Small verification per batch, one big campaign at the end — Roy's call, 2026-0
 - **Anything you skip goes in TESTING.md's "Deferred" list in the same commit** — what, why, and
   how it will be proven. An unrecorded skip is the failure this policy is designed to avoid.
 - The full sweep is the release gate, and TESTING.md's campaign section is the end-game.
+
+## Docs are part of the change, not a follow-up (Roy, 2026-08-29 — restated)
+
+README, MANUAL.md, the wiki, the `--help` usage text and `/menu` must be true at ALL times.
+A change that alters any user-visible surface — a flag, a command, a key, an access mode, an
+install step, a default — updates in the SAME commit series:
+
+1. `--help` usage in the launcher (the most-missed one: `--resume` shipped and went undocumented
+   there for two releases),
+2. `/menu` — the completeness test fails a command with no menu entry; keep flags in step too,
+3. `MANUAL.md` — this is the text claude itself is given, so a stale line makes the agent lie,
+4. `README.md`,
+5. the affected wiki page(s) in ../claude-jam.wiki (pushing the wiki is approved),
+6. `CHANGELOG.md` (Unreleased).
+
+A doc-drift check belongs in the release step: before tagging, run every command that README,
+the wiki `Install` page and `Agent-Install` claim, and fix what does not run. Stale docs are a
+defect, reported like any other — not a tidy-up for later.
