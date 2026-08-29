@@ -60,6 +60,10 @@ export function runPeerTask(task, {
   let child = null;
   let done = false;
   let turns = 0;
+  // Which assistant MESSAGES have been seen — not how many events arrived. See peerStreamEvent:
+  // 2.1.251 emits one event per content block, so counting events counted thinking and every
+  // tool_use as turns of their own and a 12-turn cap stopped at about four.
+  const turnIds = new Set();
   let out = '';        // what the task finally answered
   let partial = '';    // every line it said on the way, kept for the failure cases
   let stderr = '';
@@ -137,7 +141,10 @@ export function runPeerTask(task, {
       const ev = peerStreamEvent(line);
       if (!ev) continue;
       if (ev.kind === 'turn') {
-        turns++;
+        // A build that sends no message id falls back to the old count: one event, one turn.
+        // Wrong in the same direction as before, rather than uncapped, which is the safe way
+        // for an unknown build to be wrong.
+        if (ev.id) { turnIds.add(ev.id); turns = turnIds.size; } else turns++;
         const said = peerProgressLine(ev);
         if (said) {
           if (partial.length < PEER_RESULT_MAX) partial += `${said}\n`;

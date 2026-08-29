@@ -377,6 +377,22 @@ try {
     await until('the child to be gone', () => !alive(invocations().at(-1).pid), 10000);
   });
 
+  // ------------------------------- 9b: a turn is a MESSAGE, not a stream event ----
+  await step('9b six events under two message ids are TWO turns, so a 3-turn cap does not fire', async () => {
+    // The 2026-08-30 measurement, as a test: claude 2.1.251 emits one `assistant` event per
+    // CONTENT BLOCK. Counting events, this two-turn task would have been stopped inside its
+    // first turn and the guest would have been told it hit a cap it never reached.
+    setMode('blocks');
+    guestOut = '';
+    const p = control('/peer/dispatch', { peer: 'Dana', prompt: 'two turns, six events', maxTurns: 3, deadlineMs: 60000 });
+    await until('the consent block', () => saw('wants to run a task on YOUR machine'), 15000);
+    say('/peer accept');
+    const r = await p;
+    eq(r.ok, true, `it ran to completion instead of hitting the cap: ${JSON.stringify(r.why)}`);
+    eq(r.why, 'ok', 'no cap, no timeout');
+    ok(/two turns, six events/.test(r.result || r.agent || ''), `the real result came back: ${String(r.result || r.agent).slice(0, 120)}`);
+  });
+
   // ------------------------------------------------------------------- 10: a crash ----
   await step('10 a crash is its own answer, and it carries the child\'s own stderr', async () => {
     setMode('crash');

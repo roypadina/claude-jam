@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Fixed — the peer turn cap counted stream events, so it fired at about a third of the cap
+
+Measured against a real `claude` 2.1.251 for the first time on 2026-08-30 (the live run
+TESTING.md had been owed): a task that took **two** turns streamed **six** `{"type":"assistant"}`
+events under **two** distinct `message.id`s, and the run's own result said `num_turns: 3`. The
+binary emits one event per CONTENT BLOCK — thinking, text, tool_use, tool_use / thinking, text.
+
+`peer.mjs` counted those events. So thinking blocks and every individual tool call each burned a
+turn, the default `--turns 12` bought about four real turns, and the consent block the guest
+approves — "up to 12 turns" — was not true. A task was stopped with `cap` having never reached
+its cap.
+
+A turn is now an assistant MESSAGE: `peerStreamEvent` hands back `message.id`, and the counter
+counts distinct ids. A build that sends no id falls back to counting events, which is what it did
+before — wrong in the same direction rather than uncapped.
+
+`scripts/fake-claude.mjs` now emits message ids (it never did, so the counter that ships had
+never been driven by the shape it actually meets) and gains a `blocks` mode that reproduces the
+measured six-events-two-ids stream. `smoke-peer` step 9b asserts a 3-turn cap does NOT stop it —
+and goes red if the fix is reverted, which was checked rather than assumed.
+
+Also verified in the same run, and previously unproven: `--restricted`, `--strict-mcp-config`,
+`--tools`, `--json-schema` and `--no-session-persistence` are all accepted by 2.1.251, and
+`--restricted` really does refuse a read outside the scratch directory —
+`"…/.ssh is outside …; --restricted confines the file tools to the working directory."`
+Refused, not empty.
+
 ### Added — a lint for call sites that resolve to nothing
 
 `node --check` accepts a file that calls a function nobody defines; that is how v0.25's

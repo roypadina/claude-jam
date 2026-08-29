@@ -5070,6 +5070,13 @@ export function peerStreamEvent(line) {
     const content = Array.isArray(m.message?.content) ? m.message.content : [];
     return {
       kind: 'turn',
+      // Measured on claude 2.1.251, 2026-08-30: ONE `{"type":"assistant"}` event is emitted per
+      // CONTENT BLOCK, not per turn. A two-turn task streamed six of them — thinking, text,
+      // tool_use, tool_use / thinking, text — under exactly TWO distinct `message.id` values,
+      // and the run's own `result.num_turns` was 3. So the id is the only thing in the stream
+      // that identifies a turn, and it is what the cap has to count. null when a build does not
+      // send one, and the caller falls back to counting events (what it always did).
+      id: typeof m.message?.id === 'string' ? m.message.id : null,
       text: content.filter((c) => c?.type === 'text').map((c) => String(c.text ?? '')).join(''),
       tools: content.filter((c) => c?.type === 'tool_use').map((c) => String(c.name ?? 'tool')),
     };
