@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -280,6 +280,7 @@ function broadcast(ev) {
   if (ev.t !== 'typing') { history.push(full); if (history.length > 300) history.shift(); }
   for (const ws of clients.keys()) send(ws, full);
   if (ev.t !== 'typing') console.log(`[${ev.t}]`, ev.from || ev.kind || '', (ev.text || '').slice(0, 120));
+  bumpActivity(); // v0.15: anything worth telling everybody is worth a fast mirror
   return full;
 }
 
@@ -417,6 +418,29 @@ const mirrors = new Set(); // sockets in mirror mode
 let frameTimer = null;
 let lastFrame = null;
 let lastFrameAt = 0;
+// v0.15: the cadence signal. Anything that can move the screen — a message going in, a turn
+// running, somebody typing, the screen itself changing — stamps this, and the poll runs at
+// FRAME_FAST_GAP for the next FRAME_ACTIVE_MS. Nothing else has to know about frames.
+let lastActivity = 0;
+let cadenceShown = null; // the gap we last logged, so a transition costs one line
+
+function bumpActivity() {
+  lastActivity = Date.now();
+  // Only a transition reschedules: a burst of ten messages must not churn ten timers.
+  if (mirrors.size && cadenceShown !== FRAME_FAST_GAP) scheduleFrames();
+}
+
+// The pane's size, cached. It only changes when somebody attaches or resizes, and at 25
+// frames/s a second tmux call per frame would double the spawn count for nothing.
+const SIZE_TTL = 500;
+let paneSize = { w: 0, h: 0, at: 0 };
+function paneDims(rows) {
+  const now = Date.now();
+  if (paneSize.at && now - paneSize.at < SIZE_TTL) return paneSize;
+  const out = (tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width} #{pane_height}').stdout || '').trim().split(/\s+/);
+  paneSize = { w: Number(out[0]) || 80, h: Number(out[1]) || rows.length, at: now };
+  return paneSize;
+}
 
 function captureFrame() {
   const r = tmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE);
@@ -426,17 +450,33 @@ function captureFrame() {
 
 function pumpMirror() {
   if (!mirrors.size) return;
+  const now = Date.now();
+  // The cadence is also the rate cap: at 40 ms nobody gets more than 25 frames a second.
+  const gap = frameCadence({ viewers: mirrors.size, lastActivityAt: lastActivity, now }) ?? FRAME_MIN_GAP;
   const rows = captureFrame();
-  if (frameDecision({ rows, prev: lastFrame, now: Date.now(), lastAt: lastFrameAt }) !== 'send') return;
+  if (frameDecision({ rows, prev: lastFrame, now, lastAt: lastFrameAt, minGap: gap }) !== 'send') return;
   lastFrame = rows;
-  lastFrameAt = Date.now();
-  const size = (tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width} #{pane_height}').stdout || '').trim().split(/\s+/);
-  const ev = {
-    t: 'screen', id: nextId++, ts: lastFrameAt, rows,
-    w: Number(size[0]) || 80, h: Number(size[1]) || rows.length,
-  };
+  lastFrameAt = now;
+  const size = paneDims(rows);
+  const ev = { t: 'screen', id: nextId++, ts: lastFrameAt, rows, w: size.w, h: size.h };
   keepWindowSize(ev.w, ev.h); // somebody attached and took the window's size with them
   for (const ws of mirrors) if (clients.has(ws)) send(ws, ev);
+  bumpActivity(); // a screen that is still moving keeps its own cadence fast
+}
+
+// One self-rescheduling timer instead of a fixed interval: every tick books the next one at
+// the cadence that is right NOW, so the mirror speeds up on the first sign of activity and
+// drops back to 250 ms two seconds after the last. No viewers = no timer at all.
+function scheduleFrames() {
+  if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
+  const gap = frameCadence({ viewers: mirrors.size, lastActivityAt: lastActivity, now: Date.now() });
+  if (gap == null) { cadenceShown = null; return; }
+  if (gap !== cadenceShown) {
+    cadenceShown = gap;
+    console.log(`[frames] cadence ${gap}ms (${gap === FRAME_FAST_GAP ? 'active' : 'idle'}, ${mirrors.size} watching)`);
+  }
+  frameTimer = setTimeout(() => { frameTimer = null; pumpMirror(); scheduleFrames(); }, gap);
+  frameTimer.unref?.();
 }
 
 // Only the client the launcher spawned on loopback with `--host` may touch the real TUI.
@@ -459,6 +499,7 @@ function applyWindowSize(why) {
   if (r.status !== 0) return console.log(`resize-window failed: ${(r.stderr || '').trim()}`);
   console.log(`[${why}] claude window → ${windowSize.w}x${windowSize.h}`);
   lastFrame = null; // the next capture is a different shape; send it even if the text matches
+  paneSize.at = 0; // and the cached pane size is stale by definition
 }
 
 // tmux sizes a shared window to the last client that used it, so anyone attaching to the raw
@@ -473,15 +514,10 @@ function keepWindowSize(w, h) {
 
 function setMirror(ws, on) {
   if (on) mirrors.add(ws); else mirrors.delete(ws);
-  if (mirrors.size && !frameTimer) {
-    frameTimer = setInterval(pumpMirror, FRAME_MIN_GAP);
-    frameTimer.unref?.();
-  } else if (!mirrors.size && frameTimer) {
-    clearInterval(frameTimer);
-    frameTimer = null;
-  }
   // A joiner wants the screen now, not in 250 ms — and it has never seen `lastFrame`.
-  if (on) { lastFrame = null; lastFrameAt = 0; pumpMirror(); }
+  // Subscribing is itself activity: the frame after an F3 attach comes back must be prompt.
+  if (on) { lastFrame = null; lastFrameAt = 0; lastActivity = Date.now(); pumpMirror(); }
+  scheduleFrames();
   console.log(`[mirror] ${clients.get(ws)?.name || '?'} ${on ? 'on' : 'off'} (${mirrors.size} watching)`);
 }
 
@@ -543,11 +579,30 @@ function stopPopup() {
 // person and their IP, which popupPrompt takes separately.
 const popupDetail = (kind, rec) => (kind === 'file' ? `${rec.detail} (${humanBytes(rec.size)})` : rec.detail || '');
 
-// Called on every change to `pending` or a ladder's requests: keeps the status line honest and
-// opens the next popup. v0.14: the host normally sits in the client, not in tmux, so this is
-// the path for anyone who IS attached — `hostClients()` is empty otherwise and the request
-// waits for a client command instead.
+// v0.16: the host client's approval bar. ONE frame carries the whole pending set — every
+// change to `pending` or to a ladder already funnels through pumpPopups(), so there is a
+// single place to push from and no add/remove bookkeeping that could drift out of step with
+// what is really waiting. `expires` is the request's own deadline, so the bar counts down to
+// the same moment the daemon's timer fires.
+function pendingFrame() {
+  return {
+    t: 'pending',
+    items: [
+      ...[...pending.values()].map((p) => ({ kind: 'knock', name: p.name, ip: p.ip, expires: p.expires })),
+      ...Object.entries(ladders).flatMap(([kind, L]) => [...L.requests.values()].map((r) => ({
+        kind, name: r.name, detail: r.detail || '', size: r.size, expires: r.expires,
+      }))),
+    ],
+  };
+}
+
+// Called on every change to `pending` or a ladder's requests: keeps the status line honest,
+// raises the approval bar in every host client, and opens the next popup. v0.14: the host
+// normally sits in the client, not in tmux, so the popup is the path for anyone who IS
+// attached — `hostClients()` is empty otherwise and the request waits for a bar key or a
+// client command instead.
 function pumpPopups() {
+  sendHosts(pendingFrame());
   refreshStatusRight();
   if (opts.noPopup || popupProc) return;
   // Knocks first, then every kind of approval request; `popped` is set on the record itself,
@@ -691,7 +746,12 @@ function admitSocket(ws, name, host, loopback = false) {
     // join is the invite line and view the ttyd URL; only the host client gets them —
     // friends never see the token-bearing command or the view key. null (but present) for
     // the host while no token is set / no view is running.
-    session: { id: opts.sessionId, cwd: opts.cwd, hostName: opts.name, boot: BOOT, ...(host ? joinInfo() : {}) },
+    // v0.15: `tmux` rides with them for the same reason — it is what F3 attaches to, and
+    // `host` here is already "claimed host AND loopback", i.e. exactly who may attach.
+    session: {
+      id: opts.sessionId, cwd: opts.cwd, hostName: opts.name, boot: BOOT,
+      ...(host ? { ...joinInfo(), tmux: opts.tmux } : {}),
+    },
   });
   rosterChanged({ joined: name });
   send(ws, { t: 'status', id: nextId++, ts: Date.now(), busy: status.busy, waiting: status.waiting });
@@ -702,6 +762,8 @@ function admitSocket(ws, name, host, loopback = false) {
     for (const L of Object.values(ladders)) {
       for (const r of L.requests.values()) send(ws, { ...L.frame(r), id: nextId++, ts: Date.now() });
     }
+    // v0.16: and the whole set again as one frame, which is what raises the approval bar.
+    send(ws, { ...pendingFrame(), id: nextId++, ts: Date.now() });
   }
 }
 
@@ -803,7 +865,7 @@ function onSocket(ws, req) {
         ws.close(4408, 'knock expired');
         pumpPopups();
       }, KNOCK_TTL);
-      pending.set(ws, { name: c.name, ip, timer, mirror: m.mirror === true });
+      pending.set(ws, { name: c.name, ip, timer, expires: Date.now() + KNOCK_TTL, mirror: m.mirror === true });
       send(ws, { t: 'knock', id: nextId++, ts: Date.now(), state: 'pending' });
       sendHosts({ t: 'knock', name: c.name, ip });
       console.log(`[knock] ${c.name} from ${ip} — /accept ${c.name} | /deny ${c.name}`);
@@ -869,6 +931,10 @@ function onSocket(ws, req) {
       // claude window is only ever as big as somebody says — and the host's mirror is the
       // screen that has to fit. Guests never resize the room they are watching.
       if (!trusted(me)) return sendError(ws, 'host TUI only');
+      // v0.15: `force` is the way back from an F3 attach. tmux resized the window to the
+      // attaching client and the daemon never heard about it, so the size it remembers still
+      // matches what the client is asking for and the no-op guard would swallow the request.
+      if (m.force === true) windowSize = { w: 0, h: 0 };
       resizeClaudeWindow(m.w, m.h);
     } else if (m.t === 'admit') {
       if (!me.host) return sendError(ws, 'host only');
@@ -947,7 +1013,7 @@ function askHost(kind, ws, me, rec = {}) {
   const L = ladders[kind];
   const mine = L.requests.get(ws);
   if (mine) return sendError(ws, L.busy(mine));
-  const r = { name: me.name, ws, popped: false, ...rec };
+  const r = { name: me.name, ws, popped: false, expires: Date.now() + LADDER_TTL, ...rec };
   r.timer = setTimeout(() => {
     L.requests.delete(ws);
     sendError(ws, L.expired(r));
@@ -1214,6 +1280,7 @@ function typeKeys(b64) {
   let text;
   try { text = Buffer.from(b64, 'base64').toString('utf8'); } catch { return; }
   for (const args of sendKeyArgs(text)) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
+  bumpActivity(); // a keystroke wants its echo on the next 40 ms frame, not the next 250 ms one
 }
 
 // --------------------------------------------------------------- injection ----
