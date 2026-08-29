@@ -80,6 +80,12 @@ const typing = new Map(); // name -> last typing ms
 let state = { busy: false, waiting: false, prompt: { kind: 'none' }, answers: 'anyone' };
 let roster = [];
 let idle = {}; // v0.26: name -> seconds since that person last typed, as THEY reported it
+// v0.29: peer tasks. `peerTasks` is the HOST's switch, `peerMe` this human's own opt-in and
+// `peerNever` the one-way door they can close for this client session. All off until they say so.
+let peers = [];
+let peerTasks = false;
+let peerMe = false;
+let peerNever = false;
 let ws = null;
 let backoff = 1000;
 let attempts = 0; // v0.17 T3: consecutive failures, so the fifth can say something better
@@ -287,6 +293,10 @@ function render(ev) {
       roster = ev.roster;
       labelW = labelWidth(roster); // the column follows the longest name in the room
       if (ev.idle) idle = ev.idle; // v0.26: coarse seconds per person; absent on an older daemon
+      // v0.29: a frame that did not mention peers must not erase what we know; an older daemon
+      // mentions neither, so the client says "off" rather than inventing an answer.
+      if (ev.peers) peers = ev.peers;
+      if (ev.peerTasks !== undefined) peerTasks = ev.peerTasks === true;
       // v0.22B: an invite join has no knock to announce it, so the roster line says HOW.
       if (ev.joined) {
         sys(`${ev.joined} joined${ev.via && ev.via !== 'token' ? ` (${ev.via})` : ''}`);
@@ -472,6 +482,12 @@ function connect() {
       session = ev.session;
       roster = ev.roster;
       idle = ev.idle || {}; // v0.26: who is here AND how long since each of them typed
+      // v0.29: who offered their machine, and whether the host enabled it at all. A reconnect
+      // never re-opts-in by itself — the daemon forgot (a new socket is a new session) — so a
+      // client that HAD opted in re-asserts it, and `peerNever` is what stops that.
+      peers = ev.peers || [];
+      peerTasks = ev.peerTasks === true;
+      if (peerMe && !peerNever && peerTasks) sendMsg({ t: 'peer', op: 'on' });
       reportIdle();         // …and say our own state now, rather than at the next tick
       labelW = labelWidth(roster); // set before the replay, so history aligns with what follows
       // v0.23: the jam's NAME leads, because that is what a human calls the room they just
@@ -571,6 +587,32 @@ function sendUpload(ev) {
   upload = null;
   sys(`sending ${up.name} (${humanBytes(up.data.length)})…`);
   pumpFrames(xferFrames(ev.xfer, up.data), (f) => sendMsg(f), () => ws?.readyState === 1);
+}
+
+// v0.29: `/peer …`. Same rule as the ink client — every one of these is a decision about THIS
+// computer, made here, and `never` is a one-way door for the life of this process that no host
+// can clear.
+function peerCommand(op) {
+  if (op === 'on') {
+    if (peerNever) return err('you said "never this session" — restart your client to change that');
+    if (!peerTasks) return err('peer tasks are off for this jam — the host starts it with `claude-jam host --peer-tasks`');
+    peerMe = true;
+    sendMsg({ t: 'peer', op: 'on' });
+    return sys('peer tasks: ON for you. The host\'s agent may now ASK you to run something on this '
+      + 'machine, in your own Claude Code, on your own account and quota. Every single task still '
+      + 'shows you the whole prompt and waits for your yes — and you may decline any of them.');
+  }
+  if (op === 'off' || op === 'never') {
+    peerMe = false;
+    if (op === 'never') peerNever = true;
+    sendMsg({ t: 'peer', op });
+    return sys(op === 'never'
+      ? 'peer tasks: NEVER for this client session. Nothing more will be offered to you here.'
+      : 'peer tasks: off for you. Nothing will be dispatched to this machine.');
+  }
+  if (op === 'reset' || op === 'status') return sendMsg({ t: 'peer', op });
+  // accept / accept tools / decline / cancel — answered in v0.29's guest half.
+  return err('nothing is waiting for you to answer');
 }
 
 rl.on('line', (raw) => {
@@ -693,7 +735,9 @@ rl.on('line', (raw) => {
         view: session?.view, remote: session?.remote, tunnelJoin: session?.tunnelJoin,
         replay: session?.replay, notify: prefs, idle, ntfy: !!jamConfig.ntfy,
         uploads: session?.uploads, exportPolicy: session?.exportPolicy,
-        uploadQuota: session?.uploadQuota, uploadUsed: session?.uploadUsed } });
+        uploadQuota: session?.uploadQuota, uploadUsed: session?.uploadUsed,
+        // v0.29: the host's switch, this human's own answer to it, and who else said yes.
+        peers, peerTasks, peerMe, peerNever } });
       sys(`${tree.title} — type the command on the left`);
       for (const sec of tree.sections) {
         sys(`  ${sec.title}: ${sec.desc}`);
@@ -719,6 +763,10 @@ rl.on('line', (raw) => {
         + `bell ${p.bell ? 'on' : 'off'}${jamConfig.ntfy ? ' · phone configured' : ''}`);
       break;
     }
+    // v0.29: your own machine. on/off/never/reset are decisions about THIS computer, so the
+    // client holds them and the daemon is only told.
+    case 'peer': peerCommand(act.op); break;
+    case 'peers': sendMsg({ t: 'peers', op: act.op }); break;
     case 'quit': process.exit(0);
     case 'error': err(act.text); break;
     default: break;

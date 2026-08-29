@@ -213,6 +213,17 @@ const store = {
   // v0.26: name -> seconds since that person last touched a key, as THEY reported it. Coarse
   // seconds only; there is nothing in here that could carry content even by accident.
   idle: {},
+  // v0.29: peer tasks. `peerTasks` is the HOST's switch (off unless the jam was started with
+  // --peer-tasks), `peerMe` is this human's own opt-in and `peerNever` the one-way door they can
+  // close for this client session. `task` is the one request in front of them, `running` the
+  // child their machine is actually executing. All of it starts off, and only this human's own
+  // keystrokes ever turn any of it on.
+  peers: [],
+  peerTasks: false,
+  peerMe: false,
+  peerNever: false,
+  task: null,
+  running: null,
   listeners: new Set(),
 };
 const touch = () => { for (const l of store.listeners) l(); };
@@ -533,6 +544,10 @@ function render(ev) {
       // v0.26: coarse seconds per person, absent on a daemon older than this. `?? store.idle`
       // rather than `|| {}` — a frame that did not mention idle must not erase what we know.
       if (ev.idle) store.idle = ev.idle;
+      // v0.29: same rule — a frame that did not mention peers must not erase what we know, and a
+      // daemon older than this mentions neither, so the panel says "off" rather than lying.
+      if (ev.peers) store.peers = ev.peers;
+      if (ev.peerTasks !== undefined) store.peerTasks = ev.peerTasks === true;
       // v0.22B: an invite join has no knock to announce it, so the roster line is the only
       // arrival anybody sees — it says HOW they got in.
       if (ev.joined) {
@@ -833,6 +848,12 @@ function connect() {
       if (ev.session?.tmuxSocket) SOCKET = ev.session.tmuxSocket;
       store.roster = ev.roster;
       store.idle = ev.idle || {}; // v0.26: who is here AND how long since each of them typed
+      // v0.29: who has offered their own machine, and whether the host enabled it at all. A
+      // reconnect never re-opts-in: `peerMe` stays whatever this human last chose, and the daemon
+      // has forgotten it (a new socket is a new session), so the client re-asserts it below.
+      store.peers = ev.peers || [];
+      store.peerTasks = ev.peerTasks === true;
+      if (store.peerMe && !store.peerNever && store.peerTasks) sendMsg({ t: 'peer', op: 'on' });
       store.labelW = labelWidth(ev.roster); // set before the replay, so history aligns
       toTranscript++; // the whole connect block goes on screen, mirror view or not
       // v0.23: the jam's NAME leads, because that is what a human calls the room they just
@@ -1269,6 +1290,35 @@ function sendUpload(ev) {
 
 // One submitted input row. Identical dispatch to the readline client, including the
 // continuation buffer: a trailing `\` collects, the first line without one flushes.
+// v0.29: `/peer …`. Everything here is a decision about THIS computer, so the client is where it
+// is made and the daemon is only told afterwards. `never` is a one-way door for the life of this
+// client process — the flag lives here, not on the host, so no host can clear it.
+function peerCommand(op) {
+  if (op === 'on') {
+    if (store.peerNever) return err('you said "never this session" — restart your client to change that');
+    if (!store.peerTasks) return err('peer tasks are off for this jam — the host starts it with `claude-jam host --peer-tasks`');
+    store.peerMe = true;
+    sendMsg({ t: 'peer', op: 'on' });
+    sys('peer tasks: ON for you. The host\'s agent may now ASK you to run something on this machine, '
+      + 'in your own Claude Code, on your own account and quota. Every single task still shows you '
+      + 'the whole prompt and waits for your yes — and you may decline any of them, always.');
+    return touch();
+  }
+  if (op === 'off' || op === 'never') {
+    store.peerMe = false;
+    if (op === 'never') store.peerNever = true;
+    sendMsg({ t: 'peer', op });
+    sys(op === 'never'
+      ? 'peer tasks: NEVER for this client session. Nothing more will be offered to you here.'
+      : 'peer tasks: off for you. Nothing will be dispatched to this machine.');
+    return touch();
+  }
+  if (op === 'reset') { sendMsg({ t: 'peer', op: 'reset' }); return touch(); }
+  if (op === 'status') { sendMsg({ t: 'peer', op: 'status' }); return touch(); }
+  // accept / accept tools / decline / cancel — answered in v0.29's guest half.
+  return err('nothing is waiting for you to answer');
+}
+
 function submit(raw) {
   rememberInput(raw); // v0.30-3: before anything else — even a line that turns out to be a typo
   localActivity();    // v0.26: a submit is activity even when the line turns out to be a command
@@ -1439,6 +1489,11 @@ function submit(raw) {
         + ' — /menu → Notifications switches each one');
       break;
     }
+    // v0.29: your own machine. `on`/`off`/`never`/`reset` are decisions about THIS computer, so
+    // the client holds them and the daemon is only told; `accept`/`decline`/`cancel` answer the
+    // one task in front of you and never leave this process until you have said yes.
+    case 'peer': peerCommand(act.op); break;
+    case 'peers': sendMsg({ t: 'peers', op: act.op }); break;
     case 'quit': return leave(0);
     case 'error': err(act.text); break;
     default: break;
@@ -1649,6 +1704,8 @@ function Menu({ s }) {
       // v0.27: the two policies and what the session has spent, off the token frame.
       uploads: s.session?.uploads, exportPolicy: s.session?.exportPolicy,
       uploadQuota: s.session?.uploadQuota, uploadUsed: s.session?.uploadUsed,
+      // v0.29: the host's switch, this human's own answer to it, and who else said yes.
+      peers: s.peers, peerTasks: s.peerTasks, peerMe: s.peerMe, peerNever: s.peerNever,
     },
   });
   const here = nodeAt(tree, s.menu.path);

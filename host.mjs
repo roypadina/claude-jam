@@ -57,6 +57,11 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // briefing an adopted claude gets INSTEAD of the hooks and the system prompt it cannot be given.
   validPaneId, SOCKET_NAME_RE, BRIEF_NAME, buildBriefing, briefUpdates, MANUAL_FILE,
   contextLostSignal, rosterKey, briefUpdateDecision,
+  // v0.29: peer tasks — the ladder above, with the direction inverted. The HOST asks and the
+  // GUEST approves, because the work runs on the guest's machine and spends the guest's quota.
+  PEER_ASK_TTL, peerTools, peerCaps, validPeerPrompt, peerPermissionMode, peerRefusal,
+  peerEntry, peerDayKey, peersReport, peerLogLine, parsePeerLog, peerLogReport, peerTag,
+  peerQuote, peerWhyText, peerResultForAgent, peerStructured, PEER_PROGRESS_MAX,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -136,6 +141,12 @@ function parseArgs(argv) {
     else if (a === '--no-prompt') o.noPrompt = true;
     else if (a === '--end-on-exit') o.endOnExit = true;
     else if (a === '--keep-on-exit') o.keepOnExit = true;
+    // v0.29: the host's half of the peer-task switch. Value-less, so it needs naming here or the
+    // generic branch below eats the next argument. OFF unless it is passed — and even then a
+    // guest still has to opt in (/peer on) and still approves every individual task. Two
+    // switches, held by two different people, and neither one alone is enough.
+    else if (a === '--peer-tasks') o.peerTasks = true;
+    else if (a === '--no-peer-tasks') o.peerTasks = false;
     else if (a.startsWith('--')) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
     else throw new Error(`unexpected argument: ${a}`);
   }
@@ -494,6 +505,9 @@ async function launch() {
     ...(ADOPTED ? ['--adopt-pane', opts.adoptPane, '--adopt-socket', opts.adoptSocket] : []),
     ...(opts.brief === false ? ['--no-brief'] : []),
     ...(opts.briefUpdates ? ['--brief-updates', String(opts.briefUpdates)] : []),
+    // v0.29: the daemon is the process that dispatches, so it is the one that has to know the
+    // feature is on at all. Absent = off, which is the default and the whole point.
+    ...(opts.peerTasks ? ['--peer-tasks'] : []),
     ...(opts.resume ? ['--resume', opts.resume] : [])]; // daemon needs this to skip pre-existing JSONL history
 
   // First window: the daemon (its own window, not a pane — its log is for when something
@@ -971,7 +985,11 @@ let briefedRoster = null;
 
 function rosterChanged(extra) {
   writeRoster([...clients.values()].map(({ name, joinedAt }) => ({ name, joinedAt })));
-  broadcast({ t: 'roster', roster: names(), idle: idleMap(), ...extra });
+  // v0.29: `peers` rides with the roster because it changes for the same reasons — somebody
+  // arrived, somebody opted in, somebody started or finished a task. `peerTasks` is the host's
+  // switch, sent so a client can say "off for this jam" rather than "nobody has opted in".
+  broadcast({ t: 'roster', roster: names(), idle: idleMap(),
+    peers: peerList(), peerTasks: PEER_ENABLED, ...extra });
   // v0.33: an adopted claude holds "who is here" only because it was typed in, so a real change
   // to that set makes its copy wrong. It is not worth interrupting a turn or a prompt for, and it
   // is not worth a message every time somebody's laptop wakes up — hence the whole decision.
@@ -2036,6 +2054,32 @@ function onRequest(req, res) {
     });
     return;
   }
+  // v0.29: the two calls the in-daemon MCP tools are. Same guard as /admit, /end, /invite and
+  // /remote — loopback plus the internal secret out of the 0700 state dir — so this is reachable
+  // ONLY by a process the host started on the host's own machine, and never from off-box, never
+  // by a guest, and never with the friend-facing token.
+  //
+  // /peer/list answers at once. /peer/dispatch HOLDS THE RESPONSE OPEN until the peer answers,
+  // their wall clock runs out or they go away: that is what makes `dispatch_to_peer` behave like
+  // the built-in Agent tool from the host agent's point of view.
+  if (req.method === 'POST' && (req.url === '/peer/list' || req.url === '/peer/dispatch')) {
+    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
+    req.on('end', () => {
+      let m;
+      try { m = JSON.parse(body || '{}'); } catch { return reply(400, { error: 'bad JSON' }); }
+      if (req.url === '/peer/list') return reply(200, { ok: true, enabled: PEER_ENABLED, peers: peerList() });
+      const d = peerDispatch({ ...m, from: opts.name });
+      if (!d.ok) return reply(200, { ok: false, refused: true, error: d.error });
+      // A socket that goes away mid-task must not leave the record hanging around: the guest is
+      // still running it, and it still ends through peerFinish, but nobody is listening.
+      d.rec.result.then((out) => reply(200, { ok: true, ...out, agent: peerResultForAgent(out) }))
+        .catch((e) => reply(200, { ok: false, error: e.message }));
+    });
+    return;
+  }
   const hook = /^\/hook\/(\w[\w-]*)$/.exec(req.url || '');
   if (req.method === 'POST' && hook) {
     if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
@@ -2090,6 +2134,9 @@ function admitSocket(ws, name, host, loopback = false, via = 'token') {
     // v0.26: who is here AND how long since each of them last touched a key, so `/who` and the
     // panel are useful from the first second rather than from the first bucket change.
     idle: idleMap(),
+    // v0.29: and who has offered their own machine. Sent on the welcome for the same reason —
+    // a client has to be able to say "peer tasks are off here" from the first second.
+    peers: peerList(), peerTasks: PEER_ENABLED,
     // v0.28: min(--replay, what the ring is holding). `slice(-0)` is the whole array, which is
     // why a zero is answered with [] rather than with a negative offset.
     history: replayCount(opts.replay, history.length)
@@ -2604,6 +2651,16 @@ function onSocket(ws, req) {
         : 'this jam is no longer announced on the local network — it is reachable only by an address somebody was given' });
       // v0.24C: the `always` grants a guest holds. They were invisible once given; now they are
       // listed and individually revocable, which is what makes them safe to hand out.
+      // v0.29: peer tasks. `peer` is a person deciding about their OWN machine, so it is
+      // everybody's and there is no host-side way to set it. The four `peertask-*` frames are
+      // the guest's half of the inverted ladder.
+    } else if (m.t === 'peer') {
+      onPeer(ws, me, m);
+    } else if (m.t === 'peers') {
+      onPeers(ws, me, m);
+    } else if (m.t === 'peertask-ack' || m.t === 'peertask-decline'
+      || m.t === 'peertask-progress' || m.t === 'peertask-result') {
+      onPeerTask(ws, me, m);
     } else if (m.t === 'grants') {
       if (!trusted(me)) return sendError(ws, 'standing approvals are the host\'s, on loopback only');
       if (m.op === 'revoke') {
@@ -2633,6 +2690,9 @@ function onSocket(ws, req) {
       if (req) { clearTimeout(req.timer); L.requests.delete(ws); pumpPopups(); }
     }
     uploads.delete(ws);
+    // v0.29: and a task that was running on the machine that just went away ends with a reason,
+    // rather than leaving the host's agent waiting on somebody's closed laptop.
+    peerDropSocket(ws);
     const me = clients.get(ws);
     // Drop the mirror subscription first: the last watcher leaving stops the capture timer.
     if (mirrors.has(ws)) setMirror(ws, false);
@@ -2754,6 +2814,209 @@ function onLadderAnswer(kind, ws, me, m) {
   if (!trusted(me)) return sendError(ws, 'host TUI only');
   const err = answerHost(kind, m.name, m.op === 'allow', m.always === true);
   if (err) sendError(ws, err);
+}
+
+// ------------------------------------------------------------- v0.29: peer tasks ----
+// The ladder above, with the DIRECTION INVERTED. Everywhere else in this program a guest asks and
+// the host approves, because the thing at stake is the host's machine. Here the host's AGENT asks
+// and the GUEST approves, because the thing at stake is the guest's machine, the guest's Claude
+// Code account and the guest's quota — so the guest is the one who says yes, per task, every time.
+//
+// What the daemon owns: the switch, who has opted in, one task per peer at a time, the deadline,
+// the audit log, and telling the whole room what was asked and what came back. What it does NOT
+// own and must never own: a credential of the guest's (there is none on the wire), or the decision
+// to run (the guest's client makes that, and nothing here can make it for them).
+const PEER_ENABLED = opts.peerTasks === true;
+const PEER_LOG_FILE = 'peer-log.jsonl';
+const PEER_LOG_MAX = 2000; // lines kept; an audit log is evidence, not a second transcript
+// The daemon's own patience once a task has been ACCEPTED. The guest enforces the real wall clock
+// (it is their process to kill); this is the backstop for a client that accepted and then went
+// away, and it is deliberately a little longer so the guest's own honest answer wins the race.
+const PEER_GRACE_MS = 15000;
+const peerTasks = new Map(); // id -> {id, from, peer, ws, tools, maxTurns, deadlineMs, at, chunks, timer, done}
+
+// Per-socket, never per-name: "never this session" means THIS client's session, so a reconnect is
+// a new session and a person who changes their mind can. Nothing here can be set by the host.
+function peerState(me) {
+  const day = peerDayKey();
+  if (!me.peer) me.peer = { capable: false, busy: false, tasksToday: 0, never: false, day };
+  if (me.peer.day !== day) { me.peer.day = day; me.peer.tasksToday = 0; }
+  return me.peer;
+}
+const peerList = () => [...clients.values()].map((c) => peerEntry(c.name, peerState(c)));
+const peerLogPath = () => path.join(opts.state, PEER_LOG_FILE);
+
+function peerLogAppend(rec) {
+  try {
+    fs.appendFileSync(peerLogPath(), `${peerLogLine(rec)}\n`, { mode: 0o600 });
+    // Trimmed in place rather than rotated: one file, bounded, still readable with `tail`.
+    const lines = fs.readFileSync(peerLogPath(), 'utf8').split('\n').filter(Boolean);
+    if (lines.length > PEER_LOG_MAX) fs.writeFileSync(peerLogPath(), `${lines.slice(-PEER_LOG_MAX).join('\n')}\n`, { mode: 0o600 });
+  } catch (e) { console.error(`peer log: ${e.message}`); }
+}
+const peerLogRead = () => { try { return parsePeerLog(fs.readFileSync(peerLogPath(), 'utf8')); } catch { return []; } };
+
+// `/peer …` from any client. Only the person themselves can change any of this — there is no
+// host-side command that opts somebody in, on purpose.
+function onPeer(ws, me, m) {
+  const p = peerState(me);
+  const op = String(m?.op ?? 'status');
+  if (op === 'on') {
+    if (!PEER_ENABLED) return sendError(ws, peerRefusal('off'));
+    if (p.never) {
+      return sendError(ws, 'you said "never this session" — restart your client to change that. '
+        + 'Nothing has been dispatched to you and nothing will be.');
+    }
+    p.capable = true;
+    rosterChanged();
+    broadcast({ t: 'sys', text: `${me.name} opted in to peer tasks — the host's agent may now ASK ${me.name} `
+      + `to run something on ${me.name}'s own machine, and ${me.name} approves or declines each one` });
+    return;
+  }
+  if (op === 'off' || op === 'never') {
+    p.capable = false;
+    if (op === 'never') p.never = true;
+    rosterChanged();
+    return broadcast({ t: 'sys', text: op === 'never'
+      ? `${me.name} is out of peer tasks for this client session — nothing more will be offered to them`
+      : `${me.name} opted out of peer tasks` });
+  }
+  if (op === 'reset') {
+    p.tasksToday = 0;
+    rosterChanged();
+    return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: 'your peer-task counter for today is back to 0' });
+  }
+  // status
+  return send(ws, { t: 'sys', id: nextId++, ts: Date.now(),
+    text: `peer tasks: ${PEER_ENABLED ? 'enabled for this jam' : 'OFF for this jam (the host did not pass --peer-tasks)'}`
+      + ` · you are ${p.never ? 'out for this client session' : p.capable ? 'opted IN' : 'opted out'}`
+      + ` · ${p.tasksToday} task(s) today · /peer on | off | never | reset` });
+}
+
+// `/peers` and `/peers log` from any client. Both are reads: who offered their machine, and what
+// has actually run on it. Neither is a secret from the room the work was done for.
+function onPeers(ws, me, m) {
+  if (m?.op === 'log') {
+    return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: peerLogReport(peerLogRead()) });
+  }
+  return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: peersReport(peerList(), { enabled: PEER_ENABLED }) });
+}
+
+// The dispatch itself. Returns a PROMISE of the result record — resolved by the guest's answer,
+// by the deadline, or by them going away. Never queued: a peer who cannot take it right now is
+// reported as such, immediately, so the host's agent can go and do something else.
+function peerDispatch({ from, peer, prompt, allowedTools, maxTurns, deadlineMs, schema } = {}) {
+  if (!PEER_ENABLED) return { ok: false, error: peerRefusal('off') };
+  const v = validPeerPrompt(prompt);
+  if (!v.ok) return { ok: false, error: v.error };
+  const t = peerTools(allowedTools);
+  if (!t.ok) return { ok: false, error: t.error };
+  const caps = peerCaps({ maxTurns, deadlineMs });
+  const want = String(peer ?? '').trim();
+  if (!want) return { ok: false, error: 'dispatch_to_peer needs a peer name — list_peers() has them' };
+  const hit = [...clients.entries()].find(([, c]) => nameTaken(want, [c.name]));
+  if (!hit) return { ok: false, error: peerRefusal('unknown', want) };
+  const [sock, c] = hit;
+  // The host's own claude is the one asking. Handing it back to itself would spend the host's
+  // quota through a mechanism whose entire justification is that it does not.
+  if (trusted(c)) return { ok: false, error: peerRefusal('self', c.name) };
+  const p = peerState(c);
+  if (!p.capable) return { ok: false, error: peerRefusal('not-opted-in', c.name) };
+  if (p.busy) return { ok: false, error: peerRefusal('busy', c.name) };
+  const id = randomBytes(8).toString('hex');
+  const rec = { id, from: String(from || opts.name), peer: c.name, ws: sock, prompt: v.text,
+    tools: t.tools, maxTurns: caps.maxTurns, deadlineMs: caps.deadlineMs, notes: caps.notes,
+    schema: schema ?? null, at: Date.now(), chunks: [], acked: false, done: false };
+  rec.result = new Promise((resolve) => { rec.resolve = resolve; });
+  peerTasks.set(id, rec);
+  p.busy = true;
+  // Two clocks, in order: PEER_ASK_TTL until they answer at all, then their own wall clock plus a
+  // grace, because the guest kills their own child and their answer is the honest one.
+  rec.timer = setTimeout(() => peerFinish(id, { ok: false, why: 'expired' }), PEER_ASK_TTL);
+  rec.timer.unref?.();
+  send(sock, { t: 'peertask', id: nextId++, ts: Date.now(), task: id, from: rec.from,
+    prompt: rec.prompt, allowedTools: rec.tools, maxTurns: rec.maxTurns,
+    deadline: rec.at + PEER_ASK_TTL, deadlineMs: rec.deadlineMs, schema: rec.schema });
+  rosterChanged();
+  // The whole room sees what was ASKED, not only what came back — a task nobody but two parties
+  // could see would be a private channel inside a shared session.
+  broadcast({ t: 'peer', state: 'asked', task: id, from: rec.from, peer: rec.peer,
+    tools: rec.tools, maxTurns: rec.maxTurns, deadlineMs: rec.deadlineMs,
+    text: peerQuote(rec.prompt, { max: 2000 }) });
+  console.log(`[peertask] ${rec.from} → ${rec.peer} (${id}) tools=${rec.tools.join(',')}`);
+  return { ok: true, id, rec };
+}
+
+// One place every ending goes through, so `busy` is always cleared, the audit line is always
+// written, and the room is always told — whichever of the five ways it ended.
+function peerFinish(id, { ok = false, why = 'crash', text = '', detail = '' } = {}) {
+  const rec = peerTasks.get(id);
+  if (!rec || rec.done) return;
+  rec.done = true;
+  clearTimeout(rec.timer);
+  peerTasks.delete(id);
+  const c = clients.get(rec.ws);
+  if (c) { const p = peerState(c); p.busy = false; if (ok) p.tasksToday++; }
+  // Partial output is PRESERVED on every failure: a task that was cut off still did work, and
+  // throwing it away would make a timeout indistinguishable from a crash at turn one.
+  const body = String(text || rec.chunks.join('\n'));
+  const out = { ok, why: ok ? 'ok' : why, text: body, detail, id, from: rec.from, peer: rec.peer,
+    tools: rec.tools, maxTurns: rec.maxTurns, deadlineMs: rec.deadlineMs, notes: rec.notes,
+    ms: Date.now() - rec.at, chars: body.length, prompt: rec.prompt,
+    ...peerStructured(body, rec.schema) };
+  peerLogAppend({ ...out, at: rec.at });
+  broadcast({ t: 'peer', state: 'result', task: id, from: rec.from, peer: rec.peer, ok,
+    why: out.why, note: peerWhyText(out), text: peerQuote(body) });
+  rosterChanged();
+  console.log(`[peertask] ${rec.peer} (${id}) ${out.why} in ${out.ms}ms, ${out.chars} chars`);
+  rec.resolve(out);
+}
+
+// The guest's side of the wire: they accepted, they refused, they are part-way through, or they
+// are done. Every one of them is checked against the socket the task was SENT to — a task id is
+// not a capability somebody else in the jam can answer.
+function onPeerTask(ws, me, m) {
+  const rec = peerTasks.get(String(m?.task ?? ''));
+  if (!rec) return sendError(ws, 'no peer task with that id is waiting (it may have expired)');
+  if (rec.ws !== ws) return sendError(ws, 'that peer task was not offered to you');
+  if (m.t === 'peertask-ack') {
+    if (rec.acked) return;
+    rec.acked = true;
+    clearTimeout(rec.timer);
+    rec.timer = setTimeout(() => peerFinish(rec.id, { ok: false, why: 'timeout' }), rec.deadlineMs + PEER_GRACE_MS);
+    rec.timer.unref?.();
+    // What they actually granted, which may be narrower than what was asked for.
+    if (Array.isArray(m.allowedTools)) {
+      const t = peerTools(m.allowedTools);
+      if (t.ok) rec.tools = t.tools;
+    }
+    return broadcast({ t: 'peer', state: 'accepted', task: rec.id, from: rec.from, peer: rec.peer,
+      tools: rec.tools, text: `${rec.peer} accepted it — it runs on their machine, on their account` });
+  }
+  if (m.t === 'peertask-decline') {
+    return peerFinish(rec.id, { ok: false, why: m.why === 'cancelled' ? 'cancelled' : 'declined',
+      detail: String(m.detail ?? '').slice(0, 200) });
+  }
+  if (m.t === 'peertask-progress') {
+    const line = stripControl(String(m.text ?? '')).slice(0, PEER_PROGRESS_MAX);
+    if (!line) return;
+    rec.chunks.push(line);
+    if (rec.chunks.length > 200) rec.chunks.splice(0, rec.chunks.length - 200);
+    return broadcast({ t: 'peer', state: 'progress', task: rec.id, from: rec.from, peer: rec.peer,
+      text: peerQuote(line, { max: PEER_PROGRESS_MAX }) });
+  }
+  if (m.t === 'peertask-result') {
+    return peerFinish(rec.id, { ok: m.ok === true, why: String(m.why || (m.ok ? 'ok' : 'crash')),
+      text: String(m.text ?? ''), detail: String(m.detail ?? '').slice(0, 400) });
+  }
+}
+
+// A guest who left mid-task is not a silent hang: the task ends, with a reason the host agent
+// can act on, and their `busy` goes with them.
+function peerDropSocket(ws) {
+  for (const rec of [...peerTasks.values()]) {
+    if (rec.ws === ws) peerFinish(rec.id, { ok: false, why: 'crash', detail: 'the peer disconnected' });
+  }
 }
 
 // ---------------------------------------------------------- slash commands ----
