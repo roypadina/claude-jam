@@ -6079,3 +6079,21 @@ test('a fresh claude reads as `cleared` too — the known ceiling of a screen-sh
   const compacted = fs.readFileSync(new URL('./fixtures/pane/compacted.txt', import.meta.url), 'utf8');
   assert.notEqual(contextLostSignal(compacted).sig, 'cleared');
 });
+
+test('paneCommandNote: the native installer runs claude as its VERSION, and that is still claude', () => {
+  // Measured 2026-08-30 on a live adoption of a real claude: `~/.local/bin/claude` is a symlink
+  // to `~/.local/share/claude/versions/2.1.251`, so tmux reports `#{pane_current_command}` as
+  // `2.1.251`. The most ordinary install of Claude Code there is was being told "check you named
+  // the right pane" by the feature whose whole job is adopting it.
+  assert.equal(paneCommandNote('2.1.251'), null);
+  assert.equal(paneCommandNote('2.1.251-beta'), null);
+  assert.equal(paneCommandNote('10.0.3'), null);
+  // The ones it already knew.
+  for (const c of ['claude', 'node', 'bun', 'deno']) assert.equal(paneCommandNote(c), null);
+  // A shell is still called out, and still with its own wording — that is the useful warning.
+  assert.match(paneCommandNote('zsh'), /a shell prompt, not a running claude/);
+  // And something genuinely unexpected is still questioned.
+  assert.match(paneCommandNote('vim'), /check you named the right pane/);
+  assert.match(paneCommandNote('2'), /check you named the right pane/); // not version-shaped
+  assert.equal(paneCommandNote(''), 'tmux did not report what is running in that pane');
+});
