@@ -235,8 +235,9 @@ function flushTools() {
 function render(ev) {
   switch (ev.t) {
     case 'say': {
-      // v0.15: the daemon has it, so the local echo has done its job.
-      if (ev.from === NAME) store.echo = null;
+      // v0.15: the daemon has it. The echo stays up — the gap it exists to cover is the one
+      // until the claude pane itself shows the line — but it stops saying "sending".
+      if (ev.from === NAME && store.echo) store.echo = { ...store.echo, acked: true };
       // Self is always green; everybody else gets a stable color hashed from their name, so
       // it survives reconnects and roster churn instead of depending on join order.
       const c = ev.from === NAME ? C.me : fg256(userColor(ev.from));
@@ -270,7 +271,15 @@ function render(ev) {
       return touch();
     // v0.7: the host's real screen. Live state, never transcript — the newest frame replaces
     // the previous one and nothing is kept.
-    case 'screen': store.frame = { rows: ev.rows || [], w: ev.w, h: ev.h }; return touch();
+    case 'screen': {
+      store.frame = { rows: ev.rows || [], w: ev.w, h: ev.h };
+      // v0.15: the mirror has caught up with your own submitted line, so the echo of it has
+      // done its job. Matched on the head of the text, the same trick the daemon's injection
+      // uses to prove its paste landed; the TTL is the fallback when it never appears.
+      const head = store.echo?.text.split('\n')[0].slice(0, 24);
+      if (head && (ev.rows || []).some((r) => r.includes(head))) store.echo = null;
+      return touch();
+    }
     // Knocks: `state` means it is about us waiting, `name` means somebody wants in.
     case 'knock': {
       if (ev.state === 'pending') return sys('waiting for host approval…');
@@ -625,7 +634,7 @@ function submit(raw) {
       // v0.15: paint it here, now. In the mirror view the only proof a message went anywhere
       // used to be the claude pane repainting, up to a frame away — long enough for a guest
       // to press Enter twice. Cleared by the daemon's own broadcast of the same line.
-      store.echo = { text: act.text, at: Date.now() };
+      store.echo = { text: act.text, at: Date.now(), acked: false };
       break;
     case 'chat': sendMsg({ t: 'chat', text: act.text }); break;
     case 'who': sys(`here: ${store.roster.join(', ')}`); break;
@@ -868,7 +877,10 @@ function App() {
       ? h(Box, { flexDirection: 'column' },
         strip.map((e) => h(Entry, { key: `strip-${e.key}`, e: { ...e, gap: false } })))
       : null,
-    echo ? h(Box, null, h(Text, { color: C.dim, wrap: 'truncate' }, `❯ ${echo.text.split('\n')[0]} · sent`)) : null,
+    echo
+      ? h(Box, null, h(Text, { color: C.dim, wrap: 'truncate' },
+        `❯ ${echo.text.split('\n')[0]} · ${echo.acked ? 'sent' : 'sending…'}`))
+      : null,
     // v0.16: host-only, and gone while the TUI has the keyboard — a proxied keystroke must
     // not be able to answer a knock by accident.
     IS_HOST && !s.passthrough
