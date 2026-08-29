@@ -1332,3 +1332,36 @@ Guests on the same network should be able to find jams instead of being handed a
 5. Docs: README, MANUAL (so claude can explain "how do I find Roy's jam"), wiki
    `Joining-a-Jam` + `Security-Model` (the privacy note), CHANGELOG. `/menu` gains the
    announce toggle and shows the jam name.
+
+## v0.24 — the menu is the whole product surface (amends v0.22C)
+
+Two additions Roy asked for explicitly.
+
+1. **Relays are runtime-controllable, not launch-only.** A jam started plain must be able to go
+   remote later, and back:
+   - `/menu → Access → Remote`: `off` · `tunnel (cloudflared)` · `funnel (tailscale)`, switchable
+     while the jam runs. Starting spawns the relay child(ren) through the SAME code the launcher
+     uses (`startTunnels`/`startFunnel` — one path, no duplicate), waits for the hostname with a
+     spinner, then propagates everywhere the existing `onTunnelChange()` already reaches:
+     `joinInfo()` → `token.json` → claude's context → `printJoin()` → `{t:'token'}` to host
+     clients → the menu's own live view. Stopping kills the tracked children and clears the URLs.
+   - Because links minted earlier embed the old address list, switching relays offers
+     **"re-issue all invite links"** in the same step (v0.22B), and says how many links were
+     re-issued. Guests already connected are never dropped by a relay change.
+   - CLI parity for scripting: `claude-jam remote <off|tunnel|funnel> [--jam <name>]` talking to
+     the daemon over the loopback control endpoint (same guard as `/admit`).
+   - Preconditions surface as reasons, not silence: cloudflared/tailscale missing, Funnel not
+     enabled for the tailnet, sandboxed App Store Tailscale — each shown inline in the menu row
+     with the exact fix.
+2. **Every feature, and the guides, live in the menu.** `/menu` gains a **Help & guides**
+   section: a searchable list of every jam command with its one-line description and one-key
+   run; the keyboard reference (F2 mirror, F3 attach/detach, Shift+Enter, Esc re-arm, `a`/`d`);
+   the MANUAL.md sections rendered inline (scrollable, since MANUAL.md is the same text claude
+   is given, so a human and the agent read one source); and links to the wiki pages
+   (Install, Hosting, Joining, Remote-Access, Files-and-Export, Security-Model, Troubleshooting).
+   - **Completeness is enforced by a test**, not by discipline: a unit test asserts every entry
+     in `JAM_COMMANDS` (and every documented flag of `host`) appears somewhere in the menu tree
+     with a description, and fails when a new command is added without a menu entry. Same rule
+     for the guest's reduced menu (it must list exactly what a guest may do).
+   - The menu shows current state next to each toggle (view on/off, announce on/off, access mode,
+     relay + URL, replay size, participants, standing approvals) so it doubles as the status page.
