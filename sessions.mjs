@@ -541,6 +541,11 @@ async function adoptedAlready(pane, socket) {
 }
 
 async function cmdAdopt(argv) {
+  // Asking for help must never resolve a pane, let alone adopt one. (`claude-jam host` learned
+  // this the hard way in v0.22, where --help fell through and launched twice.)
+  if (argv.includes('--help') || argv.includes('-h')) {
+    return spawnSync(path.join(HERE, 'claude-jam'), ['--help'], { stdio: 'inherit' }).status ?? 0;
+  }
   // Consumed here; everything else is forwarded to host.mjs verbatim, so `claude-jam adopt
   // --token X --tunnel` takes the host flags without this parser having to know them.
   const take = (flag) => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : null; };
