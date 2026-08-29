@@ -20,7 +20,7 @@ message**. Humans also get a side channel the agent never sees.
 
 - node ≥ 22, tmux, and the `claude` CLI on PATH
 - optional: `ttyd` for the browser view (`--view`), `cloudflared` for `--tunnel`,
-  `tailscale` for `--funnel`,
+  `tailscale` for `--funnel`, `git` for `/diff`,
   `pngpaste` for `/paste` (macOS falls back to `osascript`)
 
 macOS and Linux. No Windows.
@@ -68,7 +68,9 @@ Closing your client kills nothing — the daemon, the TUI and every guest stay w
 and the launcher prints how to rejoin (`tmux kill-session -t jam` is how you actually stop).
 
 Useful flags: `--port`, `--tmux <name>` (a second jam), `--token <value>`, `--view`,
-`--tunnel`, `--funnel`, `--resume <session-id>` (continue an existing session), `--config-dir <dir>` (run
+`--tunnel`, `--funnel`, `--resume <session-id>` (continue an existing session),
+`--replay <N>` (how much of an existing transcript a joining guest is shown, default 300 events,
+`0` for none), `--config-dir <dir>` (run
 the TUI as another claude profile), `--no-attach`, `--no-token-in-context`, `--no-popup`,
 `-- <extra claude args>`. `jam` with no arguments prints the usage line; `MANUAL.md` explains
 the ones you will actually reach for.
@@ -82,9 +84,11 @@ jam join ws://<host-ip>:7777 --name Dana
 jam join ws://<host-ip>:7777 --name Dana --token abc123…
 ```
 
-You land on the live TUI — the host's real Claude Code screen. A plain line goes to the agent
-as `[Dana]: …`; `/c <text>` is human-only chat; **F2** flips to the transcript; `/help`
-reprints the onboarding block. `--basic` swaps ink for a plain readline client (transcript
+You land on the live TUI — the host's real Claude Code screen, plus the backlog of what
+happened before you arrived (up to `--replay` events, with a
+`── history above · live from here ──` divider under it). A plain line goes to the agent
+as `[Dana]: …`; `/c <text>` is human-only chat; **F2** flips to the transcript; `/files` and
+`/diff` say what the session has changed; `/help` reprints the onboarding block. `--basic` swaps ink for a plain readline client (transcript
 only, no live view, no F2/F3) and is picked automatically when stdin is not a tty.
 
 ## Access: token, knock, tunnel, funnel
@@ -133,6 +137,8 @@ approves.
 | **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. `Ctrl-b d` comes back. Host **and** loopback only |
 | `a` `d` `i`/Esc | host | answer the approval bar above the status row — accept · deny · dismiss. Only while the input line is empty |
 | `/tools`, `/tools on\|off` | anyone | reprint the last turn's full tool log · stop/resume collapsing tool lines |
+| `/files` | anyone | every path this session read, wrote or edited — newest first, with a count |
+| `/diff [path]` | anyone | `git diff --stat` of the host's working tree, or the real hunks for one path |
 | `/join`, `/token new\|set\|off` | host | reprint the invite lines · rotate or drop the token |
 | `/accept [name]`, `/deny <name>` | host | answer a knock |
 | `/allow-cmd [name] [always]`, `/deny-cmd <name>` | host | answer a guest's claude command |
@@ -163,9 +169,15 @@ and no polling at all with nobody watching — capped at 25 frames a second per 
 unchanged screen still sending nothing. Everything a guest can send is either sanitized (messages,
 chat, captions) or gated (commands, keys, resize, transfers).
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **159 tests**. Eight
+Everything the other direction — tool calls, tool results, diffs and every mirror row — goes
+through a small best-effort secret mask on the way out. An `Edit`/`MultiEdit`/`Write` call is
+rendered as a real `-`/`+` diff rather than truncated JSON, because its arguments already are
+the diff. And at boot the daemon seeds its 300-event history ring from the transcript already on
+disk, so the first guest to join a `--resume`d session gets the conversation, not a blank room.
+
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **182 tests**. Nine
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
-in `SPEC.md` (`smoke-transport.mjs` brings its own).
+in `SPEC.md` (`smoke-transport.mjs` and `smoke-replay.mjs` bring their own).
 
 ## Known ceilings (deliberate)
 
@@ -186,6 +198,19 @@ in `SPEC.md` (`smoke-transport.mjs` brings its own).
 - **Export scrubbing is best effort.** A transcript is everything claude saw — file contents,
   tool output, the whole context. jam strips its own token block and the raw token, nothing
   else. Run `/token new` after an export.
+- **Secret masking is best effort too, and is a deny-list, not a scanner.** It knows five
+  shapes — AWS key ids, PEM `PRIVATE KEY` blocks, `sk-`/`gh?_`-style tokens, bearer
+  credentials, `.env`-style UPPER_CASE secret `KEY=value` — applied to tool calls, tool
+  results, `/diff` output and every mirror row. Anything else goes through untouched, and on a
+  mirror row a value split across colour escapes will not match. Never plan around it: it is a
+  seatbelt on the way out, not a boundary.
+- `/files` only knows what a tool call announced (an Edit/Write/Read `file_path`), so a file
+  changed by a shell command inside a `Bash` call is invisible to it — that is what `/diff` is
+  for. `/diff` is `git diff`, i.e. the **unstaged** working tree only, capped at 120 lines, and
+  any participant may run it.
+- The history a joiner is shown is `--replay` events (300 by default) parsed out of the last
+  8 MB of the transcript. Everything older is only in `/export`, and a replayed event is
+  stamped with the daemon's boot time, not the moment it originally happened.
 - Nothing scans an uploaded file. It is written 0644, never executed, never opened — but the
   moment claude `Read`s it, its contents are in the context, and therefore in anybody's later
   `/export`.

@@ -717,6 +717,23 @@ The public README keeps a short list. This is all of them.
 - Nothing scans an uploaded file. It is written 0644, never executed, never opened, and claude is
   merely told the path — but the moment claude `Read`s it, its contents are in the session's
   context (and therefore in anybody's later `/export`).
+- **Secret masking (v0.17 F4) is a deny-list, not a scanner.** It knows five shapes — AWS key
+  ids, PEM `PRIVATE KEY` blocks and bare headers, `sk-`/`pk-`/`rk-` and `gh?_` tokens, bearer
+  credentials, and `.env`-style UPPER_CASE secret `KEY=value` — and everything else goes
+  through untouched. On a mirror row it cannot see a value split across SGR sequences, and it
+  only runs where content reaches other people (tool calls, tool results, diffs, frame rows):
+  a message somebody types is their own. Same honesty as `stripTokenBlock`.
+- `/files` (v0.17 F2) knows only what a tool call announced: an Edit/Write/Read `file_path`. A
+  file changed by a shell command inside a Bash call is invisible to it — which is exactly why
+  `/diff` exists, and why it shells out to git instead of trusting the transcript.
+- `/diff` (v0.17 F3) is `git diff`, so it shows the UNSTAGED working tree only: anything already
+  staged or committed does not appear. Output is capped at 120 lines / 8000 characters, one
+  request runs one `git` process, and any participant may ask (the mirror already shows them the
+  same work happening). It needs `git` on PATH and refuses cleanly outside a work tree.
+- The history backfill (v0.17 H1) reads only the last 8 MB of the transcript and gives every
+  seeded event the daemon's boot time as its `ts`, because `parseJsonlLine` does not carry the
+  record's own timestamp. Nothing displays `ts` today; a client that wanted real times would
+  have to widen the parser first.
 - No rate limiting, no web client, single session per host, no Windows.
 - First run in a fresh directory hits claude's "is this a folder you trust?" dialog. Before
   every injection until one succeeds, the daemon waits up to 30 s for either that dialog (it
@@ -724,9 +741,9 @@ The public README keeps a short list. This is all of them.
   while claude is still booting still lands.
 
 
-## Running the eight end-to-end smokes
+## Running the nine end-to-end smokes
 
-Eight end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
+Nine end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
 ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -764,6 +781,12 @@ rm -rf "$TMPDIR/claude-jam-7799"
 # --heartbeat far shorter than a real run and it deliberately kills relay children.
 # ~2 min; needs cloudflared on PATH for its T1 steps.
 node scripts/smoke-transport.mjs
+
+# v0.17 Batch H/F: also NO arguments and no daemon of yours. It plants a transcript in a
+# --config-dir of its own, builds a throwaway git repo, stands up a fake `claude` window
+# (tmux session jamreplaypane) and its own two daemons on 7823/7825, and runs the real ink
+# client in tmux session jamreplayguest. Needs git; no claude, no cloudflared. ~1 min.
+node scripts/smoke-replay.mjs
 ```
 
 ## v0.15 — native-speed host TUI control + faster frames (Roy: F3 typing feels remote)
@@ -919,6 +942,51 @@ All four, plus `scripts/smoke-transport.mjs` (13 steps) and 16 unit tests — 15
   `sk-`/bearer tokens, `.env`-style `KEY=value`) applied to tool-call rendering AND
   `sanitizeFrameRow` mirror rows. Documented as best-effort, never presented as a guarantee.
   This is a trust-boundary feature: ship it in the same batch as F1, not later.
+
+#### Batch H + Batch F — shipped 2026-08-29
+
+All six, plus `scripts/smoke-replay.mjs` (17 steps, the ninth smoke) and 23 unit tests — 182
+total. What is worth knowing beyond the item descriptions:
+
+- **H1 seeds before `listen()`, not after.** `seedHistory()` runs between
+  `new WebSocketServer(...)` and `http.listen(...)`, so the ring buffer is complete before the
+  first socket can ask for it — no window in which an early joiner gets half a backlog. It has
+  no live side effects by construction: it never calls `broadcast()`, so nothing touches
+  `busy`/`waiting`, the per-turn tool counters or the injection queue. The events are pushed
+  into `history` directly, with ids from the same `nextId` counter (the BOOT id is fresh, so a
+  client's `seen` set cannot collide).
+  It then sets `jsonlPath` and `offset` past exactly what it read, which is what stops the tail
+  re-broadcasting the same turns 300 ms later — and that also fixes the previously-unnoticed
+  case of a fresh daemon over an existing `--session-id` file. The old `--resume` → `offset =
+  EOF` path stays for when there is no file to seed from.
+  Two bounds: only the last 8 MB of the transcript is read (a mid-file start drops the partial
+  first line), and a file not ending in a newline leaves its half-written last line to the tail.
+  The `history` ring is now `max(300, --replay)`: seeding 1000 events into a 300 cap would have
+  thrown 700 of them away one line later.
+- **H2 flushes tools before the divider.** A replay has no turn boundary — the `status` frame
+  that ends a live turn arrives after the welcome — so without an explicit `flushTools()` the
+  replayed tool summary landed *below* the line calling everything above it history.
+- **F1 needed one client change nobody asked for.** `LIVE_TOOL_ROWS` is four ROWS, not four
+  tool calls: four 20-line diffs in the live region would have pushed the status and input rows
+  off the screen. `toolLiveLine()` shows the first line plus `(+N diff line(s))` there; the
+  whole diff is in the transcript and in `/tools`. Turn collapse then does the rest — a turn of
+  edits is still one `⚙ N tools (Edit ×3)` line, and `/tools` reprints the diffs in full.
+- **F2/F3 are answered by the DAEMON.** Only it has the transcript and the cwd, so the clients
+  just forward `{t:'files'}` / `{t:'diff', path?}`. `/files` replies to the asker alone (it is
+  orientation, not news); `/diff` is broadcast, because the working tree is the one artifact
+  everybody in the jam is looking at. Neither is on the approval ladder: they reveal paths and
+  the diff of a tree whose live screen every guest is already watching.
+- **F4's cost is the reason it is one hint scan.** `maskSecrets` tests a single combined regex
+  first and returns the string unchanged when it misses, which is nearly every row of a TUI, so
+  the mirror pays one scan instead of seven. Measured on a 40-row frame (node 24.15, M-series):
+  `sanitizeFrameRow` 4.4 µs/frame before, **5.3 µs/frame after** (+1 µs, +22%); a frame where
+  every row trips the gate is 16.8 µs and one where every row really holds a key is 19.0 µs.
+  For scale, the `tmux capture-pane -e -p` that produces the frame costs **5535 µs** — 1000× the
+  masking — and the fast cadence budget is 40 000 µs per frame. So the worst case is 0.05% of a
+  tick and 0.34% of the capture it rides on. `smoke-mirror.mjs` re-measured the live cadence
+  afterwards, against a real haiku turn: **11 frames in 3 s, gaps min 45 ms / median 99 ms /
+  max 495 ms**, then 0 frames in 3 s once idle — against v0.15's recorded 14 frames, min 46 ms /
+  median 139 ms. The floor is the 40 ms cadence, not the work per frame, and it did not move.
 
 ### Batch P — guest parity and polish
 - **P1 (D2)** read-only guest command allowlist (`/cost`, `/status`, `/context`) resolving to
