@@ -19,6 +19,7 @@
 // hanging indent needs an explicit width on the text Box — with one, ink wraps and aligns the
 // continuation to the text column by itself and lib.mjs's wrapText is not needed here.
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
@@ -54,6 +55,13 @@ const C = {
 };
 const fg256 = (n) => `ansi256(${n})`; // everybody else's stable per-name color (userColor)
 const SPIN = ['✻', '✼', '✽', '✼']; // claude's own working glyph cycle
+const TMUX = process.env.JAM_TMUX_BIN || 'tmux'; // v0.15: F3 attaches with this
+// v0.15: how long a locally-echoed line stays under the mirror. The daemon's own broadcast of
+// it normally clears it within a round trip; this is only the floor for a socket that died.
+const ECHO_TTL = 5000;
+// ink's <Static> belongs to one ink instance, so the remount after an attach reprints every
+// entry it is handed. Keep the tail — the rest is already in the terminal's own scrollback.
+const ATTACH_KEEP = 40;
 const NO_WRAP_W = 4096; // wider than any terminal: ink leaves the line alone, the terminal
 // soft-wraps it, and an invite command stays one selectable run instead of gaining a newline.
 const STRIP_ROWS = 3; // rows of chat/system lines kept under the mirror (v0.14 chat strip)
@@ -71,7 +79,9 @@ const store = {
   // v0.14: the mirror of the real TUI is THE view — everyone, host included, opens on it.
   // F2 (or /mirror) flips to the transcript, which is where the full history lives.
   mirror: true,
-  passthrough: false, // v0.14 F3 (host only): keys go straight to the claude TUI
+  passthrough: false, // v0.14 F3 fallback (host only): keys go straight to the claude TUI
+  attached: false, // v0.15 F3: ink is unmounted and `tmux attach` owns the terminal
+  echo: null, // v0.15: {text, at} — your own submitted line, painted before the frame catches up
   frame: null, // latest {rows, w, h} screen frame
   deferred: [], // entries that arrived while the mirror was up; flushed back on the way out
   tools: [], // v0.10: this turn's ⚙/⎿ lines, still collapsible
@@ -122,6 +132,10 @@ inkStdin.unref = () => inkStdin;
   const dec = new StringDecoder('utf8'); // a chunk can land mid-codepoint
   let hold = '';
   process.stdin.on('data', (buf) => {
+    // v0.15: while `tmux attach` has the terminal the keyboard is its own. stdin is paused
+    // for the duration; this is the belt to that braces — a byte read here would be a byte
+    // tmux never sees.
+    if (store.attached) return;
     // v0.14: in passthrough mode the keyboard belongs to the claude TUI, so only F3 (the way
     // back) is still ours — everything else, escape sequences included, goes on the wire
     // untouched. ink never sees a byte of it, so nothing lands in the text field either.
@@ -211,6 +225,8 @@ function flushTools() {
 function render(ev) {
   switch (ev.t) {
     case 'say': {
+      // v0.15: the daemon has it, so the local echo has done its job.
+      if (ev.from === NAME) store.echo = null;
       // Self is always green; everybody else gets a stable color hashed from their name, so
       // it survives reconnects and roster churn instead of depending on join order.
       const c = ev.from === NAME ? C.me : fg256(userColor(ev.from));
@@ -366,9 +382,15 @@ const sendMsg = (o) => { if (ws?.readyState === 1) ws.send(JSON.stringify(o)); e
 // big as this terminal says it should be. Host only (the daemon enforces it too) — a guest
 // must never reshape the screen everybody else is watching. Silent when the socket is down:
 // the reconnect sends it again.
-function sendResize() {
-  if (!IS_HOST || ws?.readyState !== 1) return;
-  ws.send(JSON.stringify({ t: 'resize', w: process.stdout.columns || 80, h: process.stdout.rows || 24 }));
+// `force` is the way back from an F3 attach: tmux resized the claude window to whatever the
+// attaching client was, without telling the daemon, so the daemon's no-op guard has to be
+// stepped over once. Silent while attached — the size is tmux's for as long as it is there.
+function sendResize(force = false) {
+  if (!IS_HOST || store.attached || ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({
+    t: 'resize', w: process.stdout.columns || 80, h: process.stdout.rows || 24,
+    ...(force ? { force: true } : {}),
+  }));
 }
 
 // v0.14 F3: hand the keyboard to the real TUI (permission prompts, the trust dialog, an
@@ -378,6 +400,72 @@ function sendResize() {
 function sendKeys(text) {
   if (ws?.readyState !== 1) return;
   ws.send(JSON.stringify({ t: 'key', b64: Buffer.from(text, 'utf8').toString('base64') }));
+}
+
+// v0.15: F3's real answer. The host attaches to the tmux session — native latency, full
+// fidelity (pickers, permission dialogs, mouse, colours), Ctrl-b d to come back — because a
+// proxied keystroke waiting for the next capture-pane frame is 300-500 ms per key and no
+// amount of tuning makes that feel like typing. A guest is told, once, whose keyboard it is;
+// a host whose daemon predates this (no tmux name in the welcome) keeps the v0.14 proxy.
+let f3Hint = false;
+function onF3() {
+  if (store.attached) return; // stdin belongs to tmux; this cannot actually fire
+  if (store.session?.tmux) return attachTmux(store.session.tmux);
+  if (!IS_HOST) {
+    if (f3Hint) return;
+    f3Hint = true;
+    return err('raw TUI control is the host\'s — ask them, or send a /command for approval');
+  }
+  togglePassthrough();
+}
+
+// Unmounting ink is what hands the terminal over, and an unmount is exactly what
+// waitUntilExit() resolves on — so the mount loop at the bottom of this file, not this
+// function, is what runs the attach and rebuilds the client afterwards.
+let pendingAttach = null;
+function attachTmux(session) {
+  pendingAttach = session;
+  store.attached = true;
+  // Frames off first: nothing may paint over tmux's screen, and the daemon must not spend a
+  // capture-pane on a client that cannot see it.
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'mirror', on: false }));
+  try { app?.unmount(); } catch { /* never mounted */ }
+}
+
+function runAttach(session) {
+  return new Promise((done) => {
+    process.stdin.pause(); // or node and tmux race each other for the same bytes
+    try { process.stdin.setRawMode?.(false); } catch { /* not a tty */ }
+    // ink's parting frame is still on the primary screen and tmux draws on the alternate
+    // one, restoring this on detach — so wipe the visible page (scrollback untouched).
+    process.stdout.write('\x1b[2J\x1b[H');
+    // TMUX unset: a host who launched jam from inside tmux would otherwise be refused
+    // outright ("sessions should be nested with care, unset $TMUX to force").
+    const env = { ...process.env };
+    delete env.TMUX;
+    const child = spawn(TMUX, ['attach', '-t', session], { stdio: 'inherit', env });
+    let over = false;
+    const finish = (problem) => {
+      if (over) return;
+      over = true;
+      store.attached = false;
+      process.stdin.resume();
+      const kept = store.entries.slice(-ATTACH_KEEP);
+      const dropped = store.entries.length - kept.length;
+      store.entries = kept;
+      toTranscript++; // this one line belongs on screen, mirror view or not
+      if (problem) err(problem);
+      else sys(`back from the TUI${dropped ? ` — ${dropped} earlier line(s) are in your terminal's scrollback` : ''}`);
+      toTranscript--;
+      // The window is the size the departing tmux client made it: put the host's own back
+      // BEFORE the frames start again, so the first one is already the right shape.
+      sendResize(true);
+      if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'mirror', on: store.mirror }));
+      done();
+    };
+    child.on('error', (e) => finish(`could not attach to tmux ${session}: ${e.message}`));
+    child.on('exit', (code) => finish(code ? `tmux attach -t ${session} exited ${code}` : null));
+  });
 }
 
 function togglePassthrough(on) {
@@ -471,7 +559,13 @@ function submit(raw) {
   const act = store.cont.length ? parseClientLine([...store.cont, raw].join('\n')) : a;
   store.cont = [];
   switch (act.kind) {
-    case 'say': sendMsg({ t: 'say', text: act.text }); break;
+    case 'say':
+      sendMsg({ t: 'say', text: act.text });
+      // v0.15: paint it here, now. In the mirror view the only proof a message went anywhere
+      // used to be the claude pane repainting, up to a frame away — long enough for a guest
+      // to press Enter twice. Cleared by the daemon's own broadcast of the same line.
+      store.echo = { text: act.text, at: Date.now() };
+      break;
     case 'chat': sendMsg({ t: 'chat', text: act.text }); break;
     case 'who': sys(`here: ${store.roster.join(', ')}`); break;
     case 'help': logOnboarding(); break;
@@ -594,8 +688,9 @@ function StatusBar({ status, typing, spin, mirror, passthrough }) {
   // has scrolled away.
   const view = mirror ? '⧉ live TUI' : '≡ transcript';
   // A permission prompt is the one moment the host must leave the jam layer, so the status
-  // row says which key does it. Guests are told who to wait for instead.
-  const waiting = `⚠ waiting for permission${IS_HOST ? ' — F3 to answer' : ' — the host answers'}`;
+  // row says which key does it. v0.15: F3 now attaches the real TUI, so it says so — and
+  // names the way back, which is tmux's, not jam's. Guests are told who to wait for instead.
+  const waiting = `⚠ waiting for permission${IS_HOST ? ' — F3 attaches the TUI (Ctrl-b d back)' : ' — the host answers'}`;
   return h(Box, { minHeight: 1 },
     h(Box, { flexGrow: 1 },
       passthrough
@@ -650,7 +745,7 @@ function App() {
   React.useEffect(() => {
     const onNewline = () => { store.cont.push(input); setInput(''); touch(); };
     const onMirror = () => toggleMirror();
-    const onPassthrough = () => togglePassthrough();
+    const onPassthrough = () => onF3();
     keys.on('newline', onNewline);
     keys.on('mirror', onMirror);
     keys.on('passthrough', onPassthrough);
@@ -672,6 +767,9 @@ function App() {
   // multi-line message, and the input row.
   const liveTools = s.mirror || s.toolsExpanded ? [] : s.tools.slice(-LIVE_TOOL_ROWS);
   const strip = s.mirror ? s.deferred.filter((e) => e.strip).slice(-STRIP_ROWS) : [];
+  // v0.15: only the mirror view needs the echo — the transcript prints the daemon's own copy
+  // of the line within a round trip, and two of them would just read as a double send.
+  const echo = s.mirror && s.echo && Date.now() - s.echo.at < ECHO_TTL ? s.echo : null;
   return h(Box, { flexDirection: 'column' },
     h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
     s.mirror ? h(Mirror, { frame: s.frame }) : null,
@@ -692,6 +790,7 @@ function App() {
       ? h(Box, { flexDirection: 'column' },
         strip.map((e) => h(Entry, { key: `strip-${e.key}`, e: { ...e, gap: false } })))
       : null,
+    echo ? h(Box, null, h(Text, { color: C.dim, wrap: 'truncate' }, `❯ ${echo.text.split('\n')[0]} · sent`)) : null,
     h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough }),
     s.cont.length && !s.passthrough
       ? h(Box, { flexDirection: 'column' },
@@ -713,8 +812,20 @@ function App() {
 process.on('SIGINT', () => leave(0));
 process.on('SIGTERM', () => leave(0));
 // Terminal resized: ink relays out on its own, and the host's claude window follows along.
-process.stdout.on('resize', sendResize);
-app = inkRender(h(App), { patchConsole: false, stdin: inkStdin });
+process.stdout.on('resize', () => sendResize());
+
+function mount() { app = inkRender(h(App), { patchConsole: false, stdin: inkStdin }); }
+mount();
 connect();
-await app.waitUntilExit();
+// v0.15: F3 attaches by unmounting ink, and waitUntilExit() resolves on ANY unmount — so a
+// pending attach means "hand the terminal to tmux, then rebuild the client"; anything else
+// (/quit, Ctrl-C, a rejection) is the real exit.
+for (;;) {
+  await app.waitUntilExit();
+  if (!pendingAttach) break;
+  const session = pendingAttach;
+  pendingAttach = null;
+  await runAttach(session);
+  mount();
+}
 process.exit(0);
