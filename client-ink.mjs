@@ -37,7 +37,7 @@ const TOKEN = flag('token');
 const IS_HOST = argv.includes('--host');
 // No --token is normal now: the host may run knock-only, and then you wait to be accepted.
 if (!url || !NAME) {
-  console.error('usage: node client.mjs <ws-url> --name <Name> [--token <token>] [--host] [--basic]');
+  console.error('usage: jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host] [--basic]');
   process.exit(2);
 }
 
