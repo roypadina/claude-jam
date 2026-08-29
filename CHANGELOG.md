@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### The shared-session contract survives a /compact
+
+- **What jam tells claude is now split by lifetime.** The durable half — the session is shared,
+  `[Name]:` is who is talking, the two rules that must never decay (never reveal the join token or
+  an invite link to a bridged participant, never claim to have seen `/c` chat) and a short digest
+  of how a jam works — is written to `<state>/system-prompt.txt` and passed as
+  `--append-system-prompt-file`. A system prompt is not summarised away by `/compact`, which is
+  exactly what a jam running for hours used to lose.
+- The half that *changes* — the live roster, the token, the tunnel URLs, the whole of `MANUAL.md` —
+  stays in the hooks, because a system prompt is read once at startup and can never be rewritten.
+- jam **probes** for the flag rather than assuming it (it works on claude 2.1.251 but is absent
+  from `--help`), caches the answer in the state dir, and falls back to the previous hooks-only
+  behaviour with one log line if a build rejects it — a claude that refuses to start is the one
+  outcome that must not happen. `--no-system-prompt` opts out entirely.
+- Honest as ever: this is an instruction to the model, not an enforcement boundary. What it buys is
+  durability, not a new gate.
+
 ### jam runs its own tmux server, and F3 comes back out
 
 - **F3 detaches as well as attaches.** jam binds `F3 → detach-client` on its own tmux server, so

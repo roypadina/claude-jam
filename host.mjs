@@ -28,7 +28,10 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.22C: /kick — the one thing /deny never could do.
   KICK_CODE, resolveKick,
   // v0.20: jam's own tmux server, and the F3 that comes back out.
-  tmuxSocketFor, tmuxSocketArgs, tmuxAttachLine, TMUX_DEFAULT_SOCKET, F3_BIND_ARGS, statusRightText } from './lib.mjs';
+  tmuxSocketFor, tmuxSocketArgs, tmuxAttachLine, TMUX_DEFAULT_SOCKET, F3_BIND_ARGS, statusRightText,
+  // v0.19: the durable half of what jam tells claude, as an appended system prompt.
+  SYSTEM_PROMPT_FILE, CLAUDE_CAPS_FILE, buildSystemPrompt, systemPromptProbeArgs,
+  systemPromptSupported } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `jam end` are one code path with one set of gates.
 import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
@@ -63,6 +66,8 @@ function parseArgs(argv) {
     // nothing, so an old command line still runs.
     else if (a === '--split' || a === '--no-split' || a === '--no-cmux') o.retiredLayout = a;
     else if (a === '--no-token-in-context') o.noTokenInContext = true;
+    // v0.19: keep the shared-session contract in the SessionStart hook only, as it was.
+    else if (a === '--no-system-prompt') o.noSystemPrompt = true;
     else if (a === '--tunnel') o.tunnel = true;
     // v0.17 T4: the other public relay — Tailscale Funnel, whose hostname survives a restart.
     else if (a === '--funnel') o.funnel = true;
@@ -314,9 +319,13 @@ async function launch() {
     ...(opts.configDir ? [`CLAUDE_CONFIG_DIR=${opts.configDir}`] : [])];
   console.log(`claude binary: ${opts.claude}`);
   if (opts.configDir) console.log(`claude profile: ${opts.configDir}`);
+  // v0.19: written before the window exists, because the flag is read at claude's startup and
+  // never again. null when it is off, or when this claude cannot take the flag.
+  const sysPrompt = writeSystemPrompt();
   must(tmux('new-window', '-d', '-t', opts.tmux, '-c', opts.cwd, '-n', 'claude',
     ...env, opts.claude,
     ...(opts.resume ? ['--resume', opts.resume] : ['--session-id', opts.sessionId]),
+    ...(sysPrompt ? ['--append-system-prompt-file', sysPrompt] : []),
     '--settings', path.join(opts.state, 'settings.json'), ...opts.extra));
   // v0.9 addendum: a client bigger than the window (a browser viewer, or anyone who
   // attaches) gets tmux's `·` padding around the TUI, which reads as a broken screen.
@@ -349,6 +358,46 @@ async function launch() {
   // so there is one surface to learn, and no host chrome for a viewer to see. Loopback +
   // `--host` is what makes this client trusted (F3 key passthrough, slash commands, /token).
   return runHostClient(readSession() || { tmux: opts.tmux, port: opts.port, state: opts.state, sessionId: opts.sessionId });
+}
+
+// v0.19: the durable half of what jam tells claude — the protocol, the two standing rules that
+// must survive a `/compact`, and a short digest of how a jam works — written into the state dir and
+// passed as `--append-system-prompt-file`. The dynamic half (roster, token, tunnel URLs, the whole
+// MANUAL.md) stays in the hooks, because a system prompt is read once and can never be rewritten.
+// Degrades to exactly the pre-v0.19 behaviour, loudly enough to see in the log and never fatally:
+// a claude that cannot take the flag would refuse to start at all, which is the one outcome that
+// must not happen.
+function writeSystemPrompt() {
+  if (opts.noSystemPrompt) {
+    console.log('--no-system-prompt: the shared-session contract stays in the SessionStart hook only');
+    return null;
+  }
+  const file = path.join(opts.state, SYSTEM_PROMPT_FILE);
+  try {
+    fs.writeFileSync(file, buildSystemPrompt({ hostName: opts.name }), { mode: 0o600 });
+  } catch (e) {
+    console.log(`could not write ${file} (${e.message}) — the contract stays in the hook`);
+    return null;
+  }
+  // A claude that answers neither way inside the timeout counts as "no": the fallback works.
+  const probe = spawnSync(opts.claude, systemPromptProbeArgs(file), { encoding: 'utf8', timeout: 8000 });
+  const said = `${probe.stdout || ''}${probe.stderr || ''}`.trim();
+  const ok = !probe.error && systemPromptSupported(said);
+  try {
+    fs.writeFileSync(path.join(opts.state, CLAUDE_CAPS_FILE), `${JSON.stringify({
+      claude: opts.claude, appendSystemPromptFile: ok, probedAt: Date.now(),
+      said: said.split('\n')[0].slice(0, 200) || null,
+    }, null, 2)}\n`);
+  } catch { /* the cache is a convenience, never a gate */ }
+  if (!ok) {
+    console.log('this claude does not take --append-system-prompt-file '
+      + `(${said.split('\n')[0].slice(0, 120) || 'it said nothing'}) — the shared-session contract `
+      + 'stays in the SessionStart hook, which is where it has always been');
+    fs.rmSync(file, { force: true });
+    return null;
+  }
+  console.log(`shared-session contract → ${file} (--append-system-prompt-file, survives /compact)`);
+  return file;
 }
 
 // v0.18: the ownership marker, stamped the moment the session exists. `@jam-owned` names the
