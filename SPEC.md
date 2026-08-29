@@ -1165,3 +1165,28 @@ before the claude window is created and removed with the state dir on end. MANUA
 get the standing-rule update, including one honest sentence: these are instructions to the
 model, not an enforcement boundary — the hard gates remain knock/approval and the host-only
 server checks.
+
+## v0.20 — own tmux server socket + symmetric F3 (Roy: F3 goes in but not out)
+
+Since v0.15 F3 does a real `tmux attach`, so leaving needs `Ctrl-b d` — F3 does nothing there,
+which reads as broken. Binding F3 to `detach-client` is the fix, but tmux key tables are
+**server-global**: binding it on the default server would change every other tmux session on
+this machine (Roy runs many). So:
+
+1. **jam runs its own tmux server**: every tmux invocation gets `-L jam-<port>` (a dedicated
+   socket named per jam). Consequences, all good:
+   - key bindings, options and hooks jam sets can never affect the user's own tmux server;
+   - jam literally cannot see or kill the user's sessions — `list-sessions` on its own socket
+     returns only jam's, which makes v0.18's ownership rule structural rather than
+     convention-based (keep the `@jam-owned` marker check anyway, belt and braces);
+   - `jam sessions`/`end`/`clean` enumerate per-socket; an orphan state dir names its socket.
+   - Escape hatch for a user who wants their own server: `--tmux-socket default` (documented
+     as "then jam's tmux options apply to your server", and F3-detach binding is skipped).
+2. **Symmetric F3**: on session creation, `bind-key -T root F3 detach-client` on jam's own
+   socket, so F3 attaches from the client and F3 detaches back. `Ctrl-b d` keeps working.
+3. **Visible way home while attached**: set that session's `status-right` to
+   `F3 or Ctrl-b d → back to jam` (restored/managed like the existing `⚑ N waiting` badge,
+   which must still win when a request is pending). Viewer sessions keep `status off`.
+4. Docs: MANUAL.md, README, CHANGELOG — F3 in/F3 out, the dedicated socket, and that
+   `tmux attach` from outside now needs `tmux -L jam-<port> attach -t <name>` (print that exact
+   line in `jam sessions` and in the client's "keep it running" message from v0.18).
