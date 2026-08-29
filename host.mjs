@@ -37,6 +37,9 @@ function parseArgs(argv) {
     if (a === '--') { o.extra = argv.slice(i + 1); break; }
     else if (a === '--daemon') o.daemon = true;
     else if (a === '--no-attach') o.noAttach = true;
+    // Asking for help must never build a jam. Before v0.22 `--help` fell through to the generic
+    // branch, ate the next argument as its value and then launched — twice, on two agents.
+    else if (a === '--help' || a === '-h') o.help = true;
     // Value-less flags need naming here, or the generic branch below eats the next argument.
     // v0.14: the browser view is opt-in — every participant already has the real screen in
     // their own client. `--no-view` stays accepted (it is the default) so old commands run.
@@ -65,6 +68,11 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv.slice(2));
+// The launcher owns the usage text (one wording for `jam` and for `node host.mjs`), so ask it.
+if (opts.help) {
+  const r = spawnSync(path.join(HERE, 'jam'), ['--help'], { stdio: 'inherit' });
+  process.exit(r.status ?? 0);
+}
 opts.name ||= 'Host';
 opts.cwd = path.resolve(opts.cwd || process.cwd());
 opts.state ||= stateDirFor(os.tmpdir(), opts.port);

@@ -3,6 +3,27 @@
 #                       jam sessions|ls |  jam end|kill [name]  |  jam clean
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  echo "usage: jam host [--port N] [--name X] [--cwd DIR] [--tmux NAME] [--token V]"
+  echo "                [--view] [--tunnel] [--config-dir D] [-- <claude args>]"
+  echo "         builds a detached tmux session (daemon + the real claude TUI) and opens"
+  echo "         your own client here: live TUI by default, F2 transcript, F3 TUI control."
+  echo "         on exit it asks whether to keep the jam running or end it"
+  echo "         ([--no-prompt] [--end-on-exit] [--keep-on-exit] decide it up front)."
+  echo "       jam host --attach [--tmux NAME]"
+  echo "         reopen your client on a jam that is already running."
+  echo "       jam join <ws-url> --name X [--token Y] [--basic]"
+  echo "         no token = knock, the host accepts you."
+  echo "       jam sessions [--json] | jam ls"
+  echo "         jam's own tmux sessions and state dirs: port, cwd, uptime, who is here."
+  echo "       jam end [name] [--all] | jam kill [name]"
+  echo "         end one jam: everyone is told, then the tmux session and its state dir go."
+  echo "       jam clean [--yes]"
+  echo "         remove state dirs whose session is gone. Never touches a live one."
+  exit "${1:-2}"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   host) exec node "$DIR/host.mjs" "$@" ;;
@@ -12,22 +33,7 @@ case "$cmd" in
   sessions|ls) exec node "$DIR/sessions.mjs" list "$@" ;;
   end|kill) exec node "$DIR/sessions.mjs" end "$@" ;;
   clean) exec node "$DIR/sessions.mjs" clean "$@" ;;
-  *)
-    echo "usage: jam host [--port N] [--name X] [--cwd DIR] [--tmux NAME] [--token V]"
-    echo "                [--view] [--tunnel] [--config-dir D] [-- <claude args>]"
-    echo "         builds a detached tmux session (daemon + the real claude TUI) and opens"
-    echo "         your own client here: live TUI by default, F2 transcript, F3 TUI control."
-    echo "         on exit it asks whether to keep the jam running or end it"
-    echo "         ([--no-prompt] [--end-on-exit] [--keep-on-exit] decide it up front)."
-    echo "       jam host --attach [--tmux NAME]"
-    echo "         reopen your client on a jam that is already running."
-    echo "       jam join <ws-url> --name X [--token Y] [--basic]"
-    echo "         no token = knock, the host accepts you."
-    echo "       jam sessions [--json] | jam ls"
-    echo "         jam's own tmux sessions and state dirs: port, cwd, uptime, who is here."
-    echo "       jam end [name] [--all] | jam kill [name]"
-    echo "         end one jam: everyone is told, then the tmux session and its state dir go."
-    echo "       jam clean [--yes]"
-    echo "         remove state dirs whose session is gone. Never touches a live one."
-    exit 2 ;;
+  # -h/--help/help is a question, not a mistake: the same text, exit 0, and never a jam.
+  -h|--help|help) usage 0 ;;
+  *) usage 2 ;;
 esac
