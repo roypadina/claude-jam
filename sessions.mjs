@@ -155,7 +155,8 @@ export async function listRows(tmpdir = os.tmpdir()) {
     const info = readSessionFile(dir);
     if (!info) continue; // no session.json of jam's: not jam's to list, and never jam's to touch
     const tmuxAlive = hasSession(info.tmux);
-    const owned = tmuxAlive ? verifyOwned(info.tmux, sessionMarker(info.tmux), readSessionFile(sessionMarker(info.tmux))).ok : false;
+    const marker = tmuxAlive ? sessionMarker(info.tmux) : null;
+    const owned = tmuxAlive && verifyOwned(info.tmux, marker, readSessionFile(marker)).ok;
     const portAlive = !!(await daemonHealth(port)) || (!tmuxAlive && await portBusy(port));
     rows.push({
       name: tmuxAlive ? info.tmux : null,
