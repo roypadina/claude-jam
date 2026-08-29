@@ -86,6 +86,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   pickAdoptSession, sessionPreview, adoptConfirmText, adoptNoTmuxText, adoptAlreadyJamText,
   adoptAlreadyAdoptedText, adoptPlan, attachTarget,
   BRIEF_NAME, buildBriefing, noBriefWarning, briefUpdates, BRIEF_UPDATE_MODES,
+  contextLostSignal, rosterKey, briefUpdateDecision, BRIEF_MIN_GAP,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -5134,4 +5135,73 @@ test('v0.33 --no-brief is said out loud, and --brief-updates takes one word', ()
   // A typo is not a silent off switch: anything unrecognised is the safe default, which is on.
   for (const bad of ['', null, undefined, 'yes', 'OFF', 0]) assert.equal(briefUpdates(bad), 'on', JSON.stringify(bad));
   assert.deepEqual(BRIEF_UPDATE_MODES, ['on', 'off']);
+});
+
+test('v0.33 the pane classifier notices a compaction and a /clear, and nothing else', () => {
+  const screen = (rows) => rows.join('\n');
+  // claude's own wording after /compact.
+  assert.deepEqual(contextLostSignal(screen(['⏺ Compacted (ctrl+o to see full summary)', '', '❯ ']))?.kind, 'compacted');
+  assert.equal(contextLostSignal(screen(['  Compacting conversation…']))?.kind, 'compacted');
+  assert.equal(contextLostSignal(screen(['this conversation has been compacted']))?.kind, 'compacted');
+  // The signature carries the line, so a SECOND compaction later is a change again rather than
+  // the same state the watcher already fired on.
+  const a = contextLostSignal(screen(['⏺ Compacted (ctrl+o to see full summary)']));
+  assert.equal(a.sig, contextLostSignal(screen(['⏺ Compacted (ctrl+o to see full summary)'])).sig);
+  // /clear: the welcome block on a nearly-empty screen. BOTH halves are required.
+  const cleared = ['', ' ▐▛███▛█   Claude Code v2.1.251', ' ▝▜██████▀  Sonnet 4.5', '', '❯ ', ''];
+  assert.equal(contextLostSignal(screen(cleared))?.kind, 'cleared');
+  // The banner alone is not a /clear — it is also what a session that just started still shows,
+  // under a screen that has since filled up with work.
+  assert.equal(contextLostSignal(screen([...cleared, ...Array.from({ length: 20 }, (_, i) => `line ${i} of real work`)])), null);
+  // And an ordinary working screen is not either — including one where somebody is TALKING about
+  // compaction, as long as it is not claude's own line. (`/compact` typed in the box is claude's
+  // to act on; the line this watches for is the one it draws afterwards.)
+  assert.equal(contextLostSignal(screen(['⏺ I will run the tests', '', '❯ ', '  ready'])), null);
+  assert.equal(contextLostSignal(''), null);
+  assert.equal(contextLostSignal([]), null);
+});
+
+test('v0.33 a roster key is a SET — a reconnect is not a change, an arrival is', () => {
+  assert.equal(rosterKey(['Roy', 'Dana']), rosterKey(['Dana', 'Roy']));
+  assert.equal(rosterKey(['Roy', 'dana']), rosterKey(['Dana', 'ROY']));
+  assert.equal(rosterKey(['Roy', 'Roy', 'Dana']), rosterKey(['Roy', 'Dana']));
+  assert.notEqual(rosterKey(['Roy', 'Dana']), rosterKey(['Roy', 'Dana', 'Yossi']));
+  assert.notEqual(rosterKey(['Roy', 'Dana']), rosterKey(['Roy']));
+  assert.equal(rosterKey([]), '');
+  assert.equal(rosterKey(null), '');
+  assert.equal(rosterKey(['', '  ', 'Roy']), rosterKey(['Roy']));
+});
+
+test('v0.33 a re-brief is never typed into a prompt, never mid-turn, and never a stream', () => {
+  const now = 1_700_000_000_000;
+  const base = { mode: 'on', key: 'b', lastKey: 'a', busy: false, promptKind: 'none', lastAt: 0, now };
+  // The roster changed, nothing is up, nothing is running: this is the case it exists for.
+  assert.equal(briefUpdateDecision(base).brief, true);
+  // A picker is the one place a stray paste CHOOSES something, so it is refused whatever the
+  // reason — compaction included.
+  for (const kind of ['question', 'permission', 'dialog']) {
+    assert.equal(briefUpdateDecision({ ...base, promptKind: kind }).brief, false, kind);
+    assert.match(briefUpdateDecision({ ...base, promptKind: kind, reason: 'compaction' }).why, /prompt/);
+  }
+  // Mid-turn is a refusal for a roster change and NOT for a compaction: the compaction is the
+  // moment the briefing stopped existing, and Claude Code queues input typed during a turn.
+  assert.equal(briefUpdateDecision({ ...base, busy: true }).brief, false);
+  assert.match(briefUpdateDecision({ ...base, busy: true }).why, /mid-turn/);
+  assert.equal(briefUpdateDecision({ ...base, busy: true, reason: 'compaction' }).brief, true);
+  // A set that did not really change is not a change.
+  assert.equal(briefUpdateDecision({ ...base, key: 'a' }).brief, false);
+  assert.match(briefUpdateDecision({ ...base, key: 'a' }).why, /did not change/);
+  // Rate limit: one every ten minutes, with the time in the reason.
+  assert.equal(briefUpdateDecision({ ...base, lastAt: now - 60_000 }).brief, false);
+  assert.match(briefUpdateDecision({ ...base, lastAt: now - 60_000 }).why, /1m ago/);
+  assert.equal(briefUpdateDecision({ ...base, lastAt: now - BRIEF_MIN_GAP - 1 }).brief, true);
+  // …and it does not hold back a compaction, which is not a roster change at all.
+  assert.equal(briefUpdateDecision({ ...base, lastAt: now - 1000, reason: 'compaction' }).brief, true);
+  // The off switch is total, and it is the flag's own word.
+  assert.equal(briefUpdateDecision({ ...base, mode: 'off' }).brief, false);
+  assert.equal(briefUpdateDecision({ ...base, mode: 'off', reason: 'compaction' }).brief, false);
+  assert.match(briefUpdateDecision({ ...base, mode: 'off' }).why, /--brief-updates off/);
+  // An unknown reason re-briefs nothing rather than defaulting to yes.
+  assert.equal(briefUpdateDecision({ ...base, reason: 'because' }).brief, false);
+  assert.equal(BRIEF_MIN_GAP, 10 * 60 * 1000);
 });
