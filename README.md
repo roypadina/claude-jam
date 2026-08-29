@@ -83,6 +83,8 @@ the ones you will actually reach for.
 ## Guest quickstart
 
 ```sh
+# an invite link — the whole command. No name to type, no token, no approval to wait for.
+jam join cjam1_eyJ2IjoxLCJqYW0iOiJhYmMx…
 # knock-only host: no token, you wait to be accepted
 jam join ws://<host-ip>:7777 --name Dana
 # host handed you a token: straight in
@@ -105,9 +107,44 @@ Three ways to let someone in. All of them end in the same welcome.
 | mode | how | who decides |
 | --- | --- | --- |
 | **token** | `--token <value>` at startup (8–64 chars of `[A-Za-z0-9_-]`), or `/token set` later. One shared secret; anyone holding it joins immediately | whoever has the string |
+| **invite link** | `jam invite Dana` mints `cjam1_…`, and `jam join <link>` is the guest's entire command — the link carries the addresses, their name and a per-invite secret, so they are admitted with no approval | the host, per person, in advance — and revocably |
 | **knock** | no token at all. The guest connects without one, sees `waiting for host approval…`, the host gets `⚑ Dana wants to join (100.86.8.97)` and answers `/accept Dana` | the host, per person |
 | **tunnel** | `--tunnel` spawns two Cloudflare quick tunnels (needs `cloudflared`) and prints `wss://<words>.trycloudflare.com` join/view URLs — for a friend who is not on your LAN or tailnet | still the token or the knock; the tunnel only moves the bytes |
 | **funnel** | `--funnel` runs Tailscale Funnel instead (needs `tailscale`, and Funnel enabled for the tailnet). Same job, but the URL is your node's own name — `wss://<machine>.<tailnet>.ts.net` and `https://…:8443` for the view — so it is the **same every run**, unlike a quick tunnel's random words. Your guest still installs nothing | as above; mutually exclusive with `--tunnel` |
+
+### Invite links
+
+```sh
+jam invite Dana                          # multi-use, 24h — prints the guest's whole command
+jam invite Dana --uses 1 --expires 30m   # one shot, half an hour
+jam invites                              # id, name, state, uses, expiry (never the link again)
+jam invite revoke Dana                   # or revoke <id>
+```
+
+The same three from inside the client: `/invite Dana`, `/invites`, `/invite revoke Dana`
+(host-only, like `/token`).
+
+**An invite link IS a credential.** Anyone holding it joins as that name with no approval —
+treat it like a password, send it over a private channel, and `/invite revoke` when you are
+done. It is still strictly better than the shared `--token`: it is revocable on its own,
+bound to one name, expiring, and countable (`--uses`). The shared token stays for quick
+throwaway cases.
+
+Defaults are multi-use and 24 hours, because a guest whose laptop slept has to be able to
+reconnect. The daemon stores only a **hash** of each secret, in the 0700 state dir, and reloads
+them on restart — so a daemon that came back does not lock out the people it already invited, and
+a copy of the state dir cannot hand anybody a working link. A revoked or expired link disconnects
+nobody who is already in; they stay until they leave.
+
+Anything wrong with a link — tampered, expired, revoked, used up, or its name already connected —
+is said out loud and then **falls through to a knock**: the guest is never silently rejected, and
+the host can still wave them in. A link from a future format (`cjam2_…`) is a clean "update
+claude-jam", not a crash.
+
+A link carries the tunnel address first and the LAN address second, and the client tries them in
+order with a 3-second timeout each. That is also the ephemeral-tunnel caveat: a `cloudflared`
+respawn changes the hostname, so links minted before it keep working only over their LAN address —
+mint fresh ones, or use `--funnel`, whose hostname never changes.
 
 Rotating a token (`/token new` / `set` / `off`) never disconnects anyone already in — the token
 is checked at join time only. A *wrong* token knocks, so rotating strands nobody. Knocks expire
@@ -174,6 +211,9 @@ approves.
 | `/diff [path]` | anyone | `git diff --stat` of the host's working tree, or the real hunks for one path |
 | `/answer`, `/answer <n>` | anyone | list the options on claude's permission prompt · offer one of them (the host approves before a key is typed) |
 | `/join`, `/token new\|set\|off` | host | reprint the invite lines · rotate or drop the token |
+| `/invite <Name> [--uses N] [--expires 24h]` | host | mint a link that joins as that name with no approval |
+| `/invites`, `/invite revoke <Name\|id>` | host | list the links (never reprinting one) · take one back |
+| `/kick <name> [revoke]` | host | remove somebody already in: their socket closes 4406, they drop out of the roster, everybody is told — and you are offered their invite link back |
 | `/end` | host | end the jam for everybody — asks `[y/N]` first, then every client prints `<Host> ended the jam` and exits |
 | `/accept [name]`, `/deny <name>` | host | answer a knock |
 | `/allow-cmd [name] [always]`, `/deny-cmd <name>` | host | answer a guest's claude command |
@@ -252,8 +292,19 @@ starts by proving it will not touch a session it did not create).
   ink's `<Static>` would otherwise reprint the whole session on every return.
 - The frame signal is a poll, not `tmux pipe-pane`: the cadence adapts (40 ms active, 250 ms
   idle) but an active mirror still costs one `capture-pane` per tick.
-- Admission is per person, but there are no per-friend credentials: once in, everybody is
-  equally trusted, and `/deny` cannot kick somebody already admitted.
+- **An invite link is a bearer credential.** It joins as that name with no approval, so whoever
+  holds it is that person as far as jam is concerned — there is no second factor and no device
+  binding. What you get instead is per-person revocation (`/invite revoke`), an expiry, a use
+  count and a name binding, which the shared `--token` has none of. Send links privately.
+- A link's addresses are fixed the moment it is minted. A `cloudflared` respawn changes the
+  tunnel hostname, so older links reach the jam only over their LAN address; `--funnel` has a
+  stable hostname and does not have the problem. There is no "re-issue all links" action yet —
+  mint fresh ones.
+- Revoking a link, or letting it expire, does **not** disconnect anybody already in on it; it only
+  stops the next join. `/kick` is what removes somebody who is already here — and `/kick` plus its
+  revoke is the pair that actually keeps them out.
+- Admission is per person, and since v0.22 there are per-person credentials — but once in,
+  everybody is still equally trusted: an invite grants exactly the same abilities a knock does.
 - The token-in-context guard ("reveal only to the host") is an instruction to the model, not a
   boundary. If the token must not leak, run knock-only.
 - **Export scrubbing is best effort.** A transcript is everything claude saw — file contents,

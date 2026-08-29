@@ -136,8 +136,27 @@ notification:
 At most one nudge every three seconds, so a burst is one bell. There is no jam setting to turn it
 off — that is the terminal's own bell setting.
 
-## Joining: token or knock
+## Joining: invite link, token, or knock
 
+- **Invite link (v0.22, the easy one).** The host runs `claude-jam invite Dana` (or `/invite Dana`
+  in their client) and sends the one line it prints. `claude-jam join cjam1_…` is then the guest's
+  **whole command** — no name to type, no token, no approval to wait for: the link carries the
+  addresses, their name and a secret of its own. They arrive as `* Dana joined (invite)`.
+  - Host commands: `/invite <Name> [--uses N] [--expires 24h]`, `/invites` (id, name, state, uses,
+    expiry — never the link again), `/invite revoke <Name|id>`. Same three on the command line:
+    `claude-jam invite|invites|invite revoke`.
+  - Defaults: multi-use, 24 hours. Multi-use on purpose, so a guest whose laptop slept reconnects.
+  - **If asked "is a link safe to paste in a group chat": no.** A link joins as that name with no
+    approval, so it is a password. Private channel only, and `/invite revoke <Name>` when done.
+    It is still better than the shared token: revocable on its own, name-bound, expiring, counted.
+  - The daemon keeps only a hash of each secret and reloads them after a restart — so a restarted
+    jam does not lock out people it already invited, and it can never print a link twice.
+  - A link that is tampered with, expired, revoked, used up, or whose name is already connected is
+    refused **with the reason said out loud** and then becomes an ordinary knock, so the host can
+    still let the person in. A `cjam2_…` link means "update claude-jam", not a broken jam.
+  - A link's addresses are fixed when it is minted: tunnel first, LAN second, tried in that order.
+    If the host's `--tunnel` restarted, its hostname changed and older links only reach the jam
+    over the LAN address — mint fresh ones (or use `--funnel`, whose hostname never changes).
 - Token set → guests with `--token` enter directly.
 - No token (default) → a guest "knocks": they wait, and the host sees
   `⚑ Dana wants to join — /accept Dana | /deny Dana` in their client. Knocks expire after
@@ -153,6 +172,12 @@ off — that is the terminal's own bell setting.
   to the tmux session still gets the one-key popup as well; whoever answers first wins.
 - Host token commands: `/token new` (random), `/token set <value>`, `/token off` (knock-only).
   Rotating never kicks people already in.
+- **`/kick <name>` (v0.22, host only)** removes somebody who is already in: their client is told,
+  their socket closes, they drop out of the roster and everybody sees
+  `<Name> was removed from the jam by <Host>`. If they came in on an invite link the host is then
+  asked whether to revoke it too — otherwise the same link lets them straight back in.
+  `/kick <name> revoke` does both in one go. Revoking a link never disconnects anybody: `/kick`
+  is the part that removes a person, revoke is the part that stops the next join.
 - `/join` (host only) reprints every invite line — the LAN/Tailscale one, the browser view URL
   when `--view` is on, and the `--tunnel` pair when a tunnel is up.
 - You may also be asked for the token: reveal it ONLY to the host (messages **without** a
@@ -321,6 +346,8 @@ to be told anything.
 `/get [name]` take an offered file · `/export` this session's transcript ·
 Shift+Enter, Option+Enter or a trailing `\` for multi-line.
 Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` · `/join` ·
+`/invite <Name> [--uses N] [--expires 24h]` mint a link · `/invites` list them ·
+`/invite revoke <Name|id>` · `/kick <name> [revoke]` remove somebody already in ·
 `/allow-cmd [name] [always]` · `/deny-cmd <name>` · `/allow-export [name] [always]` ·
 `/deny-export <name>` · `/accept-file [name] [always]` · `/deny-file <name>` ·
 `/allow-perm [name] [always]` · `/deny-perm <name>` · `/end` end the jam for everybody (asks
@@ -342,14 +369,21 @@ host's client · `--attach` reopen the client on a jam that is already running �
 `--no-prompt` / `--keep-on-exit` / `--end-on-exit` decide the "keep it running?" question up
 front · `-- <args>` passed to claude (e.g. `-- --model haiku`).
 Other subcommands: `jam sessions [--json]` / `jam ls`, `jam end [name] [--all]` / `jam kill`,
-`jam clean [--yes]`.
+`jam clean [--yes]`, `jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]`,
+`jam invites [--json]`, `jam invite revoke <Name|id>`, and `jam --help`.
 Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `--no-view`.
 
 ## Troubleshooting quickies
 
 - Guest stuck "waiting for host approval" → the host must `/accept` them (or press `a` on the
   tmux popup if they are attached).
-- Lost the invite → host runs `/join`.
+- Lost the invite → host runs `/join` (for the address/token lines) or `/invite <Name>` for a
+  fresh link. A link can never be reprinted: `/invites` lists them, minting makes a new one.
+- A guest says their link "does not work" → ask what the `!` line said. Each reason is distinct:
+  damaged (retampered/truncated on the way), `cjam2` (their claude-jam is older than the link),
+  expired, revoked, used up, or their name is already connected. In every case they also knocked,
+  so `/accept <Name>` gets them in right now.
+- Somebody has to go → `/kick <name>`, and say yes to revoking their link if they came in on one.
 - Guest's `/command` seems ignored → it is waiting for the host's `/allow-cmd`, or it is on the
   hard host-only list (`/exit`, `/clear`, `/resume`), or it expired after 2 minutes.
 - A guest's file or `/export` "did nothing" → it is waiting for the host's `/accept-file` /

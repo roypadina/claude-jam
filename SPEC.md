@@ -734,6 +734,15 @@ The public README keeps a short list. This is all of them.
   seeded event the daemon's boot time as its `ts`, because `parseJsonlLine` does not carry the
   record's own timestamp. Nothing displays `ts` today; a client that wanted real times would
   have to widen the parser first.
+- **An invite link is a bearer credential** (v0.22B): whoever holds it is that person, with no
+  second factor and no device binding. What it buys over the shared `--token` is per-person
+  revocation, an expiry, a use count and a name binding — not a stronger proof of identity. Its
+  addresses are frozen at mint time, so a `cloudflared` respawn leaves older links reaching the
+  jam only over their LAN address (there is no "re-issue all" action yet), and revoking a link or
+  letting it expire never disconnects somebody already in on it — `/kick` is that.
+- `/kick` closes a socket, and nothing stops the same person coming back through a knock, a token
+  they hold, or another live link. Kick plus revoke is the pair that keeps somebody out, and even
+  then only for that link.
 - No rate limiting, no web client, single session per host, no Windows.
 - First run in a fresh directory hits claude's "is this a folder you trust?" dialog. Before
   every injection until one succeeds, the daemon waits up to 30 s for either that dialog (it
@@ -741,9 +750,9 @@ The public README keeps a short list. This is all of them.
   while claude is still booting still lands.
 
 
-## Running the eleven end-to-end smokes
+## Running the twelve end-to-end smokes
 
-Eleven end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
+Twelve end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
 ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -806,6 +815,14 @@ node scripts/smoke-perm.mjs
 # name. It starts with the refusals: a plain session of its own, a hand-written @jam-owned
 # marker, and — read-only, never touched — the live `jam` on :7777 if one is running. ~20s.
 node scripts/smoke-lifecycle.mjs
+
+# v0.22B/C: the twelfth smoke. NO arguments, no daemon of yours, no real claude (a stand-in that
+# draws a prompt and sleeps) — and its own $TMPDIR, so `jam invite` can only see its own jam. Its
+# own port (7861) and one tmux session, jaminvite, killed by exact name. It starts with a
+# read-only proof that the live `jam` on :7777 is invisible to it, then mints links from the CLI
+# and from `/invite`, joins with only a link, and spends most of its length on the refusals.
+# ~10s.
+node scripts/smoke-invite.mjs
 ```
 
 ## v0.15 — native-speed host TUI control + faster frames (Roy: F3 typing feels remote)
@@ -1306,6 +1323,43 @@ Ink overlay (Select-driven, Esc closes, everything it does maps to an existing c
   `/diff`, `/export`, `/send`, `/answer`, `/help`) with one-key launch, no host controls.
 `/menu` is discoverability: every feature we ship must appear there, and the standing doc rule
 (v0.21) extends to it — a new user-visible feature that is not reachable from `/menu` is a defect.
+
+#### v0.22B + the `/kick` half of v0.22C — shipped 2026-08-29
+
+The invite half only (A, the no-argument launcher menu, and the rest of C's live `/menu` panel are
+not built). 16 unit tests and `scripts/smoke-invite.mjs`, the twelfth smoke — 237 tests total.
+What is worth knowing beyond the item text:
+
+- **The version is in the PREFIX as well as the payload.** `cjam1_` is matched by
+  `/^cjam(\d{1,3})_(…)$/`, so a `cjam2_` link is recognised as an invite and refused as a
+  *version* ("update claude-jam") instead of failing as a JSON parse error. A link that kept the
+  prefix and edited `v` inside is tampering, and says so.
+- **An expired link is refused but still hands back its contents.** `decodeInvite` returns
+  `{ok:false, reason:'expired', invite}` — the addresses and the name are exactly what the
+  fall-through knock needs, and the *daemon's* clock is what actually decides expiry, so a client
+  cannot lie its way in. Every other decode failure has nothing to connect to and exits 2.
+- **The name comes off the RECORD, never off the hello.** `checkInvite` returns the bound name and
+  `admitSocket` uses it, so a guest cannot rename themselves into somebody else's colour or
+  attribution by editing their own command line. The smoke asserts it by sending a different name.
+- **Five gates, each with its own reason** (`malformed`, `unknown`, `revoked`, `expired`,
+  `used-up`, `name-taken`), all of them ending in the same sentence: *knocking instead*. That
+  wording is the contract — a refused invite is never a dead end, because a link is a shortcut
+  past the approval, not past the door.
+- **`via` is new on every admission** (`host`/`token`/`knock`/`invite`) and rides on the roster
+  frame, which is what makes an invite arrival visible at all: there is no knock line to see, so
+  `* Yossi joined (invite)` is the only announcement. (v0.25's join sound is NOT built.)
+- **One parser, two surfaces.** `parseInviteCommand` serves `/invite …` and
+  `claude-jam invite …`, and one `inviteOp()` in the daemon serves the `{t:'invite'}` frame and
+  `POST /invite` (loopback + hook secret, the same guard as `/admit` and `/end`). The CLI needed
+  no new file: `sessions.mjs` already knew how to find a jam and talk to it.
+- **`/kick` is told-then-closed-then-dropped**: the victim gets a `kicked` frame, the room gets a
+  `sys` line, the socket closes 4406 (inside the 4400-4429 band every client already treats as
+  final, so nobody reconnects), and the roster entry goes on the socket's own `close` handler —
+  the one path that cannot leave a ghost. The revoke is *offered* on the reply frame (and
+  `/kick <name> revoke` does both), because revoking is the wider action of the two.
+- Not built here, and still open from v0.22B: the "re-issue all links after a tunnel change"
+  one-key action (it belongs with the v0.24 relay switch), and the launcher menu that would drive
+  all of this.
 
 ## v0.23 — named jams and LAN discovery
 
