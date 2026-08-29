@@ -6026,3 +6026,56 @@ test('the progress line still reads the same events', () => {
   assert.equal(peerProgressLine(evs[2]), '\u00b7 Read');
   assert.equal(peerProgressLine(evs[0]), '', 'a thinking-only event says nothing');
 });
+
+// ---------------------------------------------------------------------------------------
+// Campaign 2026-08-30: contextLostSignal, against REAL captures instead of remembered wording.
+// ---------------------------------------------------------------------------------------
+
+test('contextLostSignal finds a REAL compaction — the marker is measured now, not guessed', () => {
+  // TESTING.md carried this as "UNVERIFIED against a real compaction … the wording comes from
+  // claude 2.1.251's own output rather than from a measured corpus". fixtures/pane/compacted.txt
+  // is a real one, captured 2026-08-30: six haiku turns, then `/compact`, then capture-pane.
+  const src = fs.readFileSync(new URL('./fixtures/pane/compacted.txt', import.meta.url), 'utf8');
+  const sig = contextLostSignal(src);
+  assert.equal(sig?.kind, 'compacted');
+  // The exact line claude drew. If a future build reworded it, this is what tells us.
+  assert.match(sig.sig, /Compacted \(ctrl\+o to see full summary\)/);
+  // It is a `⎿` continuation line under the `/compact` the human typed — NOT at the start of a
+  // line and NOT after one of the ⏺/●/* glyphs, which is why COMPACTED_RE allows any whitespace.
+  const line = src.split('\n').find((l) => /Compacted/.test(l));
+  assert.match(line, /^\s+\u23bf\s+Compacted/);
+  // And a real compaction does NOT wipe the scrollback: the turns before it are still on screen,
+  // so the "nearly empty screen" branch would never have caught this one.
+  assert.ok(src.split('\n').filter((l) => l.trim()).length > 14, 'the screen is still full after a compaction');
+});
+
+test('contextLostSignal finds a REAL /clear', () => {
+  const src = fs.readFileSync(new URL('./fixtures/pane/cleared.txt', import.meta.url), 'utf8');
+  assert.deepEqual(contextLostSignal(src), { kind: 'cleared', sig: 'cleared' });
+  // What it is actually keying on, in a real capture: the banner glyphs and the version line.
+  assert.match(src, /[\u2590\u259b\u259c\u259d\u2588]{2,}/);
+  assert.match(src, /Claude Code v\d/);
+});
+
+test('a fresh claude reads as `cleared` too — the known ceiling of a screen-shaped test', () => {
+  // Measured 2026-08-30 and pinned deliberately. A just-started claude and a just-cleared one
+  // draw the SAME screen — same banner, same emptiness — so nothing looking at the pane can tell
+  // them apart, and this is the heuristic's ceiling rather than a bug in it.
+  //
+  // What absorbs it: watchContext re-briefs only on a CHANGE from the baseline taken at
+  // adoption, so adopting a fresh (or just-cleared) session re-briefs nobody for nothing.
+  //
+  // What it still costs, and why this test says so out loud: adopt a just-started claude
+  // (baseline `cleared`), keep every exchange short enough that the banner never scrolls away —
+  // startup-one-turn.txt is a REAL screen after a REAL turn that still reads `cleared` — and a
+  // later `/clear` does not change the signature, so no re-brief fires. Narrow, and the roster
+  // re-brief is the backstop. If this is ever fixed, this test is the one to delete.
+  for (const f of ['startup.txt', 'startup-one-turn.txt']) {
+    const src = fs.readFileSync(new URL(`./fixtures/pane/${f}`, import.meta.url), 'utf8');
+    assert.deepEqual(contextLostSignal(src), { kind: 'cleared', sig: 'cleared' }, f);
+  }
+  // The one that matters: a compaction and a clear are DIFFERENT signatures, so a compaction on
+  // a screen that had been reading `cleared` still fires.
+  const compacted = fs.readFileSync(new URL('./fixtures/pane/compacted.txt', import.meta.url), 'utf8');
+  assert.notEqual(contextLostSignal(compacted).sig, 'cleared');
+});

@@ -1,0 +1,44 @@
+
+ ▐▛███▛█   Claude Code v2.1.251
+▝▜██████▀  Haiku 4.5 · Claude Team
+  ▝▝ ▝▝    ~/Code/Padina/claude-jam
+
+⚠ 2 MCP servers need authentication · run /mcp
+
+❯ /clear
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────────────── claude-jam · main ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  [claude2] | Haiku 4.5 | ~/Code/Padina/claude-jam |  main | 5h:104% 7d:40% | thinking         /rc
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

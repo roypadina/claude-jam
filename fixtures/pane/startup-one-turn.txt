@@ -1,0 +1,44 @@
+
+ ▐▛███▛█   Claude Code v2.1.251
+▝▜██████▀  Haiku 4.5 · Claude Team
+  ▝▝ ▝▝    ~/Code/Padina/claude-jam
+
+⚠ 2 MCP servers need authentication · run /mcp
+
+❯ In exactly one short sentence, say what a tmux pane is.
+
+⏺ A tmux pane is a rectangular subdivision of a tmux window, each running its own independent shell
+  session.
+
+✻ Cogitated for 2s · done 12:56 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────────────── claude-jam · main ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  [claude2] | Haiku 4.5 | ~/Code/Padina/claude-jam |  main | ctx:28% | 5h:104% 7d:40% | thinking
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+                                                                                               /rc

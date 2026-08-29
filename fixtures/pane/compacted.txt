@@ -1,0 +1,44 @@
+
+
+✻ Baked for 3s · done 1:01 AM
+
+❯ In one short sentence: what is base64?
+
+⏺ Encoding that converts binary data into text using 64 safe characters (A-Z, a-z, 0-9, +, /),
+  making it safe to send over text-only channels.
+
+✻ Crunched for 2s · done 1:01 AM
+
+❯ In one short sentence: what is a unix socket?
+
+⏺ IPC mechanism that lets processes on the same machine communicate through a file-based endpoint,
+  faster and simpler than TCP.
+
+✻ Cooked for 2s · done 1:02 AM
+
+❯ In one short sentence: what is stdin?
+
+⏺ Standard input stream that feeds data to a program, typically from the keyboard or another
+  program's output via pipe.
+
+✻ Baked for 2s · done 1:02 AM
+
+❯ In one short sentence: what is a pty?
+
+⏺ Software emulation of a physical terminal that bridges programs and terminal emulators, letting
+  programs think they're talking to real hardware.
+
+✻ Sautéed for 2s · done 1:03 AM
+
+❯ /compact
+  ⎿  Compacted (ctrl+o to see full summary)
+     PreCompact [test -f "${CLAUDE_PLUGIN_ROOT}/scripts/smart_compact.py" && python3
+     "${CLAUDE_PLUGIN_ROOT}/scripts/smart_compact.py" hook-precompact || exit 0] completed
+     successfully: {}
+
+──────────────────────────────────────────────────────────────────────────────── claude-jam · main ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  [claude2] | Haiku 4.5 | ~/Code/Padina/claude-jam |  main | ctx:0% | 5h:104% 7d:40% | thinking
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+                                                                                               /rc
