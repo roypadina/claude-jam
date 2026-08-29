@@ -32,7 +32,9 @@ working (`✻ claude is working…`), and whether you are waiting for a permissi
   closing the client leaves everything running. Host extras: F3, claude's slash commands,
   `/accept`/`/deny`, `/token`, `/join`, and answering your permission prompts.
 - **Guest** — joins from their own machine:
-  `node client.mjs ws://<host-ip>:7777 --name <Name>` (plus `--token <t>` when one is set).
+  `jam join ws://<host-ip>:7777 --name <Name>` (plus `--token <t>` when one is set) — or, if the
+  host is running from a source checkout instead of the Homebrew install, `node client.mjs` in
+  place of `jam join`. The invite line the host hands out already has the right one.
   They need to reach the host — same Tailscale network typically, or the host's `--tunnel` URL.
 
 ## F3 — the host types into your screen
@@ -193,8 +195,8 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   the dim `— mirror:` line says how much was cut. The host's own client keeps the window sized
   to their terminal, so a guest with a bigger terminal simply sees blank space.
 - Host wants their client back after closing it → the line the launcher printed
-  (`node client.mjs ws://127.0.0.1:<port> … --host`), or just `jam host` again after
-  `tmux kill-session -t jam`.
+  (`jam join ws://127.0.0.1:<port> … --host`, or `node client.mjs …` from a source checkout),
+  or just `jam host` again after `tmux kill-session -t jam`.
 - Host wants a clean restart → `tmux kill-session -t jam`, then `./jam host …`
   (`--resume <session-id>` keeps this conversation).
 - Your replies stop with a spend-limit message → the host's Claude account hit its usage limit;
