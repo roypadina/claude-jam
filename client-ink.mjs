@@ -25,7 +25,7 @@ import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
 import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
-import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
@@ -87,6 +87,13 @@ const store = {
   tools: [], // v0.10: this turn's ⚙/⎿ lines, still collapsible
   toolsExpanded: false, // `/tools on` — never collapse
   lastTools: [], // the last completed turn's full tool log, for `/tools`
+  // v0.16: every request waiting for the host, as the daemon last pushed it — the approval bar
+  // is derived from this and nothing else. `armed` is single-key mode (off while you type,
+  // back on Esc) and `hiddenKey` the one request whose bar was dismissed with i/Esc.
+  pending: [],
+  armed: true,
+  hiddenKey: null,
+  input: '', // what is in the input line, mirrored out of React for the single-key rule
   xfers: new Map(), // v0.12/v0.13: incoming transfers, xfer id -> assembling record
   upload: null, // a file read and waiting for the host's yes: {name, data, caption}
   offers: new Map(), // v0.13: what the host has offered, name -> {from, size}
@@ -143,8 +150,11 @@ inkStdin.unref = () => inkStdin;
     hold = r.hold;
     for (const k of r.keys) keys.emit(k);
     if (!r.text) return;
-    if (store.passthrough) sendKeys(r.text);
-    else inkStdin.write(r.text);
+    if (store.passthrough) return sendKeys(r.text);
+    // v0.16: the approval bar's single keys come out of the stream here, before ink's input
+    // machinery can put them in the text field. Everything else falls through untouched.
+    const rest = barKeys(r.text);
+    if (rest) inkStdin.write(rest);
   });
   process.stdin.resume();
 }
@@ -316,6 +326,15 @@ function render(ev) {
       // changes the credential inside all four.
       if (store.session) Object.assign(store.session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin, tunnelView: ev.tunnelView });
       return logJoin();
+    }
+    // v0.16: the whole set of requests waiting for the host, pushed on every change. Host
+    // clients only (the daemon sends it nowhere else), and it replaces the list wholesale so
+    // the bar can never show something that has already been answered.
+    case 'pending': {
+      store.pending = Array.isArray(ev.items) ? ev.items : [];
+      // Nothing waiting: forget which bar was dismissed and re-arm for the next one.
+      if (!store.pending.length) { store.armed = true; store.hiddenKey = null; }
+      return touch();
     }
     // v0.14: something happened to the session everybody should know about — a slash command
     // was run in the TUI, a guest's request was approved.
@@ -499,6 +518,44 @@ function toggleMirror(on) {
   touch();
 }
 
+// ----------------------------------------------- v0.16: the approval bar ----
+// Every pending request raises one row above the status row, and while nothing is typed a
+// single key answers it. The daemon's `pending` frame is the only source of truth: an answer
+// from anywhere — another host client, the tmux popup, an expiry — takes the bar down on the
+// next push, and a late key is a harmless 404 in the ladder.
+
+// Identity of one request, for "which bar did I dismiss".
+const reqKey = (it) => (it ? `${it.kind}:${it.name}:${it.expires}` : '');
+const barHidden = () => !!store.hiddenKey && store.hiddenKey === reqKey(store.pending[0]);
+// Single keys are live only while the host has a bar on screen and has not started typing.
+const barArmed = () => store.armed && !barHidden();
+
+// One key = the command the host would have typed, run through submit(). That is the whole
+// point: the bar is not a second approval mechanism, it is a keyboard shortcut for the
+// existing one (APPROVAL_COMMANDS in lib.mjs maps kind -> command).
+function answerBar(ok) {
+  const it = store.pending[0];
+  const cmd = it && APPROVAL_COMMANDS[it.kind]?.[ok ? 'allow' : 'deny'];
+  if (!cmd) return;
+  submit(`${cmd} ${it.name}`);
+}
+
+// A stdin chunk while a request is waiting. Returns whatever still has to reach the input.
+function barKeys(text) {
+  if (!IS_HOST || !store.pending.length) return text;
+  const { act, text: rest } = barKeyAction(text, { armed: barArmed(), input: store.input });
+  switch (act) {
+    case 'accept': answerBar(true); break;
+    case 'deny': answerBar(false); break;
+    // Dismissed, not answered: the request keeps waiting for a slash command or a popup.
+    case 'ignore': store.hiddenKey = reqKey(store.pending[0]); touch(); break;
+    case 'rearm': store.armed = true; store.hiddenKey = null; touch(); break;
+    case 'disarm': if (store.armed) { store.armed = false; touch(); } break;
+    default: break;
+  }
+  return rest;
+}
+
 // ------------------------------------------ v0.12/v0.13: the export and files ----
 // A finished incoming transfer: write it, say where it went, and — for an export — print the
 // recipe that revives it. Forced into the transcript (`toTranscript`) so it is readable while
@@ -679,6 +736,14 @@ function Mirror({ frame }) {
     hints ? h(Text, { color: C.dim }, `— mirror: ${hints}`) : null);
 }
 
+// v0.16: one row, right above the status row, worded exactly like the tmux popup it stands in
+// for — kind glyph, who, what, the keys, and a countdown to that request's own expiry.
+function ApprovalBar({ items, armed, now }) {
+  const bar = approvalBar(items, now, armed);
+  if (!bar) return null;
+  return h(Box, null, h(Text, { color: C.accent, wrap: 'truncate' }, bar.text));
+}
+
 function StatusBar({ status, typing, spin, mirror, passthrough }) {
   const now = Date.now();
   const who = [...typing.entries()].filter(([, at]) => now - at < 4000).map(([n]) => n);
@@ -743,7 +808,7 @@ function App() {
   // submitting it — exactly where a trailing `\` puts it, so submit() needs no new path.
   // v0.7: F2 is the mirror toggle. Both come from the key filter above, never from ink.
   React.useEffect(() => {
-    const onNewline = () => { store.cont.push(input); setInput(''); touch(); };
+    const onNewline = () => { store.cont.push(input); setInput(''); store.input = ''; touch(); };
     const onMirror = () => toggleMirror();
     const onPassthrough = () => onF3();
     keys.on('newline', onNewline);
@@ -756,8 +821,17 @@ function App() {
     };
   }, [input]);
 
+  // v0.16: the bar counts down live, so anything pending needs a tick of its own.
+  React.useEffect(() => {
+    if (!s.pending.length) return;
+    const t = setInterval(touch, 1000);
+    t.unref?.();
+    return () => clearInterval(t);
+  }, [s.pending.length]);
+
   const onChange = (v) => {
     setInput(v);
+    store.input = v; // the single-key rule needs this outside React (see barKeys)
     const now = Date.now();
     if (v && now - lastTypingSent > 1500) { lastTypingSent = now; sendMsg({ t: 'typing' }); }
   };
@@ -791,6 +865,11 @@ function App() {
         strip.map((e) => h(Entry, { key: `strip-${e.key}`, e: { ...e, gap: false } })))
       : null,
     echo ? h(Box, null, h(Text, { color: C.dim, wrap: 'truncate' }, `❯ ${echo.text.split('\n')[0]} · sent`)) : null,
+    // v0.16: host-only, and gone while the TUI has the keyboard — a proxied keystroke must
+    // not be able to answer a knock by accident.
+    IS_HOST && !s.passthrough
+      ? h(ApprovalBar, { items: barHidden() ? [] : s.pending, armed: barArmed(), now: Date.now() })
+      : null,
     h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough }),
     s.cont.length && !s.passthrough
       ? h(Box, { flexDirection: 'column' },
@@ -804,7 +883,7 @@ function App() {
         h(Text, { color: C.me }, NAME),
         s.cont.length ? h(Text, { color: C.dim }, ' …') : null,
         h(Text, { color: C.accent }, ' ❯ '),
-        h(TextInput, { value: input, onChange, onSubmit: (v) => { setInput(''); submit(v); } })));
+        h(TextInput, { value: input, onChange, onSubmit: (v) => { setInput(''); store.input = ''; submit(v); } })));
 }
 
 // Ctrl-C in the terminal is ink's own (exitOnCtrlC): it unmounts, waitUntilExit resolves and
