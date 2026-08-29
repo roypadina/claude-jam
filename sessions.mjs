@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// claude-jam session lifecycle: `jam sessions|ls`, `jam end|kill`, `jam clean`. Also the module
+// claude-jam session lifecycle: `claude-jam sessions|ls`, `claude-jam end|kill`, `claude-jam clean`. Also the module
 // host.mjs imports, so the launcher's `[e]nd it` and the exit prompt's `e` go down exactly the
 // same path as the command line — there is one end, not two.
 //
@@ -24,7 +24,7 @@ import readline from 'node:readline';
 import net from 'node:net';
 import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verifyOwned, classifyJam,
   cleanable, resolveTarget, pickNumber, confirmYes, uptimeText, sessionsTable, sessionsJson,
-  // v0.22B: the invite CLI is this file too — it needs exactly what `jam end` needs (find the
+  // v0.22B: the invite CLI is this file too — it needs exactly what `claude-jam end` needs (find the
   // jam, POST to it on loopback with the secret out of its 0700 state dir).
   parseInviteCommand, invitesReport, inviteMintedLines, inviteRecord,
   // v0.24.1: `claude-jam remote <off|tunnel|funnel>` — the same daemon path /menu drives.
@@ -147,7 +147,7 @@ export async function postEnd(port, secret, ms = 3000) {
   } catch (e) { return { ok: false, why: e.message }; }
 }
 
-// v0.22B: `jam invite|invites|invite revoke` asking the daemon to mint, list or revoke. Same
+// v0.22B: `claude-jam invite|invites|invite revoke` asking the daemon to mint, list or revoke. Same
 // gate as POST /end — loopback plus the hook secret, which only a reader of the 0700 state dir
 // has — and the same inviteOp() a `/invite` frame from the client goes through.
 export async function postInvite(port, secret, body, ms = 5000) {
@@ -202,7 +202,7 @@ function relays(dir) {
 // session.json jam wrote. Deliberately NOT a walk over `tmux list-sessions` — the sessions this
 // finds are the ones jam created, and nothing else can appear in the list by accident.
 // ponytail: a jam-owned session whose state dir was deleted by hand is therefore invisible here
-// (and so cannot be `jam end`ed by name — `tmux kill-session` is the manual way out). Enumerate
+// (and so cannot be `claude-jam end`ed by name — `tmux kill-session` is the manual way out). Enumerate
 // the tmux side too if that ever actually happens.
 export async function listRows(tmpdir = os.tmpdir()) {
   let entries = [];
@@ -238,7 +238,7 @@ export async function listRows(tmpdir = os.tmpdir()) {
 }
 
 // ------------------------------------------------------------------ ending one ----
-// Every way of ending a jam — `jam end`, the exit prompt's `e`, `[e]nd it and start fresh`,
+// Every way of ending a jam — `claude-jam end`, the exit prompt's `e`, `[e]nd it and start fresh`,
 // `/end` in the client — arrives here. Two gates around one kill.
 export async function endJam(row, log = console.log) {
   const info = row?.info || row;
@@ -277,14 +277,14 @@ async function askLine(prompt) {
 
 // ------------------------------------------------------------------------ CLI ----
 function usage() {
-  console.error('usage: jam sessions [--json]      list jam\'s own tmux sessions and state dirs\n'
-    + '       jam end [name] [--all]     end one jam (or every one, after confirming)\n'
-    + '       jam clean [--yes]          remove orphan state dirs and nothing else\n'
-    + '       jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]   mint one link\n'
-    + '       jam invites [--json] [--jam NAME]                           list them\n'
-    + '       jam invite revoke <Name|id> [--jam NAME]                    take one back\n'
+  console.error('usage: claude-jam sessions [--json]      list claude-jam\'s own tmux sessions and state dirs\n'
+    + '       claude-jam end [name] [--all]     end one jam (or every one, after confirming)\n'
+    + '       claude-jam clean [--yes]          remove orphan state dirs and nothing else\n'
+    + '       claude-jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]   mint one link\n'
+    + '       claude-jam invites [--json] [--jam NAME]                           list them\n'
+    + '       claude-jam invite revoke <Name|id> [--jam NAME]                    take one back\n'
     + '       claude-jam remote <off|tunnel|funnel> [--jam NAME] [--reissue]\n'
-    + '                                  put a running jam on a public relay, or take it off');
+    + '                                         put a running jam on a public relay, or take it off');
   return 2;
 }
 
@@ -304,7 +304,7 @@ async function cmdEnd(argv) {
   if (argv.includes('--all')) {
     // Even here every row is re-verified by endJam, one exact name at a time.
     const targets = rows.filter((r) => r.name && r.state !== 'foreign');
-    if (!targets.length) { console.log('no jam of jam\'s own is running'); return 0; }
+    if (!targets.length) { console.log('no jam of claude-jam\'s own is running'); return 0; }
     console.log(`this would end ${targets.length} jam(s): ${targets.map((r) => r.name).join(', ')}`);
     if (!confirmYes(argv.includes('--yes') ? 'y' : await askLine('end all of them? [y/N] '))) {
       console.log('nothing ended');
@@ -328,7 +328,7 @@ async function cmdEnd(argv) {
   }
   if (!target.ok) {
     console.error(target.why);
-    if (rows.some(cleanable)) console.error('(orphan state dirs are `jam clean`, not `jam end`)');
+    if (rows.some(cleanable)) console.error('(orphan state dirs are `claude-jam clean`, not `claude-jam end`)');
     return 1;
   }
   const r = await endJam(target.row);
@@ -364,8 +364,8 @@ async function cmdClean(argv) {
   return bad ? 1 : 0;
 }
 
-// v0.22B: `jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]`, `jam invites [--json]`,
-// `jam invite revoke <Name|id>`. Everything the client's `/invite` does, from a shell — one
+// v0.22B: `claude-jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]`, `claude-jam invites [--json]`,
+// `claude-jam invite revoke <Name|id>`. Everything the client's `/invite` does, from a shell — one
 // parser (parseInviteCommand) and one daemon endpoint, so the two surfaces cannot drift.
 async function cmdInvite(argv, forced = null) {
   // `--jam <name>` picks which jam when several are running; it is not part of the invite syntax.
@@ -401,7 +401,7 @@ async function cmdInvite(argv, forced = null) {
       + `${(r.revoked || []).map((h) => `${h.id} (${h.name})`).join(', ')}`);
     return 0;
   }
-  for (const l of inviteMintedLines(r.invite || inviteRecord({ name: v.name }), r.link, r.clientCmd || 'jam join')) {
+  for (const l of inviteMintedLines(r.invite || inviteRecord({ name: v.name }), r.link, r.clientCmd || 'claude-jam join')) {
     console.log(l);
   }
   return 0;

@@ -39,16 +39,16 @@ export function nameTaken(name, taken) {
 
 // ------------------------------------- v0.15: source vs installed client command ----
 
-// What a friend types to run the client: `jam join …` when the daemon itself is running out of
-// a Homebrew install (their `jam join` binary; no `client.mjs` sitting in their cwd), otherwise
+// What a friend types to run the client: `claude-jam join …` when the daemon itself is running out of
+// a Homebrew install (their `claude-jam join` binary; no `client.mjs` sitting in their cwd), otherwise
 // the from-source `node client.mjs …`. `dirname` is the running host/client script's own
 // directory (a Cellar path is the one thing a plain `git clone` can never produce); `env` can
 // force either way — JAM_INSTALLED is for a bin wrapper to set explicitly, since a future
 // formula layout might not put anything under `/Cellar/claude-jam/` at all.
 export function clientCommand(dirname, env = {}) {
-  if (env.JAM_INSTALLED === '1') return 'jam join';
+  if (env.JAM_INSTALLED === '1') return 'claude-jam join';
   if (env.JAM_INSTALLED === '0') return 'node client.mjs';
-  return String(dirname ?? '').includes('/Cellar/claude-jam/') ? 'jam join' : 'node client.mjs';
+  return String(dirname ?? '').includes('/Cellar/claude-jam/') ? 'claude-jam join' : 'node client.mjs';
 }
 
 // The friend-facing invite command. Without a token the guest still needs the address — they
@@ -568,7 +568,7 @@ export const F3_BIND_ARGS = ['bind-key', '-T', 'root', 'F3', 'detach-client'];
 // v0.20-3: the way home, on the session's own status line. The `⚑ N waiting` badge still wins —
 // a pending request is the more urgent thing to say — and `home:false` (an unbound F3, i.e.
 // `--tmux-socket default`) goes back to leaving the status line alone.
-export const STATUS_RIGHT_HOME = 'F3 or Ctrl-b d → back to jam';
+export const STATUS_RIGHT_HOME = 'F3 or Ctrl-b d → back to claude-jam';
 export function statusRightText(pendingCount, { home = true } = {}) {
   return statusRightWaiting(pendingCount) || (home ? STATUS_RIGHT_HOME : null);
 }
@@ -659,7 +659,7 @@ export function normalizeConfigDir(dir, home = os.homedir()) {
 }
 
 // `--config-dir` wins; otherwise inherit the profile the launcher itself was started with,
-// so `CLAUDE_CONFIG_DIR=… jam host` keeps running against that account.
+// so `CLAUDE_CONFIG_DIR=… claude-jam host` keeps running against that account.
 export function resolveConfigDir(flag, env = {}, home = os.homedir()) {
   const raw = flag || env.CLAUDE_CONFIG_DIR;
   return raw ? normalizeConfigDir(raw, home) : null;
@@ -1144,7 +1144,7 @@ export function resumeInstructions(sessionId, file, cwd) {
 // worth trying to keep out of a copy that leaves the host.
 export const TOKEN_BLOCK_RE = /Join token: [^"\n]{0,800}?tell them to ask the host\./g;
 export function stripTokenBlock(text, token = null) {
-  let out = String(text).replace(TOKEN_BLOCK_RE, '[jam join-token block removed on export]');
+  let out = String(text).replace(TOKEN_BLOCK_RE, '[claude-jam join-token block removed on export]');
   if (typeof token === 'string' && token.length >= 8) out = out.split(token).join('[token removed]');
   return out;
 }
@@ -1652,7 +1652,7 @@ export const SESSION_TAG = 'claude-jam'; // what session.json says it is, so a s
 export const SESSION_V = 1;
 
 // `$TMPDIR/claude-jam-<port>` — the state dir the launcher has always used, and now also the
-// namespace `jam sessions` / `jam clean` enumerate. Nothing outside it is ever looked at.
+// namespace `claude-jam sessions` / `claude-jam clean` enumerate. Nothing outside it is ever looked at.
 export function stateDirFor(tmpdir, port) {
   return path.join(String(tmpdir ?? ''), `${STATE_PREFIX}${port}`);
 }
@@ -1669,7 +1669,7 @@ export function portFromStateDir(name) {
 // What the launcher writes into the state dir the moment it creates the session, and what
 // verifyOwned checks a marker against. `state` is in here on purpose: it is what makes the
 // pair self-consistent, so a session.json copied out of a real jam's dir cannot validate in
-// the dir somebody copied it into. `secret` is the daemon's hook secret, which is how `jam end`
+// the dir somebody copied it into. `secret` is the daemon's hook secret, which is how `claude-jam end`
 // authenticates its POST /end — the same loopback+secret gate the knock popup already uses; it
 // lives in a 0700 dir beside token.json, which already holds the join token.
 export function sessionInfo({ tmux, port, viewPort, cwd, sessionId, createdAt, pid, state,
@@ -1678,7 +1678,7 @@ export function sessionInfo({ tmux, port, viewPort, cwd, sessionId, createdAt, p
     jam: SESSION_TAG,
     v: SESSION_V,
     tmux: String(tmux ?? ''),
-    // v0.20: which tmux server this session lives on. `jam sessions|end|clean` enumerate
+    // v0.20: which tmux server this session lives on. `claude-jam sessions|end|clean` enumerate
     // per-socket, so a row that does not name its socket is read as the default one — which is
     // exactly what a session.json written before v0.20 means.
     socket: String(socket || TMUX_DEFAULT_SOCKET),
@@ -1717,10 +1717,10 @@ export function parseSessionJson(text) {
 // carrying its own reason — a refusal is never "probably fine".
 export function verifyOwned(name, marker, session) {
   const n = String(name ?? '');
-  if (!n) return { ok: false, why: 'no session name was given, and jam never guesses one' };
+  if (!n) return { ok: false, why: 'no session name was given, and claude-jam never guesses one' };
   if (!marker) {
-    return { ok: false, why: `tmux session "${n}" carries no ${OWNED_OPTION} marker — jam did not `
-      + 'create it, so jam will not end it' };
+    return { ok: false, why: `tmux session "${n}" carries no ${OWNED_OPTION} marker — claude-jam `
+      + 'did not create it, so claude-jam will not end it' };
   }
   const dir = String(marker);
   if (!path.isAbsolute(dir)) {
@@ -1729,7 +1729,7 @@ export function verifyOwned(name, marker, session) {
   }
   if (!session) {
     return { ok: false, why: `"${n}"'s ${OWNED_OPTION} points at ${dir}, where there is no `
-      + `${SESSION_FILE} jam wrote — that marker was put there by hand, refusing` };
+      + `${SESSION_FILE} claude-jam wrote — that marker was put there by hand, refusing` };
   }
   if (session.state !== dir) {
     return { ok: false, why: `${path.join(dir, SESSION_FILE)} says its state dir is `
@@ -1746,7 +1746,7 @@ export function verifyOwned(name, marker, session) {
 //   live       the tmux session is there, its marker verifies, the daemon answers
 //   no-daemon  session and marker fine, nothing listening — the daemon died under it
 //   orphan     no tmux session and no listener: the state dir is all that is left, and this is
-//              the ONLY state `jam clean` may delete
+//              the ONLY state `claude-jam clean` may delete
 //   no-session no tmux session but something IS on that port — flagged, never cleaned, because
 //              whatever holds the port is not ours to remove
 //   foreign    the tmux session exists and does NOT verify: shown, never touched, ever
@@ -1760,11 +1760,11 @@ export function classifyJam({ tmuxAlive = false, owned = false, portAlive = fals
 // The `!` in the table: anything that is not a healthy live jam wants the host's eye.
 export function jamMark(state) { return state === 'live' ? ' ' : '!'; }
 
-// `jam clean` removes state dirs and nothing else, and only in the one state that means the
+// `claude-jam clean` removes state dirs and nothing else, and only in the one state that means the
 // session behind them is provably gone.
 export function cleanable(row) { return row?.state === 'orphan'; }
 
-// `jam end` with no name. Exactly one jam is unambiguous; several is a numbered picker; none is
+// `claude-jam end` with no name. Exactly one jam is unambiguous; several is a numbered picker; none is
 // an error. A name is matched EXACTLY against jam's own verified rows — no prefix, no case
 // folding, no fnmatch — because this is the input that decides what gets killed. (tmux itself
 // would happily prefix-match `jam` onto `jamtest`, which is exactly the mistake to avoid.)
@@ -1773,16 +1773,16 @@ export function resolveTarget(rows = [], name = null) {
   const asked = name == null || name === '' ? null : String(name);
   if (asked == null) {
     if (!list.length) {
-      return { ok: false, why: 'no jam of jam\'s own is running — `jam sessions` lists what it knows about' };
+      return { ok: false, why: 'no jam of claude-jam\'s own is running — `claude-jam sessions` lists what it knows about' };
     }
     if (list.length === 1) return { ok: true, row: list[0] };
     return { ok: false, why: `${list.length} jams are running — name one, or pick a number`, choices: list };
   }
   const hit = list.find((r) => r.name === asked);
   if (hit) return { ok: true, row: hit };
-  return { ok: false, choices: list, why: `no jam-owned tmux session is called "${asked}" — `
-    + (list.length ? `jam knows about ${list.map((r) => r.name).filter(Boolean).join(', ')}`
-      : 'jam knows about none right now') };
+  return { ok: false, choices: list, why: `no claude-jam-owned tmux session is called "${asked}" — `
+    + (list.length ? `claude-jam knows about ${list.map((r) => r.name).filter(Boolean).join(', ')}`
+      : 'claude-jam knows about none right now') };
 }
 
 // Answering a numbered picker. 1-based, exact digits only: an out-of-range or non-numeric
@@ -1822,7 +1822,7 @@ export function exitPromptText(guests = 0) {
 }
 
 // The way back in, printed whenever a client leaves a jam running (`k`, `--keep-on-exit`, a
-// non-interactive exit) — one wording, so the launcher and `jam sessions` agree.
+// non-interactive exit) — one wording, so the launcher and `claude-jam sessions` agree.
 export function reattachLines({ tmux = DEFAULT_TMUX, port = 7777, clientCmd = 'node client.mjs', name = 'Host',
   token = null, socket = TMUX_DEFAULT_SOCKET } = {}) {
   return [
@@ -1830,12 +1830,12 @@ export function reattachLines({ tmux = DEFAULT_TMUX, port = 7777, clientCmd = 'n
     `  or:    ${clientCmd} ws://127.0.0.1:${port} --name ${name}${token ? ` --token ${token}` : ''} --host`,
     // v0.20: jam's tmux lives on a socket of its own, so a bare `tmux attach` no longer finds it.
     `raw TUI: ${tmuxAttachLine(socket, tmux, claudeTarget(tmux))}`,
-    `list:    jam sessions`,
-    `stop:    jam end ${tmux}`,
+    `list:    claude-jam sessions`,
+    `stop:    claude-jam end ${tmux}`,
   ];
 }
 
-// v0.18-5: `jam host` when the name it wants is taken. A jam of jam's own gets four ways out;
+// v0.18-5: `claude-jam host` when the name it wants is taken. A jam of jam's own gets four ways out;
 // anything else is refused without being touched.
 export const TAKEN_KEYS = ['a', 'n', 'e', 'c'];
 export function takenPromptText(name, next) {
@@ -1844,9 +1844,9 @@ export function takenPromptText(name, next) {
 }
 
 export function foreignSessionText(name, why = '') {
-  return `tmux session "${name}" already exists and is NOT one of jam's — jam will not touch it.\n`
+  return `tmux session "${name}" already exists and is NOT one of claude-jam's — claude-jam will not touch it.\n`
     + `  ${why || 'no @claude-jam-owned marker'}\n`
-    + `  run this jam under another name:  jam host --tmux ${name}-jam\n`
+    + `  run this jam under another name:  claude-jam host --tmux ${name}-jam\n`
     + `  or look at it yourself:           tmux attach -t ${name}`;
 }
 
@@ -1885,7 +1885,7 @@ export function uptimeText(ms) {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-// v0.18-2: `jam sessions`. Rows are built by sessions.mjs out of jam's own namespace; this only
+// v0.18-2: `claude-jam sessions`. Rows are built by sessions.mjs out of jam's own namespace; this only
 // lays them out. `id` is the first 8 of the claude session id (enough to recognise, short enough
 // to fit), `here` the roster, `urls` which relays are configured — never the URLs themselves,
 // because a join line carries the token.
@@ -1907,7 +1907,7 @@ export function sessionsRow(row = {}, now = 0, i = 0) {
 
 export function sessionsTable(rows = [], now = 0) {
   if (!rows.length) {
-    return 'no jams — `jam host` starts one, and this list only ever shows jam\'s own sessions';
+    return 'no jams — `claude-jam host` starts one, and this list only ever shows claude-jam\'s own sessions';
   }
   const cells = [SESSIONS_COLS, ...rows.map((r, i) => Object.values(sessionsRow(r, now, i)))];
   const w = SESSIONS_COLS.map((_, c) => Math.max(...cells.map((row) => String(row[c] ?? '').length)));
@@ -1917,14 +1917,14 @@ export function sessionsTable(rows = [], now = 0) {
   for (const r of rows) {
     if (r.name && r.state !== 'foreign') notes.push(`  raw TUI: ${tmuxAttachLine(r.socket, r.name, claudeTarget(r.name))}`);
   }
-  if (rows.some((r) => r.state === 'orphan')) notes.push('! orphan = the tmux session is gone; `jam clean` removes those state dirs');
-  if (rows.some((r) => r.state === 'no-daemon')) notes.push('! no-daemon = the session is up but nothing answers on its port; `jam end <name>` clears it');
-  if (rows.some((r) => r.state === 'no-session')) notes.push('! no-session = no tmux session, but something still holds that port — jam leaves it alone');
-  if (rows.some((r) => r.state === 'foreign')) notes.push('! foreign = that name is somebody else\'s tmux session; jam will never touch it');
+  if (rows.some((r) => r.state === 'orphan')) notes.push('! orphan = the tmux session is gone; `claude-jam clean` removes those state dirs');
+  if (rows.some((r) => r.state === 'no-daemon')) notes.push('! no-daemon = the session is up but nothing answers on its port; `claude-jam end <name>` clears it');
+  if (rows.some((r) => r.state === 'no-session')) notes.push('! no-session = no tmux session, but something still holds that port — claude-jam leaves it alone');
+  if (rows.some((r) => r.state === 'foreign')) notes.push('! foreign = that name is somebody else\'s tmux session; claude-jam will never touch it');
   return [...out, ...notes].join('\n');
 }
 
-// `jam sessions --json`: the row as measured, for scripting. Same facts, no layout.
+// `claude-jam sessions --json`: the row as measured, for scripting. Same facts, no layout.
 export function sessionsJson(rows = [], now = 0) {
   return rows.map((r) => ({
     name: r.name ?? null,
@@ -2344,7 +2344,7 @@ HOW A JAM WORKS (the short version; ${manual} arrives in your context with the l
 - PERMISSION prompts (a tool wanting approval) are different, and stay the host's: F3 attaches this
   real terminal to them (F3 again, or Ctrl-b d, comes back). A guest may ASK with \`/answer <n>\`;
   the host approves, and only a digit already visible on your screen is ever typed.
-- If somebody's message never reached you, jam kept it: \`/outbox\` lists what is kept and
+- If somebody's message never reached you, claude-jam kept it: \`/outbox\` lists what is kept and
   \`/retry\` sends the newest again. \`↑\`/\`↓\` recall what they typed. Tell them so if they ask.
 - Any other \`/command\` is one of yours: from the host it is typed straight in, from a guest it
   becomes a request the host approves. \`/exit\`, \`/clear\` and \`/resume\` are never approved for a

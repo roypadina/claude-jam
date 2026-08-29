@@ -41,8 +41,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.24: invite-only, the runtime relay switch, and saying out loud when a relay comes up.
   remoteRows, relaySwitchDecision, relayReadyLine, relayPendingLine, inviteState,
 } from './lib.mjs';
-// The tmux/fs/HTTP half of v0.18, shared with the `jam sessions|end|clean` command line so the
-// launcher's `[e]nd it` and `jam end` are one code path with one set of gates.
+// The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
+// launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
 import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -253,7 +253,7 @@ async function retarget(name) {
   console.log(`starting a second jam as "${name}" on :${port} (view :${opts.viewPort})`);
 }
 
-// v0.18-5: `jam host` when the name it wants is taken, and `jam host --attach`. A jam of jam's
+// v0.18-5: `claude-jam host` when the name it wants is taken, and `claude-jam host --attach`. A jam of jam's
 // own offers four ways out; anything else is refused untouched — that session belongs to
 // somebody, and jam has exactly one thing to say about it.
 async function resolveTargetSession() {
@@ -262,7 +262,7 @@ async function resolveTargetSession() {
   if (opts.attach) {
     if (!taken) {
       console.error(`there is no tmux session called "${opts.tmux}" to attach to.\n`
-        + '  `jam sessions` lists jam\'s own; `jam host` starts one.');
+        + '  `claude-jam sessions` lists claude-jam\'s own; `claude-jam host` starts one.');
       process.exit(1);
     }
     if (!owned.ok) { console.error(foreignSessionText(opts.tmux, owned.why)); process.exit(1); }
@@ -289,8 +289,8 @@ async function resolveTargetSession() {
   // `c`, no answer, or --no-prompt: the pre-v0.18 refusal, with the v0.18 ways out named.
   console.error(`tmux session "${opts.tmux}" is already a jam.\n`
     + `  reopen your client:  claude-jam host --attach${opts.tmux === DEFAULT_TMUX ? '' : ` --tmux ${opts.tmux}`}\n`
-    + `  end it:              jam end ${opts.tmux}\n`
-    + `  a second jam:        jam host --tmux ${next || '<name>'}`);
+    + `  end it:              claude-jam end ${opts.tmux}\n`
+    + `  a second jam:        claude-jam host --tmux ${next || '<name>'}`);
   process.exit(1);
 }
 
@@ -438,7 +438,7 @@ function claimSession() {
     tmux: opts.tmux, port: opts.port, viewPort: opts.viewPort, cwd: opts.cwd,
     sessionId: opts.sessionId, createdAt: Date.now(), pid, state: opts.state,
     socket: SOCKET, // v0.20: which tmux server to look for this session on
-    // How `jam end` authenticates its POST /end: loopback plus this, the same gate the knock
+    // How `claude-jam end` authenticates its POST /end: loopback plus this, the same gate the knock
     // popup already uses. It lives in the 0700 state dir beside token.json.
     secret: opts.hookSecret,
   });
@@ -460,13 +460,13 @@ function guestCount(state) {
   } catch { return 0; }
 }
 
-// v0.18-5: `jam host --attach`, and the `[a]ttach as host` answer. Same client, same trust
+// v0.18-5: `claude-jam host --attach`, and the `[a]ttach as host` answer. Same client, same trust
 // (loopback + `--host`), with the port and the token read out of the state dir instead of out
 // of flags that were meant for a session that already exists.
 async function attachHostClient(info) {
   if (!await daemonHealth(info.port)) {
     console.error(`the tmux session "${info.tmux}" is there, but nothing answers on :${info.port}.\n`
-      + `  \`jam sessions\` shows it as no-daemon; \`jam end ${info.tmux}\` clears it out.`);
+      + `  \`claude-jam sessions\` shows it as no-daemon; \`claude-jam end ${info.tmux}\` clears it out.`);
     process.exit(1);
   }
   console.log(`attaching to jam "${info.tmux}" on :${info.port} — session ${info.sessionId}\n  cwd ${info.cwd}`);
@@ -520,7 +520,7 @@ let sessionCreated = false;
 function must(r) {
   if (r.status !== 0) {
     console.error(`tmux failed: ${r.stderr || r.stdout}`);
-    // Half-built session is useless and blocks the next `jam host`; remove the exact
+    // Half-built session is useless and blocks the next `claude-jam host`; remove the exact
     // session name we created a moment ago, nothing else. `=` so tmux cannot prefix-match
     // its way onto a different session that merely starts the same way.
     if (sessionCreated) tmux('kill-session', '-t', `=${opts.tmux}`);
@@ -1302,7 +1302,7 @@ function daemon() {
   // v0.18-7: the state dir goes with the session, and only with the session — `tmux
   // kill-session` from finishEnd() hangs this window up, so the removal is booked here too.
   // A daemon that merely dies (a SIGTERM of its own) leaves the dir alone on purpose: that is
-  // what lets `jam sessions` say `! no-daemon` and `jam end` finish the job.
+  // what lets `claude-jam sessions` say `! no-daemon` and `claude-jam end` finish the job.
   process.on('exit', () => {
     stopView(); stopTunnels(); stopPopup(); restoreStatusRight();
     if (removeState) removeStateDir(opts.state);
@@ -1313,7 +1313,7 @@ function daemon() {
 }
 
 // ------------------------------------------------------ v0.18: ending the jam ----
-// One teardown, reached from `jam end` (POST /end) and from `/end` in the host client. Order
+// One teardown, reached from `claude-jam end` (POST /end) and from `/end` in the host client. Order
 // matters: everybody is TOLD first — a client that hears `{t:'ending'}` prints one line and
 // exits 0 instead of reconnecting at a daemon that is deliberately going away — then the
 // children we spawned are stopped, then the state dir goes, and only then, marker-verified,
@@ -1344,8 +1344,8 @@ function finishEnd() {
   // once: removing the dir first left nothing to verify against, so the session survived.)
   const v = ownedSession(opts.tmux, SOCKET);
   if (!v.ok) {
-    // The state dir stays. It is what makes this jam visible to `jam sessions` (as no-daemon)
-    // and endable with `jam end`, instead of a tmux session with no explanation attached.
+    // The state dir stays. It is what makes this jam visible to `claude-jam sessions` (as no-daemon)
+    // and endable with `claude-jam end`, instead of a tmux session with no explanation attached.
     console.log(`[end] NOT killing tmux session "${opts.tmux}": ${v.why}`);
     return process.exit(0);
   }
@@ -1434,14 +1434,14 @@ function onRequest(req, res) {
     });
     return;
   }
-  // v0.18-3: `jam end` asking the daemon to end the whole jam. Same guard as /admit — loopback
-  // plus the internal secret, which `jam end` reads out of the 0700 state dir — so a rotated
+  // v0.18-3: `claude-jam end` asking the daemon to end the whole jam. Same guard as /admit — loopback
+  // plus the internal secret, which `claude-jam end` reads out of the 0700 state dir — so a rotated
   // friend token can never reach it and nothing off-box can reach it at all.
   if (req.method === 'POST' && req.url === '/end') {
     if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
     if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
     reply(200, { ok: true }); // answered first: the teardown takes this socket down with it
-    endSession('jam end');
+    endSession('claude-jam end');
     return;
   }
   // v0.22B: `claude-jam invite|invites|invite revoke` from the command line. Same guard as
@@ -2698,7 +2698,7 @@ function findJsonl() {
 // into the ring buffer, which is what `welcome.history` replays to a joiner.
 // It also sets `jsonlPath`/`offset` past what it read, so the tail continues from exactly there
 // and nothing seeded is broadcast a second time. That covers `--resume` (the case this exists
-// for) and the fresh-daemon-on-an-existing-file case (`jam host --session-id` twice) alike.
+// for) and the fresh-daemon-on-an-existing-file case (`claude-jam host --session-id` twice) alike.
 // Only the tail of a very long transcript is read: --replay caps the events anyway, and a
 // 200 MB JSONL must not become 200 MB of string at boot.
 const REPLAY_BYTES = 8 * 1024 * 1024;

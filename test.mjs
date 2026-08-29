@@ -316,19 +316,19 @@ test('buildJoinLine: the address always, the token only when there is one', () =
 });
 
 test('buildJoinLine: an installed clientCmd swaps the prefix, nothing else', () => {
-  assert.equal(buildJoinLine('100.86.8.97', 7777, 'smoketoken', 'jam join'),
-    'jam join ws://100.86.8.97:7777 --name <You> --token smoketoken');
+  assert.equal(buildJoinLine('100.86.8.97', 7777, 'smoketoken', 'claude-jam join'),
+    'claude-jam join ws://100.86.8.97:7777 --name <You> --token smoketoken');
 });
 
 test('clientCommand: Cellar path means Homebrew install, everything else means source', () => {
-  assert.equal(clientCommand('/opt/homebrew/Cellar/claude-jam/0.14.0/libexec'), 'jam join');
-  assert.equal(clientCommand('/usr/local/Cellar/claude-jam/0.14.0/libexec'), 'jam join');
+  assert.equal(clientCommand('/opt/homebrew/Cellar/claude-jam/0.14.0/libexec'), 'claude-jam join');
+  assert.equal(clientCommand('/usr/local/Cellar/claude-jam/0.14.0/libexec'), 'claude-jam join');
   assert.equal(clientCommand('/Users/roy/Code/claude-jam'), 'node client.mjs');
   assert.equal(clientCommand(), 'node client.mjs'); // no dirname at all
 });
 
 test('clientCommand: JAM_INSTALLED overrides the path check either way', () => {
-  assert.equal(clientCommand('/Users/roy/Code/claude-jam', { JAM_INSTALLED: '1' }), 'jam join');
+  assert.equal(clientCommand('/Users/roy/Code/claude-jam', { JAM_INSTALLED: '1' }), 'claude-jam join');
   assert.equal(clientCommand('/opt/homebrew/Cellar/claude-jam/0.14.0/libexec', { JAM_INSTALLED: '0' }),
     'node client.mjs');
 });
@@ -1050,8 +1050,8 @@ test('buildTunnelJoinLine: needs a resolved host, token optional, wss:// and no 
 });
 
 test('buildTunnelJoinLine: an installed clientCmd swaps the prefix, same as buildJoinLine', () => {
-  assert.equal(buildTunnelJoinLine('rand1.trycloudflare.com', 'smoketoken', 'jam join'),
-    'jam join wss://rand1.trycloudflare.com --name <You> --token smoketoken');
+  assert.equal(buildTunnelJoinLine('rand1.trycloudflare.com', 'smoketoken', 'claude-jam join'),
+    'claude-jam join wss://rand1.trycloudflare.com --name <You> --token smoketoken');
 });
 
 test('buildTunnelViewUrl: needs both a resolved host and a key, https:// and no port', () => {
@@ -1108,7 +1108,7 @@ test('stripTokenBlock: our own token block goes, the conversation stays', () => 
   const out = stripTokenBlock(line, 'smoketoken');
   assert.equal(out.includes('smoketoken'), false);
   assert.equal(out.includes('Join token:'), false);
-  assert.match(out, /prelude \[jam join-token block removed on export\]/);
+  assert.match(out, /prelude \[claude-jam join-token block removed on export\]/);
   assert.match(out, /epilogue/);
   // The raw token is scrubbed wherever else it turned up (the agent quoting it back).
   assert.equal(stripTokenBlock('the token is smoketoken, ok?', 'smoketoken'),
@@ -1507,11 +1507,11 @@ test('T4 funnelHost feeds buildTunnelJoinLine/buildTunnelViewUrl unchanged', () 
   // change: its host string is a drop-in for a trycloudflare one.
   const ws = funnelHost('m.t.ts.net.', FUNNEL_PORTS.ws);
   const view = funnelHost('m.t.ts.net.', FUNNEL_PORTS.view);
-  assert.equal(buildTunnelJoinLine(ws, 'smoketoken', 'jam join'),
-    'jam join wss://m.t.ts.net --name <You> --token smoketoken');
+  assert.equal(buildTunnelJoinLine(ws, 'smoketoken', 'claude-jam join'),
+    'claude-jam join wss://m.t.ts.net --name <You> --token smoketoken');
   assert.equal(buildTunnelViewUrl(view, 'smoketoken'), 'https://jam:smoketoken@m.t.ts.net:8443');
   // Knock mode keeps the address, drops only the token — same rule as every other join line.
-  assert.equal(buildTunnelJoinLine(ws, null, 'jam join'), 'jam join wss://m.t.ts.net --name <You>');
+  assert.equal(buildTunnelJoinLine(ws, null, 'claude-jam join'), 'claude-jam join wss://m.t.ts.net --name <You>');
   assert.deepEqual(tunnelJoinLines(buildTunnelJoinLine(ws, 't0kent0ken'), buildTunnelViewUrl(view, 't0kent0ken')),
     ['tunnel invite: node client.mjs wss://m.t.ts.net --name <You> --token t0kent0ken',
       'tunnel view: https://jam:t0kent0ken@m.t.ts.net:8443']);
@@ -1871,7 +1871,7 @@ test('F4 maskSecrets: the five shapes on the deny-list are masked', () => {
 test('F4 maskSecrets: the false-positive corpus comes through untouched', () => {
   const keep = [
     'the token is in the host\'s context, ask them for it',
-    'jam join wss://x.trycloudflare.com --name You --token smoketoken',
+    'claude-jam join wss://x.trycloudflare.com --name You --token smoketoken',
     'PORT=7777',
     'NODE_ENV=production',
     '# TODO: add token refresh',
@@ -2314,7 +2314,7 @@ test('v0.18 REFUSAL: a hand-written marker pointing at a dir jam never wrote', (
   // directory has no session.json of jam's, so there is nothing that says jam built this.
   const v = verifyOwned('decoy', '/tmp/not-a-jam-state-dir', null);
   assert.equal(v.ok, false);
-  assert.match(v.why, /where there is no session\.json jam wrote/);
+  assert.match(v.why, /where there is no session\.json claude-jam wrote/);
   assert.match(v.why, /by hand, refusing/);
 });
 
@@ -2417,13 +2417,13 @@ test('v0.18 resolveTarget: one jam is unambiguous, several is a picker, a name i
   assert.deepEqual(many.choices, [a, b]);
   const none = resolveTarget([]);
   assert.equal(none.ok, false);
-  assert.match(none.why, /no jam of jam's own is running/);
+  assert.match(none.why, /no jam of claude-jam's own is running/);
   // A name is matched exactly: no prefix, no case folding, no pattern.
   assert.deepEqual(resolveTarget([a, b], 'jamtest'), { ok: true, row: b });
   for (const bad of ['jamt', 'JAM', 'jam*', 'jam ', 'jamtest2', 'ja']) {
     const v = resolveTarget([a, b], bad);
     assert.equal(v.ok, false, bad);
-    assert.match(v.why, /no jam-owned tmux session is called/);
+    assert.match(v.why, /no claude-jam-owned tmux session is called/);
   }
 });
 
@@ -2481,7 +2481,7 @@ test('v0.18-1 the exit prompt counts the guests and offers exactly three ways ou
 });
 
 test('v0.18-1 the way back is one wording, and it names the v0.18 commands', () => {
-  const lines = reattachLines({ tmux: 'jamtest', port: 7799, name: 'Roy', token: 'tok', clientCmd: 'jam join' });
+  const lines = reattachLines({ tmux: 'jamtest', port: 7799, name: 'Roy', token: 'tok', clientCmd: 'claude-jam join' });
   const all = lines.join('\n');
   assert.match(all, /jam host --attach --tmux jamtest/);
   assert.match(all, /jam sessions/);
@@ -2499,7 +2499,7 @@ test('v0.18-5 a taken name offers four ways out, and a foreign one offers none',
   for (const k of TAKEN_KEYS) assert.match(p, new RegExp(`\\[${k}\\]`));
   assert.match(p, /\[n\]ew session \(jam-2\)/);
   const f = foreignSessionText('work', 'no @claude-jam-owned marker');
-  assert.match(f, /is NOT one of jam's — jam will not touch it/);
+  assert.match(f, /is NOT one of claude-jam's — claude-jam will not touch it/);
   assert.match(f, /--tmux work-jam/);
   assert.match(f, /tmux attach -t work/);
   // Not one of the four keys is offered for a session jam does not own: there is nothing to
@@ -2774,9 +2774,9 @@ test('v0.22B the listing says state and uses, and never a link or a secret', () 
 test('v0.22B the minted lines are the guest\'s whole command, plus the honest warning', () => {
   const rec = inviteRecord({ name: 'Yossi', secret: SECRET, expires: 4_000_000_000_000 });
   const link = mintLink();
-  const lines = inviteMintedLines(rec, link, 'jam join', 4_000_000_000_000 - 3_600_000);
+  const lines = inviteMintedLines(rec, link, 'claude-jam join', 4_000_000_000_000 - 3_600_000);
   assert.match(lines[0], /invite for Yossi \([0-9a-f]{8}\) — multi-use, 1h 0m left:/);
-  assert.equal(lines[1], `jam join ${link}`, 'one line, selectable as one thing');
+  assert.equal(lines[1], `claude-jam join ${link}`, 'one line, selectable as one thing');
   assert.match(lines[2], /is a password/);
   assert.match(lines[2], /\/invite revoke Yossi/);
 });
@@ -3579,4 +3579,110 @@ test('v0.24.2 the menu runs a bare command with one key, and TYPES one that need
   // A plain word is not a command at all, and must never be "run".
   assert.equal(menuRunsBare('hello'), false);
   assert.equal(menuRunsBare(''), false);
+});
+
+// ================================================ v0.21: one name, and it is claude-jam ====
+// The product is `claude-jam` on every surface a human or an agent reads. `jam` survives only
+// as an installed alias — never as something the tool PRINTS, because a printed `jam host` is
+// what teaches the next person the wrong name. This is a lint over the source, not over one
+// rendered screen, so it catches the string nobody happened to run in a test.
+//
+// It reads string literals only: a comment may still say whatever it likes, and the scanner
+// therefore has to know the difference between a quote in code, a quote in a comment and a
+// quote inside a regex literal (`/[^"\n]/` used to look like the start of a string).
+function jsStringLiterals(src) {
+  const out = [];
+  const s = String(src);
+  let i = 0, line = 1, prev = '';
+  const regexAllowed = () => !/[\w$)\]]$/.test(prev); // else the `/` is a division
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '\n') { line++; i++; continue; }
+    if (c === '/' && s[i + 1] === '/') { while (i < s.length && s[i] !== '\n') i++; continue; }
+    if (c === '/' && s[i + 1] === '*') {
+      i += 2;
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) { if (s[i] === '\n') line++; i++; }
+      i += 2; continue;
+    }
+    if (c === '/' && regexAllowed()) { // a regex literal, character class and all
+      i++;
+      for (let cls = false; i < s.length; i++) {
+        if (s[i] === '\\') { i++; continue; }
+        if (s[i] === '[') cls = true;
+        else if (s[i] === ']') cls = false;
+        else if (s[i] === '/' && !cls) { i++; break; }
+        else if (s[i] === '\n') break;
+      }
+      prev = '/'; continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const q = c, at = line;
+      let buf = '';
+      i++;
+      while (i < s.length) {
+        const d = s[i];
+        if (d === '\\') { buf += s[i + 1] === 'n' ? '\n' : s[i + 1]; i += 2; continue; }
+        if (d === q) { i++; break; }
+        if (d === '\n') line++;
+        // `${…}` is code, not text: skip it and leave a NUL where it stood — a placeholder that
+        // is not a space, so `jam ${BIN} end` cannot read as the command form `jam end`.
+        if (q === '`' && d === '$' && s[i + 1] === '{') {
+          let depth = 1; i += 2; buf += '\u0000';
+          while (i < s.length && depth) {
+            const e = s[i];
+            if (e === '{') depth++;
+            else if (e === '}') depth--;
+            else if (e === '\n') line++;
+            else if (e === '"' || e === "'" || e === '`') {
+              const qq = e; i++;
+              while (i < s.length && s[i] !== qq) { if (s[i] === '\\') i++; if (s[i] === '\n') line++; i++; }
+            }
+            i++;
+          }
+          continue;
+        }
+        buf += d; i++;
+      }
+      out.push({ line: at, text: buf });
+      prev = '"'; continue;
+    }
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return out;
+}
+
+// `jam` immediately followed by one of its own subcommands or a flag: the command form. The
+// NOUN is fine and stays — "this jam is still running" is what the product is called.
+// `claude-jam host` is excluded by the lookbehind, and so is `--jam NAME`.
+const BARE_JAM_COMMAND = /(?<![-\w./])jam[ \t]+(host|join|sessions|ls|end|kill|clean|invite|invites|remote|--?[a-z])/;
+
+test('v0.21 no user-visible string emits a bare `jam ` command form', () => {
+  assert.match('jam host --tmux x', BARE_JAM_COMMAND);      // the scanner is worth nothing
+  assert.match('run `jam sessions` now', BARE_JAM_COMMAND); // if the pattern misses the thing
+  assert.doesNotMatch('claude-jam host', BARE_JAM_COMMAND); // it is looking for
+  assert.doesNotMatch('this jam is still running', BARE_JAM_COMMAND);
+  assert.doesNotMatch('[--jam NAME]', BARE_JAM_COMMAND);
+
+  const read = (f) => fs.readFileSync(new URL(`./${f}`, import.meta.url), 'utf8');
+  // Every module in the repo root, found rather than listed: a file added next year is linted
+  // without anybody remembering to add it here.
+  const modules = fs.readdirSync(new URL('./', import.meta.url))
+    .filter((f) => f.endsWith('.mjs') && f !== 'test.mjs').sort();
+  assert.ok(modules.length >= 8, modules.join(' '));
+  for (const f of modules) {
+    for (const lit of jsStringLiterals(read(f))) {
+      for (const row of lit.text.split('\n')) {
+        assert.doesNotMatch(row, BARE_JAM_COMMAND, `${f}:${lit.line} ${JSON.stringify(row)}`);
+      }
+    }
+  }
+  // The launcher is bash, and everything it says to a human it says with `echo`.
+  for (const row of read('claude-jam').split('\n')) {
+    if (/^\s*echo\b/.test(row)) assert.doesNotMatch(row, BARE_JAM_COMMAND, row);
+  }
+  // …and `jam` itself is the alias, which may only ever hand off to the real thing.
+  const alias = read('jam');
+  assert.match(alias, /exec .*claude-jam.* "\$@"/);
+  assert.doesNotMatch(alias, /^\s*echo\b/m);
 });

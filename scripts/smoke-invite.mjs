@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // v0.22B/C smoke: invite links, and /kick — the twelfth smoke.
 //   S1  READ-ONLY the live `jam` on :7777, if one is running, is invisible to this smoke's
-//       `jam invite` (own TMPDIR, so its state-dir namespace holds only this smoke's). Nothing
+//       `claude-jam invite` (own TMPDIR, so its state-dir namespace holds only this smoke's). Nothing
 //       about it is touched, and no link of ours can name it
-//   1   `jam invite Yossi` on the COMMAND LINE mints a link; `jam invites` lists it and prints
+//   1   `claude-jam invite Yossi` on the COMMAND LINE mints a link; `claude-jam invites` lists it and prints
 //       neither the link nor a secret
 //   2   a guest joining with ONLY the link is admitted, under the name the HOST bound to it,
 //       with no knock and no approval — and the roster line says how they got in
@@ -15,7 +15,7 @@
 //       takes the link with them, so they cannot walk back in
 //   11  the invites survive a daemon restart: the store is reloaded and a live link still works
 //
-// Self-contained: its own $TMPDIR (so `jam invite` cannot even see another jam's state dir), its
+// Self-contained: its own $TMPDIR (so `claude-jam invite` cannot even see another jam's state dir), its
 // own port, its own tmux session named jaminvite*, a fake `claude` that just draws a prompt, and
 // no real ttyd/cloudflared. It kills only the session names it made, one exact name at a time.
 //   usage: node scripts/smoke-invite.mjs
@@ -177,7 +177,7 @@ try {
 
   // ======================================================== minting ====
   let yossi;
-  await step('1 `jam invite Yossi` mints a link from the command line', async () => {
+  await step('1 `claude-jam invite Yossi` mints a link from the command line', async () => {
     yossi = mint('Yossi');
     console.log(`      ${yossi.out.trim().split('\n').slice(0, 2).join('\n      ')}`);
     eq(yossi.name, 'Yossi', 'the link carries the name');
@@ -188,7 +188,7 @@ try {
     if (!/is a password/.test(yossi.out)) throw new Error('the mint did not say the link is a credential');
   });
 
-  await step('1b `jam invites` lists it, and prints neither the link nor the secret', async () => {
+  await step('1b `claude-jam invites` lists it, and prints neither the link nor the secret', async () => {
     const r = jam('invites');
     console.log(`      ${r.out.trim().split('\n').join('\n      ')}`);
     if (r.out.includes(yossi.link.slice(0, 24))) throw new Error('the listing printed the link');
@@ -241,7 +241,7 @@ try {
     // The link is a credential: it must never reach a guest or the shared history.
     if (guest.frames.some((f) => JSON.stringify(f).includes(m.link))) throw new Error('a guest saw a minted link');
     // And it is the same store the command line sees.
-    if (!jam('invites').out.includes(m.invite.id)) throw new Error('`jam invites` does not know about a /invite link');
+    if (!jam('invites').out.includes(m.invite.id)) throw new Error('`claude-jam invites` does not know about a /invite link');
   });
 
   // ======================================================== every refusal ====
