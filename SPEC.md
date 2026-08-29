@@ -1678,3 +1678,35 @@ opt-in (`/peer on`) before they can be dispatched to at all.
    silently.
 6. Docs per the standing rule, plus a wiki page `Peer-Tasks` covering the compliance frame,
    what a guest is agreeing to, and how to say no.
+
+## v0.30 — big pastes must not fail, and a message must never be lost (URGENT, observed live)
+
+Observed 2026-08-29 15:20: a long multi-line message failed with `injection failed: pasted text
+never appeared in the claude pane`, and `Ctrl-U` then wiped it from the input box. Cause: Claude
+Code 2.1.x renders a large paste as `[Pasted text +NN lines]`, so the echo probe — the first ~40
+chars of the payload's first line (`inject()` in host.mjs) — can never match. Recovery was only
+possible because `broadcast()` runs before `enqueueInject()`, i.e. by luck, not design.
+
+1. **Verification accepts every way a landed paste can look.** Success = the probe text appears
+   **OR** a paste placeholder appears (`/\[Pasted text( #\d+)?( \+\d+ lines)?\]/i` — match on the
+   family, not one exact string) **OR** the input area changed from the pre-paste capture (diff
+   the last 3 rows captured immediately before `paste-buffer`). Only if none of the three holds
+   after the poll budget is it a failure. Add a test corpus of real pane captures (plain short
+   text, wrapped long line, placeholder form, empty box) so a future Claude Code rendering change
+   fails a test rather than a user's message.
+2. **Never destroy the payload.** Before pasting, write it to `<state>/outbox/<ts>-<name>.txt`
+   (0600); delete only after verified submission. On failure: keep the file, do NOT press
+   `Ctrl-U` blindly — capture the box first, and only clear if something is actually in it; then
+   tell the sender `couldn't confirm your message reached claude — kept at <path> · /retry to
+   send it again` and broadcast nothing new. `/retry` (host and the original sender) re-sends the
+   newest kept payload; `/outbox` lists what is kept; a verified send prunes it.
+3. **Client-side input history** (missing entirely today, and the reason a lost message hurts):
+   `↑`/`↓` walk your own last 50 submissions (per client, in memory + `~/.config/claude-jam/
+   history` capped at 200 lines, 0600), so anything typed can be recalled and re-sent whatever
+   the daemon did.
+4. **Chunk very large payloads.** Above ~8 KB, split on line boundaries into ≤8 KB pastes into
+   the same input box (paste-buffer per chunk, verify each landed by the rules in 1, Enter only
+   after the last) so a 200 KB brief cannot trip a single-shot placeholder/timeout edge.
+5. Docs: README (a "your message was kept" troubleshooting entry), MANUAL (claude must be able to
+   say where a failed message went), wiki Troubleshooting, CHANGELOG; `/retry`, `/outbox` and the
+   `↑`/`↓` recall go in `/menu` (v0.24 completeness test).
