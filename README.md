@@ -37,8 +37,11 @@ Or from source:
 ```sh
 git clone https://github.com/roypadina/claude-jam
 cd claude-jam && npm install
-./jam host --name You --cwd .
+./claude-jam host --name You --cwd .
 ```
+
+The command is **`claude-jam`**. `jam` is still installed as a deprecated alias of it, so
+anything you already typed keeps working; nothing in this project prints that name.
 
 ## The menu
 
@@ -53,7 +56,7 @@ hiding it. Options that cannot work on this machine are greyed with the reason a
 ↑↓ move · ←→/space change · Enter edits a text field · Esc back
   directory     /Users/roy/Code/some-project
   your name     roy
-  jam name      jam (the tmux session)
+  jam name      claude-jam (the tmux session)
   access         INVITE   invite links only — a knock is refused
 ❯ remote         TUNNEL   cloudflared quick tunnel (new URL on every restart)
                 funnel — unavailable: Funnel is not enabled for this tailnet
@@ -71,29 +74,29 @@ Inside a running jam, **`/menu`** is the live control panel — see [Commands](#
 ## Host quickstart
 
 ```sh
-jam host --name Roy --cwd ~/Code/some-project -- --model sonnet
+claude-jam host --name Roy --cwd ~/Code/some-project -- --model sonnet
 ```
 
-That builds a **detached** tmux session `jam` (two windows: `daemon` log, `claude` the real
-TUI) **on a tmux server of jam's own** — socket `claude-jam-<port>` — and runs your own jam
+That builds a **detached** tmux session `claude-jam` (two windows: `daemon` log, `claude` the real
+TUI) **on a tmux server of claude-jam's own** — socket `claude-jam-<port>` — and runs your own claude-jam
 client full-screen in the terminal you launched from. Nothing is attached to tmux, so the window
-size is jam's to pick and the mirror fills your screen exactly.
+size is claude-jam's to pick and the mirror fills your screen exactly.
 
-Because it is jam's own server, jam can bind a bare **F3** to `detach-client` without touching
+Because it is claude-jam's own server, claude-jam can bind a bare **F3** to `detach-client` without touching
 your tmux config, and it literally cannot see your own sessions. The flip side: reaching the raw
 TUI from another terminal needs the socket —
-`tmux -L claude-jam-7777 attach -t jam:claude`, which `jam sessions` prints for you.
-`--tmux-socket default` puts jam back on your shared server (and then F3-out is not bound).
+`tmux -L claude-jam-7777 attach -t claude-jam:claude`, which `claude-jam sessions` prints for you.
+`--tmux-socket default` puts claude-jam back on your shared server (and then F3-out is not bound).
 
 ```
-┌ your terminal ─────────────────────────────────────────────┐   ┌ tmux session `jam` ──────┐
+┌ your terminal ─────────────────────────────────────────────┐   ┌ tmux session `claude-jam` ──────┐
 │  ▐▛███▛█   Claude Code v2.1.251                            │   │ daemon  (log)            │
 │ ▝▜██████▀  Haiku 4.5                                       │   │ claude  (the real TUI)   │
 │ ❯ [Dana]: rerun the tests                                  │   │                          │
 │ ⏺ All 71 pass.                                             │   │ detached — nothing is    │
 │ ──────────────────────────────────────────────────────     │   │ attached to it           │
 │ ❯                                                          │   └──────────────────────────┘
-│ [Dana]  [humans-only] nice                                 │     tmux attach -t jam
+│ [Dana]  [humans-only] nice                                 │     tmux attach -t claude-jam
 │ ⧉ live TUI                       Dana is typing…           │     for the raw TUI
 │ Roy ❯                                                      │
 └────────────────────────────────────────────────────────────┘
@@ -103,7 +106,7 @@ TUI from another terminal needs the socket —
 Closing your client does not end the jam: you are asked
 `this jam is still running (2 guests connected) — [k]eep it running · [e]nd it · [c]ancel`.
 Keep it and the daemon, the TUI and every guest stay exactly where they were —
-`jam host --attach` reopens your client, `jam sessions` lists what is running, `jam end` stops
+`claude-jam host --attach` reopens your client, `claude-jam sessions` lists what is running, `claude-jam end` stops
 it. See **Session lifecycle** below.
 
 Useful flags: `--port`, `--tmux <name>` (a second jam), `--token <value>`, `--view`,
@@ -112,18 +115,18 @@ Useful flags: `--port`, `--tmux <name>` (a second jam), `--token <value>`, `--vi
 `0` for none), `--config-dir <dir>` (run
 the TUI as another claude profile), `--no-attach`, `--attach`, `--no-prompt`,
 `--keep-on-exit`, `--end-on-exit`, `--no-token-in-context`, `--no-popup`,
-`-- <extra claude args>`. `jam` with no arguments prints the usage line; `MANUAL.md` explains
+`-- <extra claude args>`. `claude-jam` with no arguments prints the usage line; `MANUAL.md` explains
 the ones you will actually reach for.
 
 ## Guest quickstart
 
 ```sh
 # an invite link — the whole command. No name to type, no token, no approval to wait for.
-jam join cjam1_eyJ2IjoxLCJqYW0iOiJhYmMx…
+claude-jam join cjam1_eyJ2IjoxLCJqYW0iOiJhYmMx…
 # knock-only host: no token, you wait to be accepted
-jam join ws://<host-ip>:7777 --name Dana
+claude-jam join ws://<host-ip>:7777 --name Dana
 # host handed you a token: straight in
-jam join ws://<host-ip>:7777 --name Dana --token abc123…
+claude-jam join ws://<host-ip>:7777 --name Dana --token abc123…
 ```
 
 You land on the live TUI — the host's real Claude Code screen, plus the backlog of what
@@ -131,7 +134,7 @@ happened before you arrived (up to `--replay` events, with a
 `── history above · live from here ──` divider under it). A plain line goes to the agent
 as `[Dana]: …`; `/c <text>` is human-only chat; **F2** flips to the transcript; `/files` and
 `/diff` say what the session has changed; `/answer` answers a permission prompt (the host still
-approves); `/help` reprints the onboarding block. Typing `/` raises a dim list of jam's own
+approves); `/help` reprints the onboarding block. Typing `/` raises a dim list of claude-jam's own
 commands. `--basic` swaps ink for a plain readline client (transcript
 only, no live view, no F2/F3, no command list) and is picked automatically when stdin is not a tty.
 
@@ -143,7 +146,7 @@ switchable while the jam runs from `/menu → Access`.
 | mode | how | who decides |
 | --- | --- | --- |
 | **token** | `--token <value>` at startup (8–64 chars of `[A-Za-z0-9_-]`), or `/token set` later. One shared secret; anyone holding it joins immediately | whoever has the string |
-| **invite link** | `jam invite Dana` mints `cjam1_…`, and `jam join <link>` is the guest's entire command — the link carries the addresses, their name and a per-invite secret, so they are admitted with no approval | the host, per person, in advance — and revocably |
+| **invite link** | `claude-jam invite Dana` mints `cjam1_…`, and `claude-jam join <link>` is the guest's entire command — the link carries the addresses, their name and a per-invite secret, so they are admitted with no approval | the host, per person, in advance — and revocably |
 | **knock** | no token at all. The guest connects without one, sees `waiting for host approval…`, the host gets `⚑ Dana wants to join (100.86.8.97)` and answers `/accept Dana` | the host, per person |
 | **invite-only** | `--invite-only`, or `/token invite-only on` later. A knock is refused outright with the reason, so an invite link is the only door — every entry individually revocable, name-bound and expiring | the host, in advance, per link |
 | **tunnel** | `--tunnel` spawns two Cloudflare quick tunnels (needs `cloudflared`) and prints `wss://<words>.trycloudflare.com` join/view URLs — for a friend who is not on your LAN or tailnet | still the token or the knock; the tunnel only moves the bytes |
@@ -161,10 +164,10 @@ refresh, and `/join` prints one dated block instead of another near-identical co
 ### Invite links
 
 ```sh
-jam invite Dana                          # multi-use, 24h — prints the guest's whole command
-jam invite Dana --uses 1 --expires 30m   # one shot, half an hour
-jam invites                              # id, name, state, uses, expiry (never the link again)
-jam invite revoke Dana                   # or revoke <id>
+claude-jam invite Dana                          # multi-use, 24h — prints the guest's whole command
+claude-jam invite Dana --uses 1 --expires 30m   # one shot, half an hour
+claude-jam invites                              # id, name, state, uses, expiry (never the link again)
+claude-jam invite revoke Dana                   # or revoke <id>
 ```
 
 The same three from inside the client: `/invite Dana`, `/invites`, `/invite revoke Dana`
@@ -214,38 +217,38 @@ installed the printed join line already uses the Tailscale IP.
 
 ## Session lifecycle
 
-jam creates the tmux session, so jam cleans it up — no `tmux kill-session` line to remember.
+claude-jam creates the tmux session, so claude-jam cleans it up — no `tmux kill-session` line to remember.
 
 | command | what it does |
 | --- | --- |
-| `jam sessions`, `jam ls` | jam's own sessions: name, port, state, uptime, session id, who is here, which relays are on, cwd. `--json` for scripting. A `!` marks an `orphan` state dir (its tmux session is gone) or a `no-daemon` session (nothing answers on its port) |
-| `jam end [name]`, `jam kill` | end one jam: every client is told and exits 0, the daemon stops its children (ttyd, tunnel, popups), the tmux session is killed and its state dir removed. No name and one jam → that one; several → a numbered picker; `--all` after an explicit confirmation |
-| `jam clean` | remove state dirs whose session is gone, and only those, after listing exactly what will go |
-| `jam host --attach` | reopen your client on a jam that is already running |
+| `claude-jam sessions`, `claude-jam ls` | claude-jam's own sessions: name, port, state, uptime, session id, who is here, which relays are on, cwd. `--json` for scripting. A `!` marks an `orphan` state dir (its tmux session is gone) or a `no-daemon` session (nothing answers on its port) |
+| `claude-jam end [name]`, `claude-jam kill` | end one jam: every client is told and exits 0, the daemon stops its children (ttyd, tunnel, popups), the tmux session is killed and its state dir removed. No name and one jam → that one; several → a numbered picker; `--all` after an explicit confirmation |
+| `claude-jam clean` | remove state dirs whose session is gone, and only those, after listing exactly what will go |
+| `claude-jam host --attach` | reopen your client on a jam that is already running |
 | `/end` (host, in the client) | the same end, from inside, after `really end this jam for everyone? [y/N]` |
 
 Closing the host's client asks `[k]eep it running · [e]nd it · [c]ancel`; `--no-prompt`,
 `--keep-on-exit` and `--end-on-exit` answer it up front, and a stdin that is not a terminal
-counts as **keep**. `jam host` on a name already held by one of jam's own offers
+counts as **keep**. `claude-jam host` on a name already held by one of claude-jam's own offers
 `[a]ttach as host · [n]ew session (jam-2) · [e]nd it and start fresh · [c]ancel`.
 
-**jam only ever ends a tmux session it created.** On creation it stamps
-`@jam-owned <state-dir>` on the session and writes `session.json` into that dir; ending anything
-requires that pair to line up, for the exact name you gave (or picked out of jam's own list).
+**claude-jam only ever ends a tmux session it created.** On creation it stamps
+`@claude-jam-owned <state-dir>` on the session and writes `session.json` into that dir; ending anything
+requires that pair to line up, for the exact name you gave (or picked out of claude-jam's own list).
 There is no name pattern, no filtered sweep over `tmux list-sessions`, no `kill-server`, and
 `--all` re-verifies every session it touches. Your own tmux sessions — and a session carrying a
-hand-written `@jam-owned` marker — are refused, never listed, and never touched; a session
-started before v0.18 has no marker, so it is jam's to leave alone too
+hand-written `@claude-jam-owned` marker — are refused, never listed, and never touched; a session
+started before v0.18 has no marker, so it is claude-jam's to leave alone too
 (`tmux kill-session -t <name>` remains yours to run).
 
-Since v0.20 that is structural as well as checked: jam's sessions live on **its own tmux server**
+Since v0.20 that is structural as well as checked: claude-jam's sessions live on **its own tmux server**
 (socket `claude-jam-<port>`, recorded in `session.json`), so `list-sessions` there cannot return
 one of yours even in principle. The marker check stays anyway, and `killOwned` additionally
 refuses a session whose recorded socket is not the one it was asked about.
 
 ## Commands
 
-jam owns the commands below; **everything else starting with a slash belongs to claude** — from
+claude-jam owns the commands below; **everything else starting with a slash belongs to claude** — from
 the host it is typed into the real TUI verbatim, from a guest it becomes a request the host
 approves.
 
@@ -264,7 +267,7 @@ approves.
 | `/answer`, `/answer <n>` | anyone | show what claude is asking · answer it. **A question** (claude's own `AskUserQuestion`) goes straight through, first answer wins. **A permission** (a tool wanting approval) is offered to the host, who approves before a key is typed |
 | `/answer <q> <n>` | anyone | one question of a multi-question form — only the one on screen |
 | `/answer other <text>` | host | the free-text option. Host-only whatever `--answers` says: arbitrary text into the terminal is raw keyboard access |
-| `/outbox`, `/retry` | anyone | what jam kept when it could not confirm a message landed · send the newest kept one again (yours; the host may send anybody's) |
+| `/outbox`, `/retry` | anyone | what claude-jam kept when it could not confirm a message landed · send the newest kept one again (yours; the host may send anybody's) |
 | `↑` / `↓` | anyone | recall your own last 50 submissions — per client, and they survive a restart |
 | `/join`, `/token new\|set\|off` | host | reprint the invite lines (one dated block, so which one is live is never a guess) · rotate or drop the token |
 | `/token invite-only on\|off` | host | refuse knocks outright, so an invite link is the only door |
@@ -292,7 +295,7 @@ three, and exactly bare — `/cost --json` is an argument this list has not read
 anything else. Their output lands on the shared screen like any other command, so a guest can put
 the host's `/status` panel in front of everybody; that is the whole cost of it.
 
-**A question is not a permission.** jam classifies claude's *current screen* — `question` ·
+**A question is not a permission.** claude-jam classifies claude's *current screen* — `question` ·
 `permission` · `dialog` · nothing — 2.5 times a second, and drives the status row from that, so the
 `⚠` says what is really there and clears itself when the prompt goes. A **question** is a product
 decision, so anyone may `/answer <n>` it: no approval, first answer wins, and the room is told who
@@ -304,7 +307,7 @@ the host takes the keyboard with F3. A guest never gets raw keys, and the free-t
 (`Type something.`) counts as raw keys, so it stays the host's in every mode.
 
 **Your message is never lost.** Every message is written to `<state>/outbox/` (0600) before it is
-pasted and deleted only once the input box is seen to empty. If jam cannot confirm it landed you
+pasted and deleted only once the input box is seen to empty. If claude-jam cannot confirm it landed you
 get `couldn't confirm your message reached claude — kept at <path> · /retry to send it again`,
 nothing is retyped or wiped behind your back, and `/outbox` · `/retry` · `↑`/`↓` are three ways to
 get it back.
@@ -321,14 +324,14 @@ back by tailing `~/.claude/projects/*/<session-id>.jsonl`. Turn boundaries come 
 `Notification` hooks in a generated `settings.json` passed with `--settings`, so nothing global
 is touched.
 
-What jam tells the agent is split by **lifetime**. The durable half — that the session is shared,
+What claude-jam tells the agent is split by **lifetime**. The durable half — that the session is shared,
 that `[Name]:` is who is talking, the two rules that must never decay (never reveal the token or an
 invite link to a bridged participant; never claim to have seen `/c` chat), and a short digest of
 how a jam works — is written to `<state>/system-prompt.txt` and passed as
 `--append-system-prompt-file`, so it survives `/compact` instead of being summarised away on a
 long session. The half that *changes* at runtime — the live roster, the token, the tunnel URLs, the
 whole of `MANUAL.md` — stays in the `SessionStart`/`UserPromptSubmit` hooks, because a system
-prompt is read once at startup and can never be rewritten. jam probes for the flag before using it
+prompt is read once at startup and can never be rewritten. claude-jam probes for the flag before using it
 (it is absent from `claude --help` on 2.1.251 even though it works) and falls back to hooks-only
 with one log line if a build rejects it; `--no-system-prompt` opts out. The live view is `tmux capture-pane -e`, only for clients that
 asked, never stored, at an adaptive cadence: 40 ms while somebody is watching *and* something
@@ -349,7 +352,11 @@ your own name in a message or in `/c` chat. At most one per three seconds. The s
 carries this connection's own round trip, measured by the 30 s heartbeat: a dim `~120ms`, or
 `⚠ stale Ns` once a pong is overdue.
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **265 tests**. Thirteen
+Everything that is only true of one operating system lives in `platform.mjs` — the clipboard,
+the desktop notification, sounds, `$TMPDIR`, `~/.config`, and writing a file only its owner can
+read. It is the only module allowed to spawn a platform binary, and a test says so.
+
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **283 tests**. Thirteen
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
 in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs`, `smoke-perm.mjs`,
 `smoke-lifecycle.mjs`, `smoke-invite.mjs` and `smoke-answer.mjs` bring their own — the last three
@@ -402,7 +409,7 @@ test instead of somebody's message.
 - The frame signal is a poll, not `tmux pipe-pane`: the cadence adapts (40 ms active, 250 ms
   idle) but an active mirror still costs one `capture-pane` per tick.
 - **An invite link is a bearer credential.** It joins as that name with no approval, so whoever
-  holds it is that person as far as jam is concerned — there is no second factor and no device
+  holds it is that person as far as claude-jam is concerned — there is no second factor and no device
   binding. What you get instead is per-person revocation (`/invite revoke`), an expiry, a use
   count and a name binding, which the shared `--token` has none of. Send links privately.
 - A link's addresses are fixed the moment it is minted. A `cloudflared` respawn changes the
@@ -420,7 +427,7 @@ test instead of somebody's message.
   same words away. If a credential must not leak, run knock-only, and mint invite links rather
   than telling the agent a shared token at all.
 - **Export scrubbing is best effort.** A transcript is everything claude saw — file contents,
-  tool output, the whole context. jam strips its own token block and the raw token, nothing
+  tool output, the whole context. claude-jam strips its own token block and the raw token, nothing
   else. Run `/token new` after an export.
 - **Secret masking is best effort too, and is a deny-list, not a scanner.** It knows five
   shapes — AWS key ids, PEM `PRIVATE KEY` blocks, `sk-`/`gh?_`-style tokens, bearer
@@ -464,20 +471,20 @@ test instead of somebody's message.
   `funnel` node attribute in Access Controls), and the macOS App Store build of Tailscale.app
   cannot change funnel config at all — its CLI answers `The Tailscale GUI failed to start …
   (Tailscale.CLIError error 3.)`. Use the standalone build from tailscale.com.
-- **jam's ownership of a session is a marker on disk, not a capability.** `@jam-owned` plus a
+- **claude-claude-jam's ownership of a session is a marker on disk, not a capability.** `@claude-jam-owned` plus a
   matching `session.json` is what authorises an end, so anybody who can already set a tmux
-  option on their own session and write a directory can make jam end *that* session — which
+  option on their own session and write a directory can make claude-jam end *that* session — which
   they could have killed themselves anyway. What the pair rules out is the accident: a name
-  pattern, a session jam did not create, a stale marker, a `session.json` copied in from
+  pattern, a session claude-jam did not create, a stale marker, a `session.json` copied in from
   somewhere else.
-- `jam sessions`/`end`/`clean` enumerate jam's OWN namespace — the `$TMPDIR/claude-jam-<port>`
+- `claude-jam sessions`/`end`/`clean` enumerate claude-jam's OWN namespace — the `$TMPDIR/claude-jam-<port>`
   state dirs — so a jam-owned session whose state dir was deleted by hand is invisible to them
   (and `tmux kill-session` is then the way out). A jam started before v0.18 has neither, and is
   likewise none of their business.
-- `jam clean` decides "the session is gone" from `tmux has-session` plus a TCP probe of that
+- `claude-jam clean` decides "the session is gone" from `tmux has-session` plus a TCP probe of that
   port. A state dir whose port is held by something else is flagged, not deleted.
 - The exit prompt is the launcher's, so it exists only for the host client the launcher spawned.
-  A `jam join --host` client started by hand just closes, and the jam keeps running.
+  A `claude-jam join --host` client started by hand just closes, and the jam keeps running.
 - The live view, tool collapse, F2/F3 and the newline keys are ink-only — `--basic` is a
   transcript-only client.
 - No rate limiting, no web client, one session per host, no Windows.
@@ -490,8 +497,22 @@ phase-2 relay sketch that removes the inbound port.
 | file | what it is |
 | --- | --- |
 | `MANUAL.md` | the manual **claude itself is given** — so a participant can just ask "how does this jam work?" and get an accurate answer |
+| `AGENTS.md` | how an agent works **on** this project: layout, tests, the smokes and their order, the rules that must never be broken |
 | `SPEC.md` | protocol, frames, design decisions, the full ceiling list |
 | `PRIOR-ART.md` | the ~40-project survey the credits below summarize |
+| [wiki](https://github.com/roypadina/claude-jam/wiki) | task-shaped pages: Install, Agent-Install, Hosting, Joining, Remote access, Files, Security, Architecture, Troubleshooting |
+
+## For agents
+
+Point an agent at one of two pages and nothing else:
+
+- **installing and running it** → [wiki: Agent-Install](https://github.com/roypadina/claude-jam/wiki/Agent-Install)
+  — numbered, non-interactive commands, what to verify after each one, what needs a human, what
+  must never be done, and a self-test with its expected output.
+- **working on the code** → [`AGENTS.md`](AGENTS.md) — the same, for changing this repo.
+
+Both say the same two hard rules out loud, because getting them wrong costs somebody else their
+work: never `tmux kill-server`, and never kill a process by name or pattern (`pkill`, `killall`).
 
 ## Prior art & credits
 
