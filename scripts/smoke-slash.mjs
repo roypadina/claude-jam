@@ -7,6 +7,8 @@
 //   a guest's {t:'key'} and {t:'resize'} refused · knock + accept still works
 // v0.17 P1: and the read-only allowlist — /cost runs for a guest with NO host round trip, which
 // is also why the ladder steps below use /release-notes: an allowlisted command never asks.
+// v0.21.1: and the other direction — the host's OWN loopback client is still the host after the
+// loopback gate was narrowed (the flag in the welcome, F3 keys landing, a trusted() report).
 // usage: node scripts/smoke-slash.mjs <ws-url> <token> <tmux-session>
 import { spawnSync } from 'node:child_process';
 
@@ -92,6 +94,45 @@ await step('the pane starts from claude\'s own input row, whatever an earlier sm
   }
   if (!inputRow()) throw new Error(`no input row on the pane:\n${pane().split('\n').slice(-6).join('\n')}`);
   console.log('      claude\'s input row is on screen — nothing modal is up');
+});
+
+// v0.21.1: the host reaches its OWN daemon over 127.0.0.1, and this release narrows the loopback
+// gate — a socket is local only if the address is loopback AND the upgrade carried no proxy
+// header. That is exactly the shape of change that locks the host out of their own jam, or
+// silently demotes them to a guest, and nothing else in this file would notice: the daemon
+// answers a guest's request the same way whether the answerer is host or not. So the three
+// host-only surfaces are asserted here, in one place, directly.
+await step('the host\'s own loopback client is still the HOST — flag, F3 keys, host-only report', async () => {
+  // 1. the grant itself. `session.tmux` is spread into the welcome only for a client the daemon
+  //    accepted as host AND loopback, so its presence IS the flag — and the guest is the control.
+  const hw = host.frames.find((f) => f.t === 'welcome');
+  const gw = guest.frames.find((f) => f.t === 'welcome');
+  eq(hw?.session?.tmux, session, 'the host\'s welcome carries the tmux session');
+  eq(gw?.session?.tmux, undefined, 'a guest\'s welcome must not carry it');
+  eq(typeof hw?.session?.join, 'string', 'the host\'s welcome carries the join line');
+  eq(gw?.session?.join, undefined, 'a guest\'s welcome must not carry the join line');
+
+  // 2. a raw F3 key really reaches the real TUI. The settle step above tolerates zero presses, so
+  //    it can pass without a host key ever landing; this types a mark, reads it back off claude's
+  //    input row, and takes it away again through the same path.
+  const tail = () => pane().split('\n').slice(-6).join('\n');
+  const errors = () => host.frames.filter((f) => f.t === 'error').length;
+  const before = errors();
+  const MARK = 'JAMHOSTKEY';
+  host.send({ t: 'key', b64: Buffer.from(MARK, 'utf8').toString('base64') });
+  await until(`${MARK} on claude's input row`, () => tail().includes(MARK));
+  console.log(`      the host's keystrokes reached the real pane: ${MARK}`);
+  host.send({ t: 'key', b64: Buffer.from('\x7f'.repeat(MARK.length), 'utf8').toString('base64') });
+  await until('the mark typed away again', () => !tail().includes(MARK));
+  eq(errors(), before, 'error frames for the host\'s own keys');
+
+  // 3. a trusted()-gated report — /grants reads standing approvals and changes nothing, so it is
+  //    the cheapest of them to ask twice. The host is answered; the guest is refused.
+  host.send({ t: 'grants' });
+  const g = await host.want('the grants report', (f) => f.t === 'grants' && Array.isArray(f.items));
+  console.log(`      /grants answered for the host: ${g.items.length} standing approval(s)`);
+  guest.send({ t: 'grants' });
+  await guest.want('the guest\'s refusal', (f) => f.t === 'error' && /standing approvals are the host/.test(f.text));
 });
 
 await step('host slash: /cost is typed into the real TUI, everybody is told', async () => {
