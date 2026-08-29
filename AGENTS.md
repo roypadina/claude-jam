@@ -279,3 +279,13 @@ install step, a default — updates in the SAME commit series:
 A doc-drift check belongs in the release step: before tagging, run every command that README,
 the wiki `Install` page and `Agent-Install` claim, and fix what does not run. Stale docs are a
 defect, reported like any other — not a tidy-up for later.
+
+## Searching this repo: macOS `grep` lies about `host.mjs`
+
+BSD `grep` decides `host.mjs` is a **binary** file — it embeds ANSI and box-drawing bytes for the
+mirror — and then reports **no matches** instead of saying so. A search that should have hit
+comes back empty and reads as proof the thing does not exist. This cost a release agent several
+false negatives on 2026-08-29 and nearly got a real, documented flag declared missing.
+
+Use `grep -a` or `rg` on `host.mjs`, `lib.mjs`, the client files and anything in `fixtures/pane/`.
+If a grep comes back empty on a file you expected a hit in, re-run with `-a` before believing it.
