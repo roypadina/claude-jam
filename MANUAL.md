@@ -201,19 +201,76 @@ piece is checked against the count in your own `[Pasted text +N lines]` marker �
 arrives short is a truncation, so the whole message is kept rather than half-sent. A single message
 is capped at 20 000 characters on the wire; over that, ask for a file (`/send`).
 
-## Bells and notifications
+## Bells, sounds and notifications
 
-Two moments ring a participant's terminal bell (`\x07`) and, on macOS, raise a desktop
-notification:
+Four moments interrupt a participant. Each one rings their terminal bell (`\x07`), raises a
+desktop notification on macOS, and — for the three that are about a *person* — plays a sound:
 
-- **You start waiting for a permission answer** — the host's client only, since the host is who can
-  always answer.
-- **Somebody says their name** in a message or in `/c` chat — whole word, case-insensitive,
-  `@Dana` included, and never their own line. So "Dana, can you look?" pings Dana; "bandana" does
-  not.
+| moment | who hears it | sound |
+| --- | --- | --- |
+| **claude starts waiting for a permission answer** | the host (a question rings everybody) | — |
+| **somebody says their name** in a message or in `/c` | that person | — |
+| **somebody knocks** — they are waiting to be let in | the host | `Submarine` — a slow "knock" |
+| **somebody joins on a token or an invite link** — they are already in | the host | `Glass` — one short chime |
+| **somebody nudges you** (`/ping`, below) | the person addressed | `Hero` |
 
-At most one nudge every three seconds, so a burst is one bell. There is no claude-jam setting to turn it
-off — that is the terminal's own bell setting.
+A mention is whole-word and case-insensitive, `@Dana` included, and never their own line: "Dana,
+can you look?" pings Dana; "bandana" does not. **Leaving makes no sound at all** — the roster
+line is enough. An unanswered knock repeats **once** after 30 seconds and then stops; nothing in
+claude-jam ever loops an alarm.
+
+At most one bell or notification every three seconds, so a burst is one interruption. A nudge
+addressed to you is the one thing that always sounds, because being told twice is better than a
+nudge you never heard.
+
+**Turning it off.** Three independent toggles, per client, in `/menu → Notifications`: **sound**,
+**desktop notification**, **terminal bell**. `--no-sound` on `claude-jam host` or
+`claude-jam join` starts silent; `/sound on|off` flips the sound from the keyboard and a bare
+`/sound` reports all three. If someone asks "how do I turn the sounds off", that is the answer —
+and note it silences the **sound only**, so the line and the notification still arrive.
+
+On Linux the sounds go through `paplay` or `aplay` if either is installed, and are silently
+skipped if not. Nothing about a sound is ever fatal.
+
+## Getting somebody's attention (`/ping`, `/nudge`)
+
+A bell only helps a person who is looking at that terminal. A **nudge** is an explicit, addressed
+"look at your screen", and **anyone may send one** — host and guest alike. It is not on the
+approval ladder: getting a colleague to look is not a privilege the host grants.
+
+- **`/ping <Name> [message]`** (or `/nudge`, same command). The person addressed sees a
+  highlighted `👋 Roy is asking for you: <message>` — not a chat line — and their client rings,
+  sounds and notifies according to *their own* toggles.
+- **`/ping all [message]`** nudges everybody else.
+- **A nudge is never secret**: everybody else in the jam sees a dim `* Roy nudged Yossi`. Nobody
+  can be pulled aside without the room knowing.
+- **Never queued.** A nudge at somebody who is not connected is refused there and then —
+  `Yossi is not connected` — because an attention-getter that arrives an hour late is worse than
+  one that never arrives.
+- **Rate-limited**: one per sender per target per 30 seconds (per sender to *everyone* per 60),
+  and a refusal says how long is left.
+- **`/ping <Name> !`** repeats the nudge **once** after a minute, and only if that person still
+  has not become active. Once. Never a loop.
+
+**Who is idle.** Every client reports one number on its heartbeat: whole seconds since *its own*
+human last typed or submitted. Nothing about what they typed is ever reported — there is no key,
+no text and no window title in that path. `/who`, the roster and `/menu → Notifications` show
+`active` / `idle 4m` / `away 20m+`, and the confirmation after a nudge says which state the
+person was in, so nudging is purposeful instead of guesswork. A client too old to report shows
+`idle unknown` rather than being called active.
+
+**Your phone, if you want it (opt-in, and the topic never leaves your machine).** If your own
+`~/.config/claude-jam/config.json` has
+
+```json
+{ "ntfy": { "server": "https://ntfy.sh", "topic": "a-long-random-word-only-you-know" } }
+```
+
+then **your own client** POSTs a nudge addressed to you to that topic. Say this accurately if
+anyone asks: the topic is a bearer secret — anyone who knows it can publish to that phone — so it
+lives only on the recipient's machine, it is posted by the recipient's machine, and it is **never
+sent to the host, never put in an invite link, never in the protocol and never in a log**. The
+`/menu` row says "configured", never *what*. A failed POST is one dim line and nothing else.
 
 ## The menu (`/menu`, and `claude-jam` with no arguments)
 
@@ -224,11 +281,15 @@ Two menus, and neither is a feature of its own — both build the command that a
   (knock / token / invite-only), the remote relay, the browser view and any extra claude args —
   and shows the exact `claude-jam host …` command line **before** it runs it. Options that
   cannot work on this machine are greyed with the reason and the fix. Any argument at all
-  (including `--no-menu`) skips it, and a non-tty prints the usage.
-- **`/menu` inside a client** is the live control panel: People, Invites, Access, Session, and
-  Help & guides. It shows the jam's current state next to each toggle (who is here, what is
+  (including `--no-menu`) skips it, and a non-tty prints the usage — exit 0 for a bare
+  `claude-jam`, which is a question, and exit **2** for `claude-jam join` with no argument,
+  which is a missing argument nothing can ask for.
+- **`/menu` inside a client** is the live control panel: People, Invites, Access, Session,
+  Notifications, and Help & guides. Notifications is a guest's section too — how a client
+  interrupts its own human is nobody else's business. It shows the jam's current state next to each toggle (who is here, what is
   pending, the standing `always` grants, the access mode, the relay and its URL, the replay
-  depth), runs any command with one key, and renders this manual inline. A guest's `/menu` is
+  depth, the upload and export policies and what the session has spent, the three notification
+  tiers), runs any command with one key, and renders this manual inline. A guest's `/menu` is
   the reduced version: exactly what a guest may do, and no host controls.
 
 Every user-visible feature has to appear in `/menu` — that is enforced by a test, not by
@@ -386,6 +447,27 @@ per file:
   refused outright), a collision gets a `-1` suffix, the cap is 20 MB, and one file at a time
   per person. If someone asks why their file "did nothing", it is one of those.
 
+**Why it sometimes does not ask (`--uploads`).** The host chooses, at launch with
+`--uploads ask|auto|off` or at any time from `/menu → Access → Uploads`:
+
+| policy | what happens |
+| --- | --- |
+| `ask` (default) | every transfer goes to the host, exactly as above |
+| `auto` | anyone already admitted — knock-approved, token or invite link — may send with **no prompt**. The transfer is still announced to everybody and still logged; it is just not a question. |
+| `off` | every upload is refused, **including the host's own `/paste`**, and a standing `always` grant does not override it |
+
+**None of the real protections move with the policy.** Under `auto` exactly as under `ask`: the
+basename is sanitized and a traversal name is refused, the 20 MB per-file cap holds, one
+transfer at a time per person, writes go only into `<cwd>/jam-uploads/`, nothing is executed or
+opened, and an announced-vs-actual byte mismatch drops the upload. The policy only decides
+whether the host is *asked*.
+
+**The quota `auto` needs.** An `auto` session may take **40 files or 200 MB**, whichever comes
+first (`--upload-quota 80files` / `--upload-quota 500MB` changes it). After that the policy falls
+back to `ask` and says so once: `upload quota reached — asking again`. The host can reset it from
+`/menu → Access → Upload quota`. So if someone asks "why did it ask me this time when it did not
+last time" — that is the answer, and the menu row shows what the session has spent.
+
 The host's own `/send <path>` is the other direction: it **offers** the file to everyone
 (`⇩ Roy offers notes.md (12 KB) — /get notes.md`), and each guest's `/get <name>` saves it into
 their own `./jam-downloads/`. Nothing is pushed onto anybody. The host's `/paste` still uploads
@@ -404,6 +486,10 @@ writing as we talk.
   to continue the conversation on their own machine: copy it into
   `~/.claude/projects/<their cwd with every non-alphanumeric turned into "-">/<session-id>.jsonl`
   and run `claude --resume <session-id>`.
+- **Export has its own toggle and its own default.** `--export ask|auto|off`, and
+  `/menu → Access → Export the transcript`. It stays `ask` even in a jam whose uploads are
+  `auto`, and the reason is the next bullet: one file is one file, a transcript is the whole
+  conversation. There is no quota on it.
 - **Say this plainly if anyone asks:** the transcript is everything you saw here — file contents
   you read, tool output, your whole context. claude-jam strips its own join-token block from the copy
   (best effort, by regex), but nothing else is filtered. After an export the host should run
@@ -510,6 +596,8 @@ be wrong; and `/join` prints ONE block with the time in its heading, with
 `/send <path>` send a file (host: offer one) · `/paste [caption]` the clipboard's image ·
 `/get [name]` take an offered file · `/export` this session's transcript ·
 `/menu` the control panel: every feature, its state, and one key to run it ·
+`/ping <Name|all> [message]` (alias `/nudge`) get somebody to look at their screen; `!` at the
+end repeats it once after a minute · `/sound [on|off]` this client's own sounds ·
 Shift+Enter, Option+Enter or a trailing `\` for multi-line.
 Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` ·
 `/token invite-only on|off` refuse knocks outright ·
@@ -536,6 +624,12 @@ name; shown in the welcome, in `claude-jam sessions`, in `/menu` and on the netw
 `--no-system-prompt` keep the shared-session contract in the SessionStart hook only (see below) ·
 `--answers host|anyone` who may answer a QUESTION outright (default `anyone`; permissions are
 always the host's) ·
+`--uploads ask|auto|off` whether the host is asked about every file a guest sends (default
+`ask`; `/menu → Access → Uploads` at runtime) · `--upload-quota <n>[MB|files]` how much an
+`auto` session may take before it goes back to asking (default 40 files / 200 MB) ·
+`--export ask|auto|off` the transcript's own toggle, deliberately separate and also `ask` ·
+`--no-sound` start your client silent (`/menu → Notifications` and `/sound on|off` switch it,
+and the notification and bell tiers, at runtime) ·
 `--resume <uuid>`
 continue an existing conversation · `--replay <N>` how many events of an existing transcript a
 joining guest is replayed (default 300, `0` for none) · `--tmux <name>` a second jam · `--view` browser view (needs

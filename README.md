@@ -68,7 +68,9 @@ this runs:
   claude-jam host --cwd /Users/roy/Code/some-project --name roy --invite-only --tunnel
 ```
 
-Any argument at all (including `--no-menu`) skips the menu, and a non-tty prints the usage.
+Any argument at all (including `--no-menu`) skips the menu, and a non-tty prints the usage —
+exit 0 for a bare `claude-jam`, which is a question, and exit **2** for `claude-jam join` with no
+argument, which is a missing argument nothing can ask for.
 Inside a running jam, **`/menu`** is the live control panel — see [Commands](#commands).
 
 ## Host quickstart
@@ -115,7 +117,10 @@ CALLED — default: this directory's name), `--no-announce` (keep it off the loc
 `--tunnel`, `--funnel`, `--resume <session-id>` (continue an existing session),
 `--replay <N>` (how much of an existing transcript a joining guest is shown, default 300 events,
 `0` for none), `--config-dir <dir>` (run
-the TUI as another claude profile), `--no-attach`, `--attach`, `--no-prompt`,
+the TUI as another claude profile), `--uploads ask|auto|off` (whether you are asked about every
+file a guest sends), `--upload-quota <n>[MB|files]`, `--export ask|auto|off` (the transcript's
+own, separate toggle), `--no-sound` (start your client silent),
+`--no-attach`, `--attach`, `--no-prompt`,
 `--keep-on-exit`, `--end-on-exit`, `--no-token-in-context`, `--no-popup`,
 `-- <extra claude args>`. `claude-jam` with no arguments prints the usage line; `MANUAL.md` explains
 the ones you will actually reach for.
@@ -218,6 +223,39 @@ hostname before minting, or they would carry exactly the address they replace). 
 comes up, host clients get `tunnel ready: <the whole join command>` rather than a silent
 refresh, and `/join` prints one dated block instead of another near-identical copy.
 
+### Uploads and the transcript: two policies, two defaults
+
+Every `/send` and `/paste` from a guest hits the approval ladder. That is the default and it is
+unchanged — but a jam where three people are pasting screenshots is a jam where the host does
+nothing but press `a`, so the host can choose once instead of per file:
+
+```sh
+claude-jam host --uploads auto                  # anyone already admitted may send, no prompt
+claude-jam host --uploads auto --upload-quota 500MB
+claude-jam host --uploads off                   # refuse every upload, with a reason
+```
+
+`ask` (default) · `auto` · `off`, and `/menu → Access → Uploads` switches it while the jam runs.
+Under `auto` the transfer is still announced to everybody and still logged — the host sees
+`⇪ Yossi sent screenshot.png (2.1 MB) → jam-uploads/…` — it just is not a question. `off`
+refuses everybody, standing `always` grants and the host's own `/paste` included.
+
+**What never relaxes, in any policy** — these are the actual protections, not the prompt:
+sanitized basename with traversal refused · the 20 MB per-file cap · one transfer in flight per
+client · writes only under `<cwd>/jam-uploads/` · nothing executed, nothing auto-opened · an
+announced-vs-actual byte mismatch drops the upload. `scripts/smoke-nudge.mjs` proves each of
+those still refuses **while the policy is `auto`**.
+
+**The guard `auto` makes necessary:** a session quota of **40 files or 200 MB**, whichever comes
+first. When it is spent the policy falls back to `ask` and says so once —
+`upload quota reached — asking again` — so an `auto` jam cannot quietly fill a disk.
+`--upload-quota <n>[MB|files]` changes it and the menu row resets it.
+
+**Export keeps its own toggle and stays `ask`.** `--export ask|auto|off`, and
+`/menu → Access → Export the transcript`. The defaults differ on purpose: a file is one file,
+and a transcript is the whole conversation — every file claude read, all its tool output, its
+entire context — so handing one over is a bigger decision than accepting a PNG.
+
 ### Invite links
 
 ```sh
@@ -315,7 +353,9 @@ approves.
 | *(plain line)* | anyone | goes to claude as `[Name]: …` — attribution is symmetric, the host is a `[Name]` too |
 | `/c <text>` | anyone | human-only chat; the agent never sees it |
 | `/who`, `/help`, `/quit` | anyone | roster · reprint onboarding · leave (session keeps running) |
-| `/menu` | anyone | the live control panel: People · Invites · Access · Session · Help & guides. Shows the jam's state next to every toggle, runs any command with one key, and renders MANUAL.md inline. A guest's `/menu` lists exactly what a guest may do. **Every feature has to be reachable from it — a unit test fails when one is not** |
+| `/menu` | anyone | the live control panel: People · Invites · Access · Session · Notifications · Help & guides. Shows the jam's state next to every toggle, runs any command with one key, and renders MANUAL.md inline. A guest's `/menu` lists exactly what a guest may do. **Every feature has to be reachable from it — a unit test fails when one is not** |
+| `/ping <Name\|all> [message]` | anyone | *(alias `/nudge`)* get somebody to look at their screen. The person addressed gets a highlighted `👋 Roy is asking for you: …` plus their own bell/sound/notification; **everybody else sees a dim `* Roy nudged Yossi`**, so a nudge is never secret. Refused for somebody who is not connected — never queued. One per sender per target per 30 s. `!` at the end repeats it **once** after a minute if they are still not active |
+| `/sound [on\|off]` | anyone | this client's own sounds. Bare `/sound` reports all three tiers |
 | `/mirror`, **F2** | anyone | swap live TUI ⇄ transcript |
 | **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. **F3 again** (or `Ctrl-b d`) comes back. Host **and** loopback only |
 | `a` `d` `i`/Esc | host | answer the approval bar above the status row — accept · deny · dismiss. Only while the input line is empty |
@@ -337,7 +377,7 @@ approves.
 | `/accept [name]`, `/deny <name>` | host | answer a knock |
 | `/allow-cmd [name] [always]`, `/deny-cmd <name>` | host | answer a guest's claude command |
 | `/allow-perm [name] [always]`, `/deny-perm <name>` | host | answer a guest's permission answer |
-| `/send <path>`, `/paste [caption]` | anyone | guest uploads a file to `<cwd>/jam-uploads/` (host approves); host **offers** one instead |
+| `/send <path>`, `/paste [caption]` | anyone | guest uploads a file to `<cwd>/jam-uploads/` (host approves — or not, under `--uploads auto`); host **offers** one instead |
 | `/get [name]` | guest | save a host offer into `./jam-downloads/` |
 | `/export` | guest | take the session transcript home as `./jam-session-<id>.jsonl`, with the recipe to `claude --resume` it (host approves) |
 | `/allow-export`, `/deny-export`, `/accept-file`, `/deny-file` | host | the other two approval ladders |
@@ -404,22 +444,42 @@ rendered as a real `-`/`+` diff rather than truncated JSON, because its argument
 the diff. And at boot the daemon seeds its 300-event history ring from the transcript already on
 disk, so the first guest to join a `--resume`d session gets the conversation, not a blank room.
 
-Two moments ring your terminal's bell (`\x07`, plus a macOS notification): claude waiting for a
-permission answer — the host's client only, since the host can always answer — and anybody saying
-your own name in a message or in `/c` chat. At most one per three seconds. The status row also
-carries this connection's own round trip, measured by the 30 s heartbeat: a dim `~120ms`, or
-`⚠ stale Ns` once a pong is overdue.
+Four moments interrupt you, each with its own bell (`\x07`), macOS notification and — for the
+three that are about a person — its own **sound**: claude waiting for a permission answer (the
+host's client only, since the host can always answer, though a *question* rings everybody);
+anybody saying your name in a message or in `/c` chat; a **knock** (`Submarine`, a slow low tone,
+repeated once after 30 s if nobody answers, then never again); and a **token or invite arrival**
+(`Glass`, one short chime, nothing owed). A **nudge** addressed to you is `Hero`. Leaving is
+silent on purpose. At most one bell or notification every three seconds.
+
+Three independent toggles per client — sound · desktop notification · terminal bell — in
+`/menu → Notifications`, plus `--no-sound` at launch and `/sound on|off` from the keyboard.
+`--no-sound` silences the **sound** and nothing else. On Linux the sounds go through `paplay`
+or `aplay` if either is there, and are silently skipped if not.
+
+Each client also reports **one number** on its heartbeat: whole seconds since its own human last
+typed or submitted — never a keystroke, never any text. `/who` shows `Roy (active),
+Dana (idle 4m), Yossi (away 20m+)`, and the confirmation after a `/ping` says which state the
+person was in, so nudging is purposeful. Optionally, and only if **you** put an
+`{ "ntfy": { "topic": … } }` block in your own `~/.config/claude-jam/config.json`, **your own
+client** also pushes a nudge addressed to you to your phone — the topic is a bearer secret and it
+never reaches the host, an invite link, the protocol or a log. The status row also carries this
+connection's own round trip, measured by the 30 s heartbeat: a dim `~120ms`, or `⚠ stale Ns` once
+a pong is overdue.
 
 Everything that is only true of one operating system lives in `platform.mjs` — the clipboard,
 the desktop notification, sounds, `$TMPDIR`, `~/.config`, and writing a file only its owner can
 read. It is the only module allowed to spawn a platform binary, and a test says so.
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **283 tests**. Thirteen
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **325 tests**. Fifteen
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
 in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs`, `smoke-perm.mjs`,
-`smoke-lifecycle.mjs`, `smoke-invite.mjs` and `smoke-answer.mjs` bring their own — the last three
-run under a `TMPDIR` of their own and start by proving they will not touch a session they did not
-create).
+`smoke-lifecycle.mjs`, `smoke-invite.mjs`, `smoke-answer.mjs`, `smoke-discover.mjs` and
+`smoke-nudge.mjs` bring their own — most of them run under a `TMPDIR` of their own and start by
+proving they will not touch a session they did not create). `smoke-nudge.mjs` asserts the sounds
+**through the platform seam**, with a stub `afplay` on each client's own `PATH`: a knock and an
+auto-join have to produce two different calls, and only the client a nudge is addressed to may
+produce a third.
 
 `fixtures/pane/` holds thirteen real `tmux capture-pane -p` captures of claude 2.1.251 — the empty
 input box, short text, a wrapped line, a 3-line and an 18-line paste (both collapsed to

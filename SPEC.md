@@ -750,9 +750,9 @@ The public README keeps a short list. This is all of them.
   while claude is still booting still lands.
 
 
-## Running the thirteen end-to-end smokes
+## Running the end-to-end smokes
 
-Thirteen end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
+Fifteen end-to-end smokes; the first fourteen verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
 ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -835,7 +835,32 @@ node scripts/smoke-invite.mjs
 # imitated. Its own $TMPDIR, its own port (7871) and one tmux session, jamanswer, killed by exact
 # name. ~1 min, costs nothing.
 node scripts/smoke-answer.mjs
+
+# v0.25/v0.26/v0.27: the fifteenth smoke. NO arguments, no daemon of yours, no real claude — and
+# a cwd of its own as well as a $TMPDIR of its own, because it writes real uploads and they must
+# land in jam-uploads/ under a directory it made. Its own port (7881) and two tmux sessions,
+# jamnudge and jamnudgeroy, killed by exact name. ~15s, costs nothing.
+#
+# It stubs the platform seam rather than listening: each client gets a directory in FRONT of its
+# PATH holding a shell `afplay` and `osascript` that append to that client's own log. Because
+# platform.mjs spawns those two by name, the stub intercepts the real call — so "a knock and an
+# auto-join are two different sounds" and "only the client a nudge was addressed to was
+# interrupted" are facts on disk instead of inferences. Verified 2026-08-29: all 15 steps pass.
+node scripts/smoke-nudge.mjs
 ```
+
+### What each smoke covers of v0.25/v0.26/v0.27
+
+- `smoke-nudge.mjs` — all three, end to end: Submarine for a knock and Glass for a token join
+  (asserted as two different `afplay` argv through the seam, with a guest hearing neither); a
+  `/ping` round trip where the addressed client gets the 👋 line and Hero, the sender is told it
+  landed and hears nothing, and a bystander sees `Kobi nudged Roy` and hears nothing; the 30 s
+  rate limit with the time left in the refusal; a nudge at somebody not connected refused and
+  routed nowhere; `Idler (away 20m+)` in `/who` and in the nudge confirmation; `--no-sound`,
+  `/sound off` and a real `/menu → Notifications` keypress each silencing one tier and only one;
+  and the whole upload policy — `ask` unchanged, `auto` landing a file with no prompt while
+  traversal names and the 20 MB cap still refuse, the session quota falling back to `ask` and
+  saying so, and `off` refusing the guest and the host alike while `export` stays its own toggle.
 
 ### What each smoke covers of v0.30/v0.31
 
@@ -1657,6 +1682,16 @@ distinguishable sounds so the host knows without looking whether someone needs a
 - Docs: README, MANUAL (so claude can answer "turn off the sounds"), wiki Hosting page,
   CHANGELOG; and the sounds must appear in the `/menu` completeness test (v0.24).
 
+**Shipped 2026-08-29.** All of it, with three notes. (1) The helper is `alert(title, body,
+{event, phone, force})` in each client rather than a `notifySound(kind)` — the sound was never
+the only tier, and one function deciding all of them (through lib's pure `notifyPlan()`) is what
+makes `--no-sound` silence the sound and nothing else. (2) The knock repeat re-reads the daemon's
+own `pending` frame rather than a client-side timer flag, so a knock that was accepted, denied or
+expired in the meantime fires at nobody. (3) `platform.mjs` gained `soundFile(kind)`, which stats
+once per kind and remembers the answer — including a remembered *no*. The Linux `paplay`/`aplay`
+branch is written but marked UNVERIFIED in the source: there is no Linux box here to check it
+against, and the project's rule is to say so rather than to pretend.
+
 ## v0.26 — nudges: any human can get another's attention
 
 Mentions already ring a bell (v0.17 P3), but only if the person is watching that terminal.
@@ -1691,6 +1726,17 @@ that each recipient's own machine decides how to surface.
   Joining/Hosting + Security-Model (the ntfy topic stays local), CHANGELOG; `/ping` and the
   notification toggles appear in `/menu` (v0.24 completeness test covers it).
 
+**Shipped 2026-08-29.** As specified, with two implementation notes worth recording. (1) ONE
+frame goes to everybody (`{t:'nudge', from, to, text}`) rather than a private frame plus a public
+one: the client decides whether it is the addressee, which is the same place the three tiers are
+decided, and it makes "a nudge is never secret" true by construction. It is sent with a new
+`sendAll()` that does **not** write history — an interruption is not something to re-read on
+join. (2) Idle is pushed only when the BUCKET changes (active → idle → away), not on every
+heartbeat, and through the same `sendAll()`; a per-heartbeat roster broadcast would have evicted
+the actual transcript from the replay ring one quiet minute at a time. The daemon never learns
+anything about a phone: `parseJamConfig`/`ntfyRequest` are client-side and a unit test asserts the
+topic appears in nothing but the URL of a request that client makes itself.
+
 ## v0.27 — upload policy: auto-allow files from already-admitted guests
 
 Today every `/send` and `/paste` asks the host (per-person `always` exists but must be granted
@@ -1719,6 +1765,14 @@ one guest at a time). Roy wants a session-level choice.
   same menu section, and the docs say plainly why the two defaults differ.
 - Docs: README, MANUAL (claude should be able to answer "why didn't it ask me this time"), wiki
   Files-and-Export + Security-Model, CHANGELOG; both toggles appear in `/menu` (v0.24 test).
+
+**Shipped 2026-08-29**, exactly as written, plus the one decision the spec left implicit: `off`
+refuses the HOST's own `/paste` too. "Refuse all uploads, regardless of any standing per-person
+grant" reads as a hard stop, a hard stop with an exception is not one, and the refusal names the
+menu row that undoes it — so it is one keypress to reverse and impossible to mistake for a bug.
+The order in `onUpload()` is load-bearing and commented as such: one-in-flight, basename,
+traversal, size cap, and only THEN the policy. The quota is spent where the bytes land rather
+than where they were announced, so a dropped mismatch costs the session nothing.
 
 ## v0.28 — real scrollback (Roy: "I can only see very little")
 
