@@ -268,8 +268,25 @@ export function parseClientLine(line) {
       return validTokenValue(value) ? { kind: 'token', op: 'set', value }
         : { kind: 'error', text: 'token must be 8-64 chars of [A-Za-z0-9_-]' };
     }
-    return { kind: 'error', text: 'usage: /token new | set <value> | off' };
+    // v0.24: invite-only lives on `/token` because it is the same question — how people get in.
+    // One command, one frame, one daemon handler, and the reply is the token frame either way.
+    if (op === 'invite-only') {
+      const on = rest.join(' ').trim().toLowerCase();
+      if (on === 'on' || on === 'off') return { kind: 'token', op: 'invite-only', value: on };
+      return { kind: 'error', text: 'usage: /token invite-only on | off' };
+    }
+    return { kind: 'error', text: 'usage: /token new | set <value> | off | invite-only on|off' };
   }
+  // v0.24.1: go remote, or come back, while the jam runs. Same three words as
+  // `claude-jam remote <off|tunnel|funnel>`, and the same daemon path.
+  if (t === '/remote' || t.startsWith('/remote ')) {
+    const mode = t.slice(7).trim().toLowerCase();
+    if (!mode) return { kind: 'remote', mode: null };
+    return REMOTE_MODES.includes(mode) ? { kind: 'remote', mode }
+      : { kind: 'error', text: `usage: /remote ${REMOTE_MODES.join(' | ')}` };
+  }
+  // v0.24: the live control panel. Everything it does is one of the commands above.
+  if (t === '/menu') return { kind: 'menu' };
   // v0.14: the host's answer to a guest's `/command` request. `always` (last word, with or
   // without a name) grants that guest standing approval for the rest of this jam; no name
   // means the only guest currently waiting.
@@ -396,7 +413,9 @@ export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror',
   // v0.18-4: the host ends the jam for everybody.
   '/end',
   // v0.22B/C: invite links, and removing somebody who is already in.
-  '/invite', '/invites', '/kick'];
+  '/invite', '/invites', '/kick',
+  // v0.24: the live control panel, and the relay switch it drives (also `claude-jam remote`).
+  '/menu', '/remote'];
 
 // Session-lifecycle commands: they end or wipe the conversation for EVERYBODY, so they stay
 // with the host. Hard list, enforced server-side — no guest request, no `/allow-cmd always`
@@ -2751,4 +2770,409 @@ export function resolveAnswerTarget(p = {}, q = null) {
 export function answerLock(state = {}, sig = '', who = '') {
   if (state.sig === sig && state.by) return { ok: false, by: state.by };
   return { ok: true, state: { sig, by: who } };
+}
+
+// ================================================================================
+// v0.22A / v0.24 — the menus.  `claude-jam` with no arguments is a launcher menu,
+// `/menu` in a client is the live control panel, and both are built from THIS file:
+// the argv the launcher will run, the rows a relay switch may offer, and the tree of
+// everything a jam can do.  Nothing here does I/O, so a test can walk the whole
+// product surface — which is exactly what the completeness check (menuGaps) does.
+// ================================================================================
+
+// How people get in.  `invite` is invite-links-only: a knock is refused outright, so a
+// link (or the host minting one) is the ONLY door.
+export const ACCESS_MODES = ['knock', 'token', 'invite'];
+// Where the jam is reachable from.  One at a time — two relays for one port is a
+// startup error, and the runtime switch keeps that rule.
+export const REMOTE_MODES = ['off', 'tunnel', 'funnel'];
+
+export function accessMode(v) { return ACCESS_MODES.includes(String(v ?? '')) ? String(v) : 'knock'; }
+// `none` is accepted as a spelling of `off` — the launcher menu's row used to read that way,
+// and a flag that means the same thing must not be a usage error.
+export function remoteMode(v) {
+  const t = String(v ?? '');
+  if (t === 'none') return 'off';
+  return REMOTE_MODES.includes(t) ? t : 'off';
+}
+
+// A word for a shell.  Single quotes unless there is one inside, in which case the
+// whole thing goes in double quotes — the menu PRINTS the command it is about to run,
+// so a path with a space has to come back as something a human can paste.
+export function shellQuote(word) {
+  const s = String(word ?? '');
+  if (s === '') return "''";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s;
+  return s.includes("'") ? `"${s.replace(/(["\\$`])/g, '\\$1')}"` : `'${s}'`;
+}
+
+export function hostCommandLine(argv = [], bin = 'claude-jam') {
+  return [bin, ...argv].map(shellQuote).join(' ');
+}
+
+// The Host screen's whole output: the argv `claude-jam host` is given, and the exact
+// command line that argv spells.  The menu never runs anything it did not print first,
+// and it never builds a second code path — this is the one place the fields become flags.
+export function hostPlan(form = {}) {
+  const cwd = String(form.cwd ?? '').trim();
+  const name = String(form.name ?? '').trim();
+  const jamName = String(form.jamName ?? '').trim();
+  const access = accessMode(form.access);
+  const token = String(form.token ?? '').trim();
+  const remote = remoteMode(form.remote);
+  const extra = String(form.extra ?? '').trim();
+  if (name && !validName(name)) {
+    return { ok: false, error: 'bad name: 1-24 chars of letters, digits, space, _ or -' };
+  }
+  if (access === 'token' && !validTokenValue(token)) {
+    return { ok: false, error: 'a token is 8-64 chars of [A-Za-z0-9_-] — or pick knock / invite-only' };
+  }
+  if (jamName && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/.test(jamName)) {
+    return { ok: false, error: 'the jam name is a tmux session name: letters, digits, _ . -' };
+  }
+  const argv = ['host'];
+  if (cwd) argv.push('--cwd', cwd);
+  if (name) argv.push('--name', name);
+  if (jamName) argv.push('--tmux', jamName);
+  if (access === 'token') argv.push('--token', token);
+  if (access === 'invite') argv.push('--invite-only');
+  if (remote === 'tunnel') argv.push('--tunnel');
+  if (remote === 'funnel') argv.push('--funnel');
+  if (form.view) argv.push('--view');
+  // Everything after `--` is claude's, verbatim, exactly as it would be typed.
+  if (extra) argv.push('--', ...extra.split(/\s+/));
+  return { ok: true, argv, command: hostCommandLine(argv) };
+}
+
+// The Join screen.  A link carries the address, the name and the secret, so the name and
+// token fields exist only for the other case — a bare ws:// URL.
+export function parseJoinInput(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return { ok: false, kind: 'empty', error: 'paste an invite link (cjam1_…) or a ws:// URL' };
+  if (/^cjam\d/.test(t)) {
+    const d = decodeInvite(t);
+    // An EXPIRED link still has an address and a name in it, so it is still a usable join
+    // (it becomes a knock).  Anything else has nothing to connect to.
+    if (!d.invite) return { ok: false, kind: 'link', error: d.error };
+    return { ok: true, kind: 'link', link: t, name: d.invite.name, warn: d.ok ? '' : d.error };
+  }
+  if (/^wss?:\/\//.test(t)) return { ok: true, kind: 'url', url: t };
+  return { ok: false, kind: 'unknown',
+    error: 'that is neither an invite link (cjam1_…) nor a ws:// URL' };
+}
+
+export function buildJoinArgv(form = {}) {
+  const v = parseJoinInput(form.input);
+  if (!v.ok) return v;
+  if (v.kind === 'link') return { ok: true, argv: ['join', v.link], command: hostCommandLine(['join', v.link]), warn: v.warn };
+  const name = String(form.name ?? '').trim();
+  if (!validName(name)) return { ok: false, error: 'a ws:// URL needs a name: 1-24 chars of letters, digits, space, _ or -' };
+  const token = String(form.token ?? '').trim();
+  if (token && !validTokenValue(token)) return { ok: false, error: 'token must be 8-64 chars of [A-Za-z0-9_-]' };
+  const argv = ['join', v.url, '--name', name, ...(token ? ['--token', token] : [])];
+  return { ok: true, argv, command: hostCommandLine(argv) };
+}
+
+// ------------------------------------------- v0.24.1: the relay rows and the switch ----
+
+// One row per remote mode, each carrying WHY it cannot be picked and the exact fix.  The
+// launcher greys the disabled ones; `/menu → Access → Remote` shows the same reasons inline,
+// so a precondition is never silence.  `funnel` is funnelPrecheck()'s verdict, which already
+// distinguishes "no tailscale CLI" from "Funnel is not enabled for this tailnet".
+export function remoteRows({ cloudflared = false, funnel = null } = {}) {
+  const f = funnel || { ok: false, error: 'Tailscale Funnel was not checked' };
+  return [
+    { value: 'off', label: 'off — LAN / Tailscale addresses only', disabled: false, reason: '' },
+    { value: 'tunnel',
+      label: 'tunnel — cloudflared quick tunnel (new URL on every restart)',
+      disabled: !cloudflared,
+      reason: cloudflared ? '' : 'cloudflared is not on PATH — fix: brew install cloudflared' },
+    { value: 'funnel',
+      label: 'funnel — Tailscale Funnel (same URL across restarts)',
+      disabled: !f.ok,
+      reason: f.ok ? '' : String(f.error || 'Tailscale Funnel is not available') },
+  ];
+}
+
+// What a relay switch actually has to do.  Pure, because the interesting half is the
+// refusals: an unavailable target, an unknown mode, and the no-op that must not tear a
+// working tunnel down and put an identical one back up.
+export function relaySwitchDecision({ from = 'off', to = 'off', rows = null } = {}) {
+  const cur = remoteMode(from);
+  if (!REMOTE_MODES.includes(String(to)) && String(to) !== 'none') {
+    return { ok: false, error: `remote is one of ${REMOTE_MODES.join(' | ')}, not ${JSON.stringify(String(to).slice(0, 20))}` };
+  }
+  const next = remoteMode(to);
+  const row = (rows || []).find((r) => r.value === next);
+  if (row?.disabled) return { ok: false, error: row.reason || `${next} is not available here` };
+  if (cur === next) return { ok: true, action: 'noop', from: cur, to: next };
+  if (next === 'off') return { ok: true, action: 'stop', from: cur, to: next };
+  return { ok: true, action: cur === 'off' ? 'start' : 'switch', from: cur, to: next };
+}
+
+// ---------------------------------------- v0.24b: saying which invite line is current ----
+
+const hhmm = (now) => new Date(now).toTimeString().slice(0, 5);
+
+// v0.24b: `/join` used to APPEND another copy of the invite lines, so a log that had already
+// seen two of them ended up with three near-identical blocks and no way to tell which was
+// live.  One block now: a heading with the time on it, the current lines, and — only when
+// something was printed before — one dim line saying the older ones are stale.
+export function joinBlock(info = {}, { now = Date.now(), hadEarlier = false, width = ONBOARD_W } = {}) {
+  const head = `── invite ${hhmm(now)} ${'─'.repeat(Math.max(3, width - 16))}`;
+  // No address at all is its own answer: `inviteLines` would still return the knock hint, which
+  // reads like a working invite when there is nothing to send anybody.
+  const body = info.join || info.tunnelJoin
+    ? inviteLines(info)
+    : ['nothing to hand out yet — no address resolved'];
+  return [head, ...body, ...(hadEarlier ? ['(earlier invite lines above are stale)'] : [])];
+}
+
+// At boot with --tunnel/--funnel the hostname is ~10s away, so the welcome says what is
+// pending instead of printing a LAN-only line that is about to be wrong.
+export function relayPendingLine(mode) {
+  const m = remoteMode(mode);
+  return m === 'off' ? null : `${m}: starting…`;
+}
+
+// v0.24b: a relay coming up is an EVENT, not a silent state refresh.  One line, the join
+// command already in it, so the host can send it without asking anything else.
+export function relayReadyLine(mode, joinLine, { changed = false } = {}) {
+  const m = remoteMode(mode);
+  if (m === 'off' || !joinLine) return null;
+  return `${m} ${changed ? 'moved' : 'ready'}: ${joinLine}`;
+}
+
+// ------------------------------------------------ v0.24.2: the menu tree ----
+
+// Every jam command, with the one line the menu shows next to it.  This is the list the
+// completeness test walks: a command in JAM_COMMANDS with no entry here is a menu gap, and
+// the test fails rather than letting a feature ship that `/menu` cannot reach.
+export const COMMAND_HELP = {
+  '/c': 'say something to the humans only — claude never sees it',
+  '/who': 'who is in the jam right now',
+  '/help': 'the onboarding block: the keys and the commands you use most',
+  '/menu': 'this panel — every feature, its state, and one key to run it',
+  '/quit': 'leave the jam (the jam keeps running)',
+  '/exit': 'leave the jam (the jam keeps running)',
+  '/mirror': 'flip between the live TUI and the transcript (same as F2)',
+  '/tools': "the last turn's tool calls · /tools on|off to stop collapsing them",
+  '/join': 'print the current invite lines, with the time they were printed',
+  '/accept': 'let a knocking guest in · /accept <name>',
+  '/deny': 'turn a knocking guest away · /deny <name>',
+  '/token': 'the shared token: /token new | set <v> | off | invite-only on|off',
+  '/remote': 'go remote, or come back: /remote off | tunnel | funnel',
+  '/allow-cmd': "run a guest's claude command · add `always` for standing approval",
+  '/deny-cmd': "refuse a guest's claude command",
+  '/export': 'take the session transcript home (a guest asks the host first)',
+  '/allow-export': 'let a guest have the transcript · `always` makes it standing',
+  '/deny-export': 'refuse a guest the transcript',
+  '/send': 'offer a file to the jam · /send <path>',
+  '/paste': "send the clipboard's image · /paste <caption>",
+  '/get': 'take a file somebody offered · /get <name>',
+  '/accept-file': "accept a guest's upload · `always` makes it standing",
+  '/deny-file': "refuse a guest's upload",
+  '/files': 'the files this session has touched, newest first',
+  '/diff': "git's answer about them · /diff <path> for one",
+  '/answer': 'answer what claude is asking · /answer <n> | <q> <n> | other <text>',
+  '/allow-perm': "type a guest's answer into a permission prompt · `always` makes it standing",
+  '/deny-perm': "refuse a guest's answer to a permission prompt",
+  '/outbox': 'messages the daemon kept when it could not confirm they landed',
+  '/retry': 'send the newest kept message again',
+  '/end': 'end the jam for everybody — the daemon, the TUI, the tmux session',
+  '/invite': 'mint a link that joins with no approval · /invite <Name> [--uses N]',
+  '/invites': 'every link: id, name, state, uses, expiry',
+  '/kick': 'remove somebody already in · /kick <name> [revoke]',
+};
+
+// Which of them belong to the host.  Everything else is a guest's, and the guest menu lists
+// EXACTLY that — enforced by the same completeness test, in both directions.
+export const HOST_MENU_ONLY = ['/join', '/accept', '/deny', '/token', '/remote', '/allow-cmd',
+  '/deny-cmd', '/allow-export', '/deny-export', '/accept-file', '/deny-file',
+  '/allow-perm', '/deny-perm', '/end', '/invite', '/invites', '/kick'];
+
+export function guestCommands(commands = JAM_COMMANDS) {
+  return commands.filter((c) => !HOST_MENU_ONLY.includes(c));
+}
+
+// The `claude-jam host` flags the docs promise.  Same rule as the commands: a flag listed
+// here has to be reachable from the menu with a description, so `/menu → Help & guides`
+// is a true index of the launcher rather than a subset somebody remembered.
+export const HOST_FLAGS = [
+  { flag: '--port', arg: 'N', desc: 'which port the daemon listens on (default 7777)' },
+  { flag: '--name', arg: 'X', desc: 'your display name in the jam' },
+  { flag: '--cwd', arg: 'DIR', desc: 'the directory claude runs in' },
+  { flag: '--tmux', arg: 'NAME', desc: "the jam's name — its tmux session, and what `claude-jam end` takes" },
+  { flag: '--token', arg: 'V', desc: 'a shared token: anyone holding it joins with no approval' },
+  { flag: '--invite-only', arg: '', desc: 'no knocking at all — an invite link is the only door' },
+  { flag: '--view', arg: '', desc: 'also serve the real TUI read-only in a browser (ttyd)' },
+  { flag: '--tunnel', arg: '', desc: 'cloudflared quick tunnel — reachable from anywhere, new URL each restart' },
+  { flag: '--funnel', arg: '', desc: 'Tailscale Funnel — reachable from anywhere, stable URL' },
+  { flag: '--config-dir', arg: 'D', desc: 'which claude profile/account the TUI runs as' },
+  { flag: '--tmux-socket', arg: 'default', desc: "put the jam on your own tmux server instead of jam's" },
+  { flag: '--no-system-prompt', arg: '', desc: 'do not append the shared-session contract to claude' },
+  { flag: '--answers', arg: 'host|anyone', desc: 'who may /answer a question claude asks' },
+  { flag: '--replay', arg: 'N', desc: 'how much of the transcript on disk a joining guest is shown' },
+  { flag: '--attach', arg: '', desc: 'reopen your client on a jam that is already running' },
+  { flag: '--no-prompt', arg: '', desc: 'do not ask on exit whether to keep the jam running' },
+  { flag: '--end-on-exit', arg: '', desc: 'end the jam when your client exits' },
+  { flag: '--keep-on-exit', arg: '', desc: 'keep the jam running when your client exits' },
+  { flag: '--no-menu', arg: '', desc: 'skip the launcher menu (any argument already does)' },
+];
+
+// The keyboard, in one place, because it is the half no command list can teach.
+export const KEY_HELP = [
+  { key: 'F2', desc: 'flip between the live TUI and the transcript' },
+  { key: 'F3', desc: 'host: attach the real TUI · F3 again (or Ctrl-b d) comes back' },
+  { key: 'Shift+Enter', desc: 'a newline instead of a send (Alt+Enter and a trailing \\ do the same)' },
+  { key: '↑ / ↓', desc: 'recall what you sent' },
+  { key: 'a / d', desc: 'host: answer the ⚑ approval bar without typing a command' },
+  { key: 'Esc', desc: 'dismiss the approval bar · Esc again re-arms the single keys' },
+  { key: 'Ctrl-C', desc: 'leave the client (the jam keeps running)' },
+];
+
+export const WIKI_PAGES = ['Install', 'Hosting', 'Joining-a-Jam', 'Remote-Access',
+  'Files-and-Export', 'Security-Model', 'Troubleshooting'];
+
+const cmdItem = (c) => ({ id: `cmd${c}`, label: c, desc: COMMAND_HELP[c] || '', covers: [c], run: c });
+
+// The whole control panel as data.  `state` is what the client knows right now, so every
+// toggle can show its own value and the menu doubles as the status page.  Host and guest are
+// one builder: a guest simply gets the sections a guest may act on.
+export function menuTree({ host = true, state = {} } = {}) {
+  const s = state || {};
+  const val = (v) => (v == null || v === '' ? '—' : String(v));
+  const people = (s.roster || []).length;
+  const guestOnly = guestCommands();
+  const sections = [];
+
+  if (host) {
+    sections.push({
+      id: 'people', title: 'People', desc: `who is here, and everything waiting on you (${people} connected)`,
+      items: [
+        { id: 'people.who', label: 'Who is here', desc: COMMAND_HELP['/who'], covers: ['/who'], run: '/who',
+          value: (s.roster || []).join(', ') || '—' },
+        { id: 'people.pending', label: 'Answer what is waiting', covers: ['/accept', '/deny', '/allow-cmd', '/deny-cmd', '/allow-export', '/deny-export', '/accept-file', '/deny-file', '/allow-perm', '/deny-perm'],
+          desc: 'approve or refuse every pending knock, command, upload, export and permission',
+          value: `${(s.pending || []).length} waiting` },
+        { id: 'people.grants', label: 'Standing approvals', covers: [],
+          desc: "every `always` grant a guest holds, listed and individually revocable",
+          value: `${(s.grants || []).length} granted` },
+        { id: 'people.kick', label: 'Remove somebody', desc: COMMAND_HELP['/kick'], covers: ['/kick'], run: '/kick' },
+      ],
+    });
+    sections.push({
+      id: 'invites', title: 'Invites', desc: 'links that join with no approval — each one is a password',
+      items: [
+        { id: 'invites.new', label: 'Create a link', desc: COMMAND_HELP['/invite'], covers: ['/invite'], run: '/invite' },
+        { id: 'invites.list', label: 'List links', desc: COMMAND_HELP['/invites'], covers: ['/invites'], run: '/invites' },
+        { id: 'invites.copy', label: 'Copy the last link', covers: [],
+          desc: 'put the guest command on your clipboard, ready to send privately' },
+        { id: 'invites.revoke', label: 'Revoke a link', covers: [],
+          desc: 'take one back — it can never let anybody in again' },
+        { id: 'invites.reissue', label: 'Re-issue every link', covers: [],
+          desc: 'after a relay change: mint a new link for each live invite and revoke the old one' },
+      ],
+    });
+    sections.push({
+      id: 'access', title: 'Access', desc: 'the doors into this jam, and where it is reachable from',
+      items: [
+        { id: 'access.token', label: 'Shared token', desc: COMMAND_HELP['/token'], covers: ['/token'], run: '/token',
+          value: s.token ? 'set' : 'off (friends knock)' },
+        { id: 'access.inviteonly', label: 'Invite-only', covers: [],
+          desc: 'refuse knocks outright, so an invite link is the only way in',
+          value: s.inviteOnly ? 'on' : 'off' },
+        { id: 'access.view', label: 'Browser view (ttyd)', covers: [],
+          desc: 'serve the real TUI read-only in a browser tab',
+          value: s.view ? val(s.view) : 'off' },
+        { id: 'access.remote', label: 'Remote', desc: COMMAND_HELP['/remote'], covers: ['/remote'], run: '/remote',
+          value: `${remoteMode(s.remote)}${s.tunnelJoin ? ' · up' : (remoteMode(s.remote) === 'off' ? '' : ' · starting…')}` },
+        { id: 'access.join', label: 'Show the invite lines', desc: COMMAND_HELP['/join'], covers: ['/join'], run: '/join' },
+      ],
+    });
+  }
+
+  sections.push({
+    id: 'session', title: 'Session',
+    desc: host ? 'the work itself: what changed, what to take home, and ending it'
+      : 'the work itself: what changed, and what to take home',
+    items: [
+      { id: 'session.files', label: 'Files touched', desc: COMMAND_HELP['/files'], covers: ['/files'], run: '/files' },
+      { id: 'session.diff', label: 'Git diff', desc: COMMAND_HELP['/diff'], covers: ['/diff'], run: '/diff' },
+      { id: 'session.export', label: 'Export the transcript', desc: COMMAND_HELP['/export'], covers: ['/export'], run: '/export' },
+      { id: 'session.send', label: 'Send a file', desc: COMMAND_HELP['/send'], covers: ['/send'], run: '/send' },
+      { id: 'session.paste', label: 'Send the clipboard image', desc: COMMAND_HELP['/paste'], covers: ['/paste'], run: '/paste' },
+      { id: 'session.get', label: 'Take an offered file', desc: COMMAND_HELP['/get'], covers: ['/get'], run: '/get' },
+      { id: 'session.tools', label: 'Tool calls', desc: COMMAND_HELP['/tools'], covers: ['/tools'], run: '/tools' },
+      { id: 'session.answer', label: 'Answer claude', desc: COMMAND_HELP['/answer'], covers: ['/answer'], run: '/answer' },
+      { id: 'session.chat', label: 'Humans-only chat', desc: COMMAND_HELP['/c'], covers: ['/c'], run: '/c' },
+      { id: 'session.mirror', label: 'Live TUI ⇄ transcript', desc: COMMAND_HELP['/mirror'], covers: ['/mirror'], run: '/mirror' },
+      { id: 'session.outbox', label: 'Kept messages', desc: COMMAND_HELP['/outbox'], covers: ['/outbox'], run: '/outbox' },
+      { id: 'session.retry', label: 'Send a kept message again', desc: COMMAND_HELP['/retry'], covers: ['/retry'], run: '/retry' },
+      { id: 'session.replay', label: 'Replay depth', covers: [],
+        desc: 'how much of the transcript a joining guest is shown (--replay)',
+        value: val(s.replay) },
+      { id: 'session.attach', label: 'Attach the real TUI', covers: [],
+        desc: host ? 'F3 hands your keyboard to claude — F3 again comes back' : 'host only: F3 attaches the real TUI' },
+      ...(host ? [{ id: 'session.end', label: 'End the jam', desc: COMMAND_HELP['/end'], covers: ['/end'], run: '/end' }] : []),
+      { id: 'session.leave', label: 'Leave', desc: COMMAND_HELP['/quit'], covers: ['/quit', '/exit'], run: '/quit' },
+    ],
+  });
+
+  sections.push({
+    id: 'help', title: 'Help & guides', desc: 'every command, every key, and the manual claude reads',
+    items: [
+      { id: 'help.manual', label: 'The manual (MANUAL.md)', covers: [],
+        desc: 'the same text claude is given, rendered here — one source for the human and the agent' },
+      { id: 'help.keys', label: 'Keyboard reference', covers: [],
+        desc: KEY_HELP.map((k) => `${k.key} — ${k.desc}`).join(' · ') },
+      { id: 'help.onboard', label: 'Onboarding block', desc: COMMAND_HELP['/help'], covers: ['/help'], run: '/help' },
+      { id: 'help.wiki', label: 'Wiki pages', covers: [],
+        desc: WIKI_PAGES.join(' · ') },
+      { id: 'help.commands', label: 'Every command', covers: [],
+        desc: 'the whole list, with one line each and one key to run it',
+        items: (host ? JAM_COMMANDS : guestOnly).map(cmdItem) },
+      ...(host ? [{ id: 'help.flags', label: 'Host launch flags', covers: [],
+        desc: 'what `claude-jam host` takes, and what each flag does',
+        items: HOST_FLAGS.map((f) => ({ id: `flag${f.flag}`, label: `${f.flag}${f.arg ? ` ${f.arg}` : ''}`,
+          desc: f.desc, covers: [], coversFlag: f.flag })) }] : []),
+    ],
+  });
+
+  return { id: 'menu', title: host ? 'claude-jam — control panel' : 'claude-jam — what you can do', host, sections };
+}
+
+// Every item in the tree, sections and nested lists flattened. One walker, so the completeness
+// check and the renderer agree about what "in the menu" means.
+export function menuItems(tree) {
+  const out = [];
+  const walk = (items) => {
+    for (const it of items || []) { out.push(it); if (it.items) walk(it.items); }
+  };
+  for (const sec of tree?.sections || []) { out.push(sec); walk(sec.items); }
+  return out;
+}
+
+// v0.24.2: completeness, enforced instead of remembered.  Returns what the menu is MISSING —
+// a jam command with no entry (or no description), a documented host flag with no entry, and
+// for a guest, anything listed that a guest may not actually do.  The test asserts this is
+// empty, so adding a command without a menu entry fails the suite rather than shipping.
+export function menuGaps({ host = true, state = {} } = {}) {
+  const tree = menuTree({ host, state });
+  const items = menuItems(tree);
+  const described = new Map();
+  for (const it of items) {
+    for (const c of it.covers || []) {
+      if (String(it.desc || '').trim().length >= 8) described.set(c, it.id);
+    }
+  }
+  const want = host ? JAM_COMMANDS : guestCommands();
+  const commands = want.filter((c) => !described.has(c));
+  const flags = host
+    ? HOST_FLAGS.filter((f) => !items.some((it) => it.coversFlag === f.flag && String(it.desc || '').trim().length >= 8))
+      .map((f) => f.flag)
+    : [];
+  // A guest menu must list EXACTLY what a guest may do: nothing host-only may leak in.
+  const extra = host ? [] : [...described.keys()].filter((c) => HOST_MENU_ONLY.includes(c));
+  return { commands, flags, extra };
 }

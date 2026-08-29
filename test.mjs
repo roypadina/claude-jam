@@ -51,6 +51,11 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   PROMPT_KINDS, classifyPrompt, promptSig, questionBlock, promptStatusText,
   ANSWERS_MODES, answersMode, answerDecision, parseAnswerCommand, ANSWER_USAGE, ANSWER_TEXT_MAX,
   resolveAnswerTarget, answerLock,
+  // v0.22A / v0.24: the launcher menu, the live control panel, and the relay switch.
+  ACCESS_MODES, REMOTE_MODES, accessMode, remoteMode, shellQuote, hostCommandLine, hostPlan,
+  parseJoinInput, buildJoinArgv, remoteRows, relaySwitchDecision, joinBlock, relayPendingLine,
+  relayReadyLine, COMMAND_HELP, HOST_MENU_ONLY, guestCommands, HOST_FLAGS, KEY_HELP, WIKI_PAGES,
+  menuTree, menuItems, menuGaps,
 } from './lib.mjs';
 import fs from 'node:fs';
 
@@ -3339,4 +3344,223 @@ test('v0.31-1 an unreadable picker is treated as a permission, which is the safe
   assert.equal(c.kind, 'permission');
   assert.equal(c.header, 'Some future prompt');
   assert.equal(answerDecision({ kind: c.kind, host: false }), 'ask');
+});
+
+// ============================== v0.22A / v0.24: the menus =======================
+
+test('v0.22A hostPlan builds argv the CLI already understands, and prints it verbatim', () => {
+  const p = hostPlan({ cwd: '/tmp/repo', name: 'Roy', jamName: 'debug', access: 'token',
+    token: 'abcd1234', remote: 'tunnel', view: true, extra: '--model opus' });
+  assert.deepEqual(p.argv, ['host', '--cwd', '/tmp/repo', '--name', 'Roy', '--tmux', 'debug',
+    '--token', 'abcd1234', '--tunnel', '--view', '--', '--model', 'opus']);
+  assert.equal(p.command, 'claude-jam host --cwd /tmp/repo --name Roy --tmux debug '
+    + '--token abcd1234 --tunnel --view -- --model opus');
+  // The defaults produce the shortest true command, not a wall of redundant flags.
+  assert.deepEqual(hostPlan({}).argv, ['host']);
+  assert.equal(hostPlan({}).command, 'claude-jam host');
+  // knock is the default door, so it adds nothing; invite-only and funnel are their own flags.
+  assert.deepEqual(hostPlan({ access: 'knock' }).argv, ['host']);
+  assert.deepEqual(hostPlan({ access: 'invite' }).argv, ['host', '--invite-only']);
+  assert.deepEqual(hostPlan({ remote: 'funnel' }).argv, ['host', '--funnel']);
+});
+
+test('v0.22A hostPlan refuses what the daemon would refuse, before anything is launched', () => {
+  assert.equal(hostPlan({ access: 'token', token: 'short' }).ok, false);
+  assert.match(hostPlan({ access: 'token', token: '' }).error, /8-64 chars/);
+  assert.equal(hostPlan({ name: 'a'.repeat(40) }).ok, false);
+  assert.match(hostPlan({ name: '[Roy]' }).error, /bad name/);
+  assert.equal(hostPlan({ jamName: 'has space' }).ok, false);
+  assert.match(hostPlan({ jamName: 'has space' }).error, /tmux session name/);
+  // An unknown mode is normalised, never passed through as a flag of its own.
+  assert.deepEqual(hostPlan({ access: 'nonsense', remote: 'nonsense' }).argv, ['host']);
+  assert.equal(accessMode('invite'), 'invite');
+  assert.equal(accessMode('nope'), 'knock');
+  assert.equal(remoteMode('funnel'), 'funnel');
+  assert.equal(remoteMode(null), 'off');
+  assert.deepEqual(ACCESS_MODES, ['knock', 'token', 'invite']);
+  assert.deepEqual(REMOTE_MODES, ['off', 'tunnel', 'funnel']);
+  assert.equal(remoteMode('none'), 'off'); // `none` is a spelling of `off`, not an error
+});
+
+test('v0.22A a printed command survives a path with a space, a quote and a dollar', () => {
+  assert.equal(shellQuote('plain'), 'plain');
+  assert.equal(shellQuote('/tmp/my repo'), "'/tmp/my repo'");
+  assert.equal(shellQuote("it's"), '"it\'s"');
+  assert.equal(shellQuote('a$b'), "'a$b'");
+  assert.equal(shellQuote("x'$y"), '"x\'\\$y"');
+  assert.equal(shellQuote(''), "''");
+  assert.equal(hostCommandLine(['host', '--cwd', '/a b'], 'claude-jam'), "claude-jam host --cwd '/a b'");
+});
+
+test('v0.22A the Join screen tells a link from a URL, and only a URL needs a name', () => {
+  const link = encodeInvite({ jam: 'abcd1234', name: 'Yossi', secret: 'a'.repeat(24),
+    ws: ['wss://x.trycloudflare.com'], expires: Date.now() + 60_000 });
+  const asLink = parseJoinInput(` ${link} `);
+  assert.equal(asLink.kind, 'link');
+  assert.equal(asLink.name, 'Yossi');
+  // A link is the whole command: no --name, no --token, nothing else to type.
+  assert.deepEqual(buildJoinArgv({ input: link }).argv, ['join', link]);
+  const asUrl = buildJoinArgv({ input: 'ws://10.0.0.5:7777', name: 'Dana', token: 'abcd1234' });
+  assert.deepEqual(asUrl.argv, ['join', 'ws://10.0.0.5:7777', '--name', 'Dana', '--token', 'abcd1234']);
+  assert.deepEqual(buildJoinArgv({ input: 'ws://10.0.0.5:7777', name: 'Dana' }).argv,
+    ['join', 'ws://10.0.0.5:7777', '--name', 'Dana']);
+  assert.match(buildJoinArgv({ input: 'ws://x:1' }).error, /needs a name/);
+  assert.match(buildJoinArgv({ input: 'ws://x:1', name: 'D', token: 'no' }).error, /8-64 chars/);
+  assert.match(parseJoinInput('').error, /invite link/);
+  assert.match(parseJoinInput('hello').error, /neither an invite link/);
+  assert.match(parseJoinInput('cjam9_AAAAAAAA').error, /update claude-jam/);
+  // An expired link still joins — as a knock — so it is a warning, not a refusal.
+  const old = encodeInvite({ jam: 'a', name: 'Yossi', secret: 'a'.repeat(24),
+    ws: ['ws://10.0.0.5:7777'], expires: 1000 });
+  const stale = parseJoinInput(old);
+  assert.equal(stale.ok, true);
+  assert.match(stale.warn, /expired/);
+});
+
+test('v0.24.1 remoteRows grey what is missing and say the exact fix', () => {
+  const none = remoteRows({ cloudflared: false, funnel: { ok: false, error: 'Funnel is not enabled for this tailnet' } });
+  assert.deepEqual(none.map((r) => r.value), REMOTE_MODES);
+  assert.equal(none[0].disabled, false);
+  assert.equal(none[1].disabled, true);
+  assert.match(none[1].reason, /brew install cloudflared/);
+  assert.equal(none[2].disabled, true);
+  assert.match(none[2].reason, /not enabled for this tailnet/);
+  const both = remoteRows({ cloudflared: true, funnel: { ok: true, dns: 'x.ts.net' } });
+  assert.deepEqual(both.filter((r) => r.disabled), []);
+  for (const r of both) assert.equal(r.reason, '');
+  // Not asking about Funnel at all is not the same as Funnel being fine.
+  assert.equal(remoteRows({ cloudflared: true })[2].disabled, true);
+});
+
+test('v0.24.1 relaySwitchDecision: a no-op never restarts a working relay, and refusals carry the reason', () => {
+  const rows = remoteRows({ cloudflared: true, funnel: { ok: true } });
+  assert.deepEqual(relaySwitchDecision({ from: 'off', to: 'tunnel', rows }),
+    { ok: true, action: 'start', from: 'off', to: 'tunnel' });
+  assert.equal(relaySwitchDecision({ from: 'tunnel', to: 'funnel', rows }).action, 'switch');
+  assert.equal(relaySwitchDecision({ from: 'tunnel', to: 'off', rows }).action, 'stop');
+  assert.equal(relaySwitchDecision({ from: 'tunnel', to: 'none', rows }).action, 'stop');
+  // The one that matters: switching to what is already running must not drop the URL guests hold.
+  assert.equal(relaySwitchDecision({ from: 'tunnel', to: 'tunnel', rows }).action, 'noop');
+  assert.equal(relaySwitchDecision({ from: 'off', to: 'off', rows }).action, 'noop');
+  const blocked = relaySwitchDecision({ from: 'off', to: 'funnel',
+    rows: remoteRows({ cloudflared: true, funnel: { ok: false, error: 'sandboxed App Store Tailscale' } }) });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error, /sandboxed App Store Tailscale/);
+  assert.equal(relaySwitchDecision({ from: 'off', to: 'ngrok' }).ok, false);
+  assert.match(relaySwitchDecision({ from: 'off', to: 'ngrok' }).error, /off \| tunnel \| funnel/);
+});
+
+test('v0.24b the invite block is one dated block, and says when the older ones are stale', () => {
+  const at = Date.UTC(2026, 7, 29, 12, 35) + new Date(Date.UTC(2026, 7, 29, 12, 35)).getTimezoneOffset() * 60_000;
+  const info = { join: 'claude-jam join ws://10.0.0.5:7777 --name <You>', token: 'abcd1234',
+    tunnelJoin: 'claude-jam join wss://x.trycloudflare.com --name <You> --token abcd1234' };
+  const first = joinBlock(info, { now: at, hadEarlier: false });
+  assert.match(first[0], /^── invite 12:35 ─+$/);
+  // The order every surface prints: the tunnel line first, the LAN one under it.
+  assert.match(first[1], /^tunnel invite: /);
+  assert.match(first[2], /^invite: /);
+  assert.equal(first.some((l) => /stale/.test(l)), false);
+  const again = joinBlock(info, { now: at, hadEarlier: true });
+  assert.match(again.at(-1), /earlier invite lines above are stale/);
+  // Nothing resolved yet is still a block, and still says something true.
+  assert.match(joinBlock({}, { now: at })[1], /nothing to hand out yet/);
+});
+
+test('v0.24b a pending relay says so, and a ready one announces the whole join line', () => {
+  assert.equal(relayPendingLine('off'), null);
+  assert.equal(relayPendingLine('none'), null);
+  assert.equal(relayPendingLine('tunnel'), 'tunnel: starting…');
+  assert.equal(relayPendingLine('funnel'), 'funnel: starting…');
+  assert.equal(relayReadyLine('tunnel', 'claude-jam join wss://x.trycloudflare.com --name <You>'),
+    'tunnel ready: claude-jam join wss://x.trycloudflare.com --name <You>');
+  assert.equal(relayReadyLine('funnel', 'j', { changed: true }), 'funnel moved: j');
+  // No relay, or no line to give out yet, announces nothing at all.
+  assert.equal(relayReadyLine('off', 'j'), null);
+  assert.equal(relayReadyLine('tunnel', null), null);
+});
+
+test('v0.24.2 every jam command and every documented host flag is in the host menu', () => {
+  const gaps = menuGaps({ host: true });
+  assert.deepEqual(gaps.commands, [], `commands with no menu entry: ${gaps.commands.join(', ')}`);
+  assert.deepEqual(gaps.flags, [], `host flags with no menu entry: ${gaps.flags.join(', ')}`);
+  // And the check has teeth: a command nobody described is a gap, which is the failure a new
+  // feature without a menu entry produces.
+  const fake = ['/c', '/totally-new'];
+  const described = new Set(Object.keys(COMMAND_HELP));
+  assert.equal(described.has('/totally-new'), false);
+  assert.deepEqual(guestCommands(fake), fake); // neither is host-only, so both survive the filter
+  const tree = menuTree({ host: true });
+  const covered = new Set(menuItems(tree).flatMap((i) => i.covers || []));
+  for (const c of JAM_COMMANDS) assert.ok(covered.has(c), `${c} is not reachable from the menu`);
+  assert.equal(covered.has('/totally-new'), false);
+});
+
+test('v0.24.2 the guest menu lists exactly what a guest may do', () => {
+  const gaps = menuGaps({ host: false });
+  assert.deepEqual(gaps.commands, []);
+  assert.deepEqual(gaps.extra, [], `host-only commands leaked into the guest menu: ${gaps.extra.join(', ')}`);
+  const covered = new Set(menuItems(menuTree({ host: false })).flatMap((i) => i.covers || []));
+  for (const c of HOST_MENU_ONLY) assert.equal(covered.has(c), false, `${c} is host-only`);
+  for (const c of guestCommands()) assert.ok(covered.has(c), `a guest may run ${c}`);
+  // The spec's list, checked literally: these are the things a guest is promised.
+  for (const c of ['/c', '/mirror', '/tools', '/files', '/diff', '/export', '/send', '/answer', '/help']) {
+    assert.ok(covered.has(c), c);
+  }
+  // A guest has no People / Invites / Access section at all.
+  const secs = menuTree({ host: false }).sections.map((s) => s.id);
+  assert.deepEqual(secs, ['session', 'help']);
+  assert.deepEqual(menuTree({ host: true }).sections.map((s) => s.id),
+    ['people', 'invites', 'access', 'session', 'help']);
+});
+
+test('v0.24.2 the menu doubles as the status page: every toggle shows its own value', () => {
+  const tree = menuTree({ host: true, state: { roster: ['Roy', 'Dana'], pending: [{}],
+    grants: [{}, {}], token: 'abcd1234', inviteOnly: true, view: 'http://jam:k@ip:7778',
+    remote: 'tunnel', tunnelJoin: 'claude-jam join wss://x', replay: 300 } });
+  const by = Object.fromEntries(menuItems(tree).map((i) => [i.id, i]));
+  assert.equal(by['people.who'].value, 'Roy, Dana');
+  assert.equal(by['people.pending'].value, '1 waiting');
+  assert.equal(by['people.grants'].value, '2 granted');
+  assert.equal(by['access.token'].value, 'set');
+  assert.equal(by['access.inviteonly'].value, 'on');
+  assert.match(by['access.view'].value, /^http:/);
+  assert.equal(by['access.remote'].value, 'tunnel · up');
+  assert.equal(by['session.replay'].value, '300');
+  // Nothing set says so plainly rather than showing a blank.
+  const bare = Object.fromEntries(menuItems(menuTree({ host: true })).map((i) => [i.id, i]));
+  assert.equal(bare['access.token'].value, 'off (friends knock)');
+  assert.equal(bare['access.inviteonly'].value, 'off');
+  assert.equal(bare['access.view'].value, 'off');
+  assert.equal(bare['access.remote'].value, 'off');
+  // A relay that was asked for but has not resolved says that, not "up".
+  const pendingRelay = Object.fromEntries(menuItems(menuTree({ host: true, state: { remote: 'funnel' } })).map((i) => [i.id, i]));
+  assert.equal(pendingRelay['access.remote'].value, 'funnel · starting…');
+});
+
+test('v0.24.2 the guides are in the tree, not only in the README', () => {
+  const items = menuItems(menuTree({ host: true }));
+  const by = Object.fromEntries(items.map((i) => [i.id, i]));
+  assert.match(by['help.manual'].desc, /MANUAL|manual|claude is given/);
+  for (const k of KEY_HELP) assert.ok(by['help.keys'].desc.includes(k.key), k.key);
+  for (const p of WIKI_PAGES) assert.ok(by['help.wiki'].desc.includes(p), p);
+  assert.equal(HOST_FLAGS.every((f) => f.desc.length > 8), true);
+  // Every command item can be run with one key, and carries the command it runs.
+  const cmds = items.filter((i) => i.id.startsWith('cmd/'));
+  assert.equal(cmds.length, JAM_COMMANDS.length);
+  for (const c of cmds) { assert.equal(c.run, c.label); assert.ok(c.desc.length > 8, c.label); }
+});
+
+test('v0.24 /remote, /menu and /token invite-only parse as jam commands', () => {
+  assert.deepEqual(parseClientLine('/menu'), { kind: 'menu' });
+  assert.deepEqual(parseClientLine('/remote'), { kind: 'remote', mode: null });
+  for (const m of REMOTE_MODES) assert.deepEqual(parseClientLine(`/remote ${m}`), { kind: 'remote', mode: m });
+  assert.deepEqual(parseClientLine('/remote TUNNEL'), { kind: 'remote', mode: 'tunnel' });
+  assert.equal(parseClientLine('/remote ngrok').kind, 'error');
+  assert.match(parseClientLine('/remote ngrok').text, /off \| tunnel \| funnel/);
+  assert.deepEqual(parseClientLine('/token invite-only on'), { kind: 'token', op: 'invite-only', value: 'on' });
+  assert.deepEqual(parseClientLine('/token invite-only off'), { kind: 'token', op: 'invite-only', value: 'off' });
+  assert.equal(parseClientLine('/token invite-only maybe').kind, 'error');
+  assert.match(parseClientLine('/token nonsense').text, /invite-only on\|off/);
+  // Both are jam's, so they never leak into the pane as one of claude's commands.
+  assert.ok(JAM_COMMANDS.includes('/menu') && JAM_COMMANDS.includes('/remote'));
 });
