@@ -158,7 +158,7 @@ try {
     // offered or minted against — before the launcher runs there is nothing at all.
     const r = jam('invites');
     if (/cjam1_/.test(r.out)) throw new Error(`a foreign jam leaked a link: ${r.out}`);
-    if (!/no jam of jam's own is running/.test(r.out)) throw new Error(`unexpected: ${r.out.trim()}`);
+    if (!/no jam of claude-jam's own is running/.test(r.out)) throw new Error(`unexpected: ${r.out.trim()}`);
     const after = spawnSync(TMUX, ['-L', 'default', 'ls'], { encoding: 'utf8' }).stdout || '';
     eq(after, before, 'the default tmux socket changed');
   });
