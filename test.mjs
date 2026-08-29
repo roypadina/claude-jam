@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
   exportFileName, resumeInstructions, stripTokenBlock, clientCommand,
   // v0.15 adaptive cadence, v0.16 approval bar.
@@ -5705,4 +5705,74 @@ test('v0.29 the host agent is told whose quota it is spending, and that results 
   // The two standing rules are still the two standing rules — the new block is added, not swapped.
   assert.match(on, /NEVER reveal the join token/);
   assert.match(on, /NEVER claim to have seen human-only chat/);
+});
+
+// ---------------------------------------------------------------------------------------
+// Campaign 2026-08-30: a relayed socket is not a local one.
+// ---------------------------------------------------------------------------------------
+
+test('a socket that came through a relay is NOT local, whatever its address says', () => {
+  // The bug this exists for: cloudflared is run as `tunnel --url http://localhost:<port>`, so a
+  // guest on the far side of the public internet reaches the daemon from 127.0.0.1. Measured
+  // 2026-08-30 on cloudflared 2026.8.2 — these are the headers a real relayed upgrade carried.
+  const relayed = {
+    host: 'sally-consideration-visitor-autos.trycloudflare.com',
+    'accept-encoding': 'gzip',
+    'cdn-loop': 'cloudflare; loops=1; subreqs=1',
+    'cf-connecting-ip': '84.229.122.233',
+    'cf-ipcountry': 'IL',
+    'cf-ray': 'a32ea05c0091da54-TLV',
+    'x-forwarded-for': '84.229.122.233',
+    'x-forwarded-proto': 'https',
+  };
+  assert.equal(loopbackAddress('127.0.0.1'), true);
+  assert.equal(proxiedRequest(relayed), true);
+  // The whole finding in one line: the address says local, the connection is not.
+  assert.equal(localSocket('127.0.0.1', relayed), false);
+  assert.equal(localSocket('::ffff:127.0.0.1', relayed), false);
+});
+
+test('a client that really is on this machine is still local', () => {
+  // What a direct loopback upgrade carried on the same day: no forwarded header of any kind.
+  assert.equal(localSocket('127.0.0.1', { host: '127.0.0.1:7777' }), true);
+  assert.equal(localSocket('::1', { host: '[::1]:7777' }), true);
+  assert.equal(localSocket('::ffff:127.0.0.1', {}), true);
+  assert.equal(localSocket('127.0.0.1'), true); // headers default to none
+  assert.equal(proxiedRequest({ host: 'x', 'user-agent': 'y' }), false);
+  assert.equal(proxiedRequest(null), false);
+  assert.equal(proxiedRequest('not an object'), false);
+});
+
+test('an off-box address is not local even with no proxy header at all', () => {
+  // The LAN control, measured the same day: a LAN guest arrives on its own address, so this
+  // half of the gate was never the broken one.
+  assert.equal(localSocket('100.86.8.97', {}), false);
+  assert.equal(loopbackAddress('100.86.8.97'), false);
+  assert.equal(loopbackAddress(''), false);
+  assert.equal(loopbackAddress(null), false);
+});
+
+test('the proxy test fails CLOSED and is case-insensitive', () => {
+  // Node lowercases incoming header names, but nothing in the type says so — and a header a
+  // client sets on a genuinely local connection only ever demotes itself, which costs nothing.
+  for (const h of PROXY_HEADERS) {
+    assert.equal(localSocket('127.0.0.1', { [h]: 'anything' }), false, `${h} should demote`);
+    assert.equal(localSocket('127.0.0.1', { [h.toUpperCase()]: 'anything' }), false, `${h} upper-case`);
+  }
+  // One is enough; it is an OR, not a quorum.
+  assert.equal(localSocket('127.0.0.1', { 'x-real-ip': '1.2.3.4' }), false);
+});
+
+test('classifyHello: host:true is refused once the socket is known to be relayed', () => {
+  const relayed = { 'cf-ray': 'a32ea05c0091da54-TLV', 'x-forwarded-for': '84.229.122.233' };
+  const asHost = { t: 'hello', name: 'Mallory', host: true };
+  // Before the fix this admitted Mallory as the host with no token at all.
+  const bad = classifyHello(asHost, 'sometoken', localSocket('127.0.0.1', relayed));
+  assert.equal(bad.ok, true);
+  assert.equal(bad.host, false);
+  assert.equal(bad.admit, 'knock'); // no token was sent, so they knock like anybody else
+  // The host's own client, on a real local socket, is unchanged.
+  const good = classifyHello(asHost, 'sometoken', localSocket('127.0.0.1', {}));
+  assert.equal(good.host, true);
+  assert.equal(good.admit, 'token');
 });

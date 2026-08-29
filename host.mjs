@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand,
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand,
   // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
   respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
   // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
@@ -2030,7 +2030,7 @@ function onRequest(req, res) {
   // popup.mjs answers a knock through here. Same guard as /hook: loopback plus the
   // internal secret, so a rotated friend token never reaches it.
   if (req.method === 'POST' && req.url === '/admit') {
-    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!isLoopback(req.socket.remoteAddress, req.headers)) return reply(403, { error: 'loopback only' });
     if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e4) req.destroy(); });
@@ -2051,7 +2051,7 @@ function onRequest(req, res) {
   // plus the internal secret, which `claude-jam end` reads out of the 0700 state dir — so a rotated
   // friend token can never reach it and nothing off-box can reach it at all.
   if (req.method === 'POST' && req.url === '/end') {
-    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!isLoopback(req.socket.remoteAddress, req.headers)) return reply(403, { error: 'loopback only' });
     if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
     reply(200, { ok: true }); // answered first: the teardown takes this socket down with it
     endSession('claude-jam end');
@@ -2061,7 +2061,7 @@ function onRequest(req, res) {
   // /admit and /end — loopback plus the internal secret out of the 0700 state dir — and the same
   // inviteOp() the client's frame goes through, so the two surfaces cannot drift.
   if (req.method === 'POST' && req.url === '/invite') {
-    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!isLoopback(req.socket.remoteAddress, req.headers)) return reply(403, { error: 'loopback only' });
     if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e4) req.destroy(); });
@@ -2079,7 +2079,7 @@ function onRequest(req, res) {
   // v0.24.1: `claude-jam remote <off|tunnel|funnel>`. Same guard as /admit, /end and /invite —
   // loopback plus the internal secret out of the 0700 state dir — and the same setRemote().
   if (req.method === 'POST' && req.url === '/remote') {
-    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!isLoopback(req.socket.remoteAddress, req.headers)) return reply(403, { error: 'loopback only' });
     if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e4) req.destroy(); });
@@ -2101,7 +2101,7 @@ function onRequest(req, res) {
   // their wall clock runs out or they go away: that is what makes `dispatch_to_peer` behave like
   // the built-in Agent tool from the host agent's point of view.
   if (req.method === 'POST' && (req.url === '/peer/list' || req.url === '/peer/dispatch')) {
-    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!isLoopback(req.socket.remoteAddress, req.headers)) return reply(403, { error: 'loopback only' });
     if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
@@ -2120,7 +2120,7 @@ function onRequest(req, res) {
   }
   const hook = /^\/hook\/(\w[\w-]*)$/.exec(req.url || '');
   if (req.method === 'POST' && hook) {
-    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!isLoopback(req.socket.remoteAddress, req.headers)) return reply(403, { error: 'loopback only' });
     // Hooks carry the internal secret, so `/token off` and every rotation leave them working.
     if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
     let body = '';
@@ -2156,7 +2156,10 @@ function onHook(event, body) {
   }
 }
 
-const isLoopback = (ip) => { const s = String(ip || ''); return s.endsWith('127.0.0.1') || s === '::1'; };
+// The address alone is not the question — see localSocket() in lib.mjs. Every relay proxies to
+// http://localhost:<port>, so a socket from the public internet arrives here from 127.0.0.1;
+// this is the one place that decides whether a connection really started on this machine.
+const isLoopback = (ip, headers = {}) => localSocket(ip, headers);
 
 // Both admission paths end here: the same welcome, the same roster broadcast.
 // `loopback` is remembered per socket, not re-derived later: everything that can reach the
@@ -2236,7 +2239,7 @@ function admit(name, ok) {
   clearTimeout(p.timer);
   pending.delete(sock);
   if (ok) {
-    admitSocket(sock, p.name, false, isLoopback(p.ip), 'knock');
+    admitSocket(sock, p.name, false, p.local === true, 'knock');
     // The mirror wish rode in on the hello that knocked; a client whose default view is the
     // mirror (v0.14) must not have to ask again after being let in.
     if (p.mirror) setMirror(sock, true);
@@ -2460,6 +2463,10 @@ function revokeGrants(name, kind = null) {
 
 function onSocket(ws, req) {
   const ip = String(req.socket.remoteAddress || '');
+  // Decided ONCE, off the upgrade request, and carried on the socket: the headers that prove a
+  // relay was in front of this connection are only on the handshake, and every later gate
+  // (host:true, F3 keys, /end, /invite, …) has to ask the same question.
+  const local = isLoopback(ip, req.headers);
   // v0.17 T2: the other half of startHeartbeat's sweep. The browser-standard WebSocket every
   // jam client uses answers protocol pings automatically and gives the application no say in
   // it, so there is nothing to write on the client side — this is the whole client contract.
@@ -2492,7 +2499,7 @@ function onSocket(ws, req) {
         if (v.ok) {
           v.rec.uses++;
           saveInvites();
-          admitSocket(ws, v.rec.name, false, isLoopback(ip), 'invite');
+          admitSocket(ws, v.rec.name, false, local, 'invite');
           // The mirror wish rode in on the same hello (v0.14 opens on the live TUI).
           if (m.mirror === true) setMirror(ws, true);
           console.log(`[invite] ${v.rec.name} joined on ${v.rec.id} from ${ip} `
@@ -2503,7 +2510,7 @@ function onSocket(ws, req) {
           text: inviteRefusal(v.reason, v.why) });
         console.log(`[invite] refused from ${ip}: ${v.reason} — ${v.why}`);
       }
-      const c = classifyHello(m, currentToken, isLoopback(ip));
+      const c = classifyHello(m, currentToken, local);
       if (!c.ok) { sendError(ws, c.error); return ws.close(c.code, c.error); }
       // v0.24: invite-only. A knock is refused rather than left waiting for a host who has
       // decided not to be asked — and the refusal says what to go and get. The host's own
@@ -2521,7 +2528,7 @@ function onSocket(ws, req) {
       // `hello {mirror:true}` starts a client straight in mirror mode; the runtime
       // {t:'mirror'} frame (F2 / `/mirror`) is the same switch.
       if (c.admit === 'token') {
-        admitSocket(ws, c.name, c.host, isLoopback(ip), c.host ? 'host' : 'token');
+        admitSocket(ws, c.name, c.host, local, c.host ? 'host' : 'token');
         if (m.mirror === true) setMirror(ws, true);
         return;
       }
@@ -2535,7 +2542,7 @@ function onSocket(ws, req) {
         ws.close(4408, 'knock expired');
         pumpPopups();
       }, KNOCK_TTL);
-      pending.set(ws, { name: c.name, ip, timer, expires: Date.now() + KNOCK_TTL, mirror: m.mirror === true });
+      pending.set(ws, { name: c.name, ip, local, timer, expires: Date.now() + KNOCK_TTL, mirror: m.mirror === true });
       send(ws, { t: 'knock', id: nextId++, ts: Date.now(), state: 'pending' });
       sendHosts({ t: 'knock', name: c.name, ip });
       console.log(`[knock] ${c.name} from ${ip} — /accept ${c.name} | /deny ${c.name}`);

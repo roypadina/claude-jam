@@ -94,10 +94,51 @@ export function buildTokenFile(token, join, view, tunnelJoin, tunnelView) {
   };
 }
 
+// Whether a socket's ADDRESS may be believed at all.
+//
+// Every relay claude-jam offers points at loopback — cloudflared is run as
+// `tunnel --url http://localhost:<port>` — so a socket that crossed the public internet reaches
+// the daemon from 127.0.0.1 and is, by address alone, indistinguishable from the client the
+// launcher spawned on this machine. That matters because loopback is the WHOLE gate for
+// `host: true` below, and half of the daemon's `trusted()`: F3 raw keystrokes into the real TUI,
+// `/end`, `/kick`, `/invite`, `/remote`, `/announce`, `/grants` and the browser view. With
+// `--tunnel` up, anybody holding the public URL WAS the host, with no token at all — reproduced
+// 2026-08-30 on cloudflared 2026.8.2: a stranger was admitted as host with no token, was handed
+// the join token in the welcome frame, typed keystrokes into the real pane, and ended the jam.
+//
+// A proxy cannot hide that it is one. Measured the same day, a relayed upgrade carries
+// `x-forwarded-for`, `cf-connecting-ip`, `cf-ray`, `cdn-loop` and `x-forwarded-proto`; a client
+// that really is on this machine carries none of them. So the test fails CLOSED: any one of
+// these present means "not local", whoever put it there. A local client that sets one only
+// demotes itself, which costs nothing.
+export const PROXY_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host',
+  'x-forwarded-proto', 'x-real-ip', 'true-client-ip', 'cf-connecting-ip', 'cf-ray', 'cdn-loop'];
+
+export function proxiedRequest(headers = {}) {
+  if (!headers || typeof headers !== 'object') return false;
+  for (const k of Object.keys(headers)) {
+    if (PROXY_HEADERS.includes(String(k).toLowerCase())) return true;
+  }
+  return false;
+}
+
+// `::ffff:127.0.0.1` is what an IPv4 client looks like on a dual-stack listener, hence endsWith.
+export function loopbackAddress(ip) {
+  const s = String(ip || '');
+  return s.endsWith('127.0.0.1') || s === '::1';
+}
+
+// The question the daemon actually wants answered: did this connection START on this machine?
+// The address says where the last hop came from; the headers say whether there was a hop.
+export function localSocket(ip, headers = {}) {
+  return loopbackAddress(ip) && !proxiedRequest(headers);
+}
+
 // How a hello frame gets in. `admit:'token'` → straight to welcome, `admit:'knock'` →
-// pending until the host accepts. `host:true` is honoured only from loopback: that
+// pending until the host accepts. `host:true` is honoured only from a LOCAL socket: that
 // connection is the client the launcher itself spawned, so it is trusted by construction
-// (and admitted even with no token set); anyone else claiming it is just a friend.
+// (and admitted even with no token set); anyone else claiming it is just a friend. "Local"
+// is localSocket() above, not the address alone — see the note there for why.
 export function classifyHello(hello, currentToken, isLoopback) {
   const name = hello?.name;
   if (!validName(name)) return { ok: false, code: 4400, error: 'bad name' };
