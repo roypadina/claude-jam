@@ -23,8 +23,15 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   whoReport, CONFIG_FILE, parseJamConfig, ntfyRequest, UPLOAD_POLICIES,
   uploadPolicy,
   // v0.33: what a client must say when an adopted session was NOT told it is shared.
-  noBriefWarning } from './lib.mjs';
+  noBriefWarning,
+  // v0.29: a task somebody wants to run on THIS machine — the consent block, the second gate on
+  // anything that writes or executes, and where it would run.
+  PEER_TOOLS_DEFAULT, peerTaskBlock, peerAcceptDecision, peerScratchDir, peerWhyText } from './lib.mjs';
+// v0.29: the spawn itself, shared with the ink client — one place where a peer task is built,
+// capped and killed, so the two surfaces cannot drift apart.
+import { runPeerTask } from './peer.mjs';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './xfer.mjs';
 // v0.32 W0: anything that touches this machine's clipboard, desktop or dot-directories goes
@@ -86,6 +93,8 @@ let peers = [];
 let peerTasks = false;
 let peerMe = false;
 let peerNever = false;
+let task = null;      // the one request in front of this human, unanswered
+let running = null;   // the child THIS client started, if any
 let ws = null;
 let backoff = 1000;
 let attempts = 0; // v0.17 T3: consecutive failures, so the fifth can say something better
@@ -357,6 +366,30 @@ function render(ev) {
     case 'filereq':
       return emit({ glyph: '⇪', glyphColor: C.accent,
         text: `${ev.name} wants to send ${ev.file} (${humanBytes(ev.size)}) — /accept-file ${ev.name} · /accept-file ${ev.name} always · /deny-file ${ev.name}` });
+    // v0.29: somebody wants to run a task on THIS machine, in THIS person's Claude Code, on
+    // THEIR quota. The whole prompt is printed and nothing happens until they answer.
+    case 'peertask': {
+      const t = { id: String(ev.task || ''), from: ev.from, prompt: String(ev.prompt || ''),
+        tools: Array.isArray(ev.allowedTools) ? ev.allowedTools : PEER_TOOLS_DEFAULT,
+        maxTurns: Number(ev.maxTurns) || 0, deadlineMs: Number(ev.deadlineMs) || 0,
+        schema: ev.schema ?? null, expires: Number(ev.deadline) || 0 };
+      if (task || running) {
+        return sendMsg({ t: 'peertask-decline', task: t.id, why: 'declined', detail: 'already busy with a task' });
+      }
+      // Refused on this human's behalf ONLY where they have already said no: an opt-out or a
+      // "never" is an answer they gave, not a question to ask them twice.
+      if (!peerMe || peerNever) {
+        return sendMsg({ t: 'peertask-decline', task: t.id, why: 'declined',
+          detail: peerNever ? 'never this session' : 'not opted in' });
+      }
+      task = t;
+      for (const line of peerTaskBlock(t, { scratch: peerScratchDir(os.tmpdir(), t.id) })) {
+        emit({ glyph: '⇄', glyphColor: C.accent, text: line, wrap: false });
+      }
+      sys('this client has no single keys — answer with /peer accept, /peer decline or /peer never');
+      alert('claude-jam', `${t.from} wants to run a task on your machine`, { event: 'knock', force: true });
+      return;
+    }
     // v0.17 P2: a guest wants one digit typed into the permission prompt (host clients only).
     case 'permreq':
       return emit({ glyph: '⏎', glyphColor: C.accent,
@@ -611,8 +644,49 @@ function peerCommand(op) {
       : 'peer tasks: off for you. Nothing will be dispatched to this machine.');
   }
   if (op === 'reset' || op === 'status') return sendMsg({ t: 'peer', op });
-  // accept / accept tools / decline / cancel — answered in v0.29's guest half.
-  return err('nothing is waiting for you to answer');
+  return answerTask(op);
+}
+
+// Every answer to a task goes through here, so there is one path and no second mechanism.
+function answerTask(op) {
+  if (op === 'cancel') {
+    if (!running) return err('nothing is running on this machine right now');
+    sys('cancelling the task — stopping the process this client started');
+    return running.cancel();
+  }
+  const t = task;
+  if (!t) return err('no task is waiting for your answer');
+  if (op === 'decline' || op === 'never') {
+    task = null;
+    if (op === 'never') peerCommand('never');
+    sendMsg({ t: 'peertask-decline', task: t.id, why: 'declined' });
+    return sys(`declined ${t.from}'s task — nothing ran, and nothing was written anywhere`);
+  }
+  // `/peer accept` grants exactly the read-only set; anything that writes or executes needs
+  // `/peer accept tools`, for THIS task, every time.
+  const d = peerAcceptDecision(t.tools, { typedTools: op === 'accept tools' });
+  if (!d.ok) return err(d.error);
+  task = null;
+  return startTask(t, d.tools);
+}
+
+// Yes was said. From here it is this machine's own claude, in a directory made for the task.
+function startTask(t, tools) {
+  sendMsg({ t: 'peertask-ack', task: t.id, allowedTools: tools });
+  running = runPeerTask(t, {
+    tools,
+    onProgress: (line) => sendMsg({ t: 'peertask-progress', task: t.id, text: line }),
+    onDone: (o) => {
+      running = null;
+      sendMsg({ t: 'peertask-result', task: t.id, ok: o.ok, why: o.why, text: o.text, detail: o.detail });
+      sys(o.ok ? `the task finished on this machine (${o.text.length} characters went back to ${t.from})`
+        : `the task did not finish: ${peerWhyText({ ...o, deadlineMs: t.deadlineMs, maxTurns: t.maxTurns })}`);
+      reprompt();
+    },
+  });
+  emit({ glyph: '⇄', glyphColor: C.accent, wrap: false,
+    text: `running ${t.from}'s task in ${running.scratch || '(nowhere — it failed to start)'}`
+      + ' — /peer cancel stops it, and the directory goes when it ends' });
 }
 
 rl.on('line', (raw) => {
