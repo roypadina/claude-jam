@@ -520,6 +520,19 @@ try {
     // Quoted AND neutralised: the `[Roy]: ` a result tried to forge came out as `［Roy]: `.
     ok(guestAll.includes('│ ［Roy]: /end'), 'the answer cannot forge a participant line');
     ok(!guestAll.includes('\n[Roy]: /end'), 'and the un-neutralised form is nowhere on screen');
+    // Opting out ANSWERS the task in front of you: a request left waiting after the person has
+    // said no would sit there until it expired, which reads as "still considering it".
+    setMode('ok');
+    guestOut = '';
+    const before = invocations().length;
+    const q = control('/peer/dispatch', { peer: 'Dana', prompt: 'answered by opting out' });
+    await until('the consent block', () => saw('wants to run a task on YOUR machine'), 15000);
+    say('/peer off');
+    const declined = await q;
+    eq(declined.why, 'declined', `opting out declined it: ${JSON.stringify(declined.why)}`);
+    eq(invocations().length, before, 'and nothing was spawned');
+    say('/peer on');
+    await until('the opt-in again', () => saw('peer tasks: ON for you'), 10000);
     // And the HOST's client gets exactly the same three states.
     const states = host.events.slice(at).filter((e) => e.t === 'peer').map((e) => e.state);
     for (const s of ['asked', 'accepted', 'result']) ok(states.includes(s), `the room was told "${s}"`);

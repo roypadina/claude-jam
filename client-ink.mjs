@@ -1448,6 +1448,15 @@ function peerCommand(op) {
     store.peerMe = false;
     if (op === 'never') store.peerNever = true;
     sendMsg({ t: 'peer', op });
+    // Saying no in general answers the one in front of you too: a task left waiting after the
+    // person has opted out would sit there until it expired, which reads as "it is still
+    // considering it". (answerTask nulls store.task before it calls this, so a `/peer never`
+    // that came in AS the answer does not decline twice.)
+    if (store.task) {
+      const t = store.task;
+      store.task = null;
+      sendMsg({ t: 'peertask-decline', task: t.id, why: 'declined', detail: op });
+    }
     sys(op === 'never'
       ? 'peer tasks: NEVER for this client session. Nothing more will be offered to you here.'
       : 'peer tasks: off for you. Nothing will be dispatched to this machine.');
