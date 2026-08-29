@@ -24,6 +24,12 @@ Everybody — host and guests — runs the same single-pane client, and it has e
 - **transcript (F2, or `/mirror`):** the full jam history — every message, your replies, tool
   lines — with the same status and input rows. F2 flips back.
 
+Somebody who joins late is not starting from nothing: the daemon seeds its history from the
+transcript file you are writing, so their client replays what happened before they arrived (up
+to `--replay` events, 300 by default) and prints
+`── history above (N replayed) · live from here ──` under it. On a `--resume`d session that is
+the whole earlier conversation, which is why they may already know things nobody told them.
+
 The status row shows which view they are in (`⧉ live TUI` / `≡ transcript`), whether you are
 working (`✻ claude is working…`), and whether you are waiting for a permission answer.
 
@@ -59,7 +65,7 @@ thing as F3 and always did.
 ## Slash commands
 
 - **jam's own** (everyone): `/c` `/who` `/help` `/quit` `/mirror` `/tools` `/export` `/send`
-  `/paste` `/get`.
+  `/paste` `/get` `/files` `/diff`.
   Host-only: `/join` `/accept` `/deny` `/token` `/allow-cmd` `/deny-cmd` `/allow-export`
   `/deny-export` `/accept-file` `/deny-file`.
 - **yours** (`/model`, `/compact`, `/mcp`, `/status`, …): anything jam does not own.
@@ -152,6 +158,39 @@ writing as we talk.
   `/token new`. A guest could already read the conversation on screen; what changes is that they
   now have the files and tool output too, in a form they can keep.
 
+## Seeing what changed (`/files`, `/diff`)
+
+Anybody can ask what this session has actually touched. Both are answered by the daemon, not by
+you, so they cost no turn and never enter your context:
+
+- **`/files`** — every path a `Read`, `Write`, `Edit` or `MultiEdit` call named, newest first,
+  with how many times each was touched (`×2  lib.mjs`). Paths inside the project are shown
+  relative to it. Only the asker sees the answer. It knows nothing about a file changed by a
+  shell command inside a `Bash` call — for that there is:
+- **`/diff [path]`** — real `git diff` of the host's working tree: `--stat` (file names plus
+  insertion/deletion counts) with no argument, the actual hunks for one named path. Everybody
+  sees it, because the working tree is what the whole jam is looking at. It shows the
+  **unstaged** tree only, is capped at 120 lines, and says so plainly if the project is not
+  inside a git repository.
+
+Your own `Edit`/`MultiEdit`/`Write` calls also render for everybody as a real diff — the file
+path, then `-` and `+` lines — instead of a truncated blob of JSON, because the `old_string` and
+`new_string` in those calls already are the diff. A turn with several tools still folds into one
+`⚙ N tools (Edit ×2, Bash ×1)` line; `/tools` reprints the whole thing, diffs included.
+
+## Masked secrets (say this accurately if asked)
+
+Tool calls, tool results, `/diff` output and every mirror row pass through a small deny-list on
+the way to other people, and a value that matches comes out as `[masked]`. It knows five shapes:
+AWS key ids (`AKIA…`), PEM `PRIVATE KEY` blocks, `sk-`/`pk-`/`rk-` and `ghp_`-style tokens,
+bearer credentials, and `.env`-style UPPER_CASE secret `KEY=value` lines.
+
+If somebody asks whether the jam is safe to share secrets in, the answer is **no**: this is
+best effort, not a boundary. Anything the deny-list has never heard of goes straight through, a
+value split across colour escapes on a mirror row will not match, and a message a human types is
+never masked at all. `[masked]` on someone's screen means jam recognised a shape — the real value
+is still in the file, and still in your context.
+
 ## Watching your screen from elsewhere
 
 - Every client already has it: the default view IS this screen.
@@ -190,6 +229,7 @@ to be told anything.
 
 `/c <text>` humans-only chat · `/who` participants · `/help` reprint the onboarding block ·
 `/mirror` (or F2) swap views · `/tools [on|off]` tool log / collapse mode · `/quit` leave ·
+`/files` paths this session touched · `/diff [path]` git diff of the working tree ·
 `/send <path>` send a file (host: offer one) · `/paste [caption]` the clipboard's image ·
 `/get [name]` take an offered file · `/export` this session's transcript ·
 Shift+Enter, Option+Enter or a trailing `\` for multi-line.
@@ -203,7 +243,8 @@ Any other `/command` is one of yours — see Slash commands above.
 
 `--name` display name · `--token <t>` fixed token · `--cwd <dir>` project dir ·
 `--config-dir <dir>` run under another claude profile (e.g. `~/.claude3`) · `--resume <uuid>`
-continue an existing conversation · `--tmux <name>` a second jam · `--view` browser view (needs
+continue an existing conversation · `--replay <N>` how many events of an existing transcript a
+joining guest is replayed (default 300, `0` for none) · `--tmux <name>` a second jam · `--view` browser view (needs
 ttyd) · `--no-popup` no tmux knock popup · `--no-token-in-context` don't tell you the token ·
 `--tunnel` two Cloudflare quick tunnels · `--funnel` Tailscale Funnel instead, with a stable
 URL (`--funnel-cli <path>` if the CLI is not on PATH — on macOS it lives inside
@@ -243,6 +284,18 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   Tailscale.app cannot change funnel config at all — its CLI replies `The Tailscale GUI failed
   to start … (Tailscale.CLIError error 3.)`; the standalone build from tailscale.com can.
   `--tunnel` is always available as the fallback.
+- `/diff` says "not inside a git repository" → the host's `--cwd` is not in one. `/files` still
+  works; it just reports what tool calls named rather than what git sees.
+- `/diff` says "no unstaged changes" → the work is already committed or staged; `/diff` only
+  shows the unstaged working tree.
+- `/files` says "no files yet" → nothing has read or edited a file in this session *that a tool
+  call named*. A file touched by a shell command inside a `Bash` call never shows up there.
+- Somebody sees `[masked]` where a value should be → jam's secret deny-list recognised the shape
+  (see "Masked secrets"). The value itself is unchanged on disk and in your context; only the
+  copy being shown to other people is masked. There is no way to turn it off per line.
+- A guest says they can see things from before they joined → they can: the daemon replays up to
+  `--replay` events of the transcript on connect, with a `history above · live from here`
+  divider under it. `--replay 0` at launch turns that off.
 - Their screen looks cropped or half empty → their terminal is smaller than the host's window;
   the dim `— mirror:` line says how much was cut. The host's own client keeps the window sized
   to their terminal, so a guest with a bigger terminal simply sees blank space.
