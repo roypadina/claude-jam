@@ -330,6 +330,9 @@ export function parseClientLine(line) {
     return /^[1-9]$/.test(rest) ? { kind: 'perm', choice: Number(rest) }
       : { kind: 'error', text: 'usage: /answer (list the options) | /answer <1-9>' };
   }
+  // v0.18-4: end the whole jam — the daemon, the TUI, the tmux session, everyone's client. The
+  // one jam command that asks twice (see confirmYes), and host-only both here and in the daemon.
+  if (t === '/end') return { kind: 'end' };
   if (t === '/allow-perm' || t.startsWith('/allow-perm ')) {
     return { kind: 'perm-ok', op: 'allow', ...answerWords(t.slice(11)) };
   }
@@ -366,7 +369,9 @@ export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror',
   // v0.17 F2/F3: the paths this session touched, and git's own answer about them.
   '/files', '/diff',
   // v0.17 P2: the permission relay — a guest asks, the host allows or denies.
-  '/answer', '/allow-perm', '/deny-perm'];
+  '/answer', '/allow-perm', '/deny-perm',
+  // v0.18-4: the host ends the jam for everybody.
+  '/end'];
 
 // Session-lifecycle commands: they end or wipe the conversation for EVERYBODY, so they stay
 // with the host. Hard list, enforced server-side — no guest request, no `/allow-cmd always`
