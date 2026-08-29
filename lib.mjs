@@ -765,7 +765,8 @@ export function humanBytes(n) {
 // charset. null = refuse the transfer, never "guess a name".
 export const UPLOAD_NAME_MAX = 80;
 export function safeBaseName(name) {
-  const raw = String(name ?? '').trim();
+  if (typeof name !== 'string') return null; // a number in the name field is a broken client
+  const raw = name.trim();
   if (!raw || raw.length > 255 || /[\\/]/.test(raw) || raw === '.' || raw === '..') return null;
   // Everything outside [A-Za-z0-9._-] becomes '_': no control bytes, no shell metacharacters,
   // no unicode lookalike for a separator. A leading dot goes too — no writing dotfiles.
