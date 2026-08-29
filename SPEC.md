@@ -1239,3 +1239,62 @@ handing an agent just the repo URL is enough to install and run the tool.
    `README.md`, `MANUAL.md` (claude's own copy), `CHANGELOG.md` (unreleased section), and the
    affected wiki page(s). A doc-drift check belongs in the release step: before tagging, verify
    every command in README/wiki Install/Agent-Install actually runs. Stale docs are a defect.
+
+## v0.22 — no-argument launcher menu, invite links, and a live host menu
+
+### A. `claude-jam` with no arguments → interactive launcher
+Ink app (add `@inkjs/ui` ^2 — Select/TextInput/Spinner/Alert/Badge, by ink's own author, same
+React 18 + ink 5 stack we already ship; no other new deps). Screens:
+1. **Main**: `Host a jam` · `Join a jam` · `My jams` (from v0.18 `sessions`) · `End a jam` · `Quit`.
+2. **Host**: cwd (default `process.cwd()`, editable), name (default `$USER`), access mode
+   (knock / token / invite-links-only), remote (`none` / `--tunnel` / `--funnel`, greyed with
+   the reason when the binary or capability is missing), browser view on/off, extra claude args.
+   Shows the exact `claude-jam host …` command it will run before running it — so the menu
+   teaches the CLI instead of hiding it.
+3. **Join**: paste an invite link OR a ws URL; name and token fields appear only when the input
+   is not a link (a link carries both).
+4. **My jams**: the v0.18 table, with attach / end / copy-invite actions.
+Everything the menu does is an existing subcommand — the menu builds argv, never a second code
+path. `--no-menu` (or any argv) keeps today's behavior; a non-tty stdin prints usage as now.
+
+### B. Invite links (no approval, no typing a name)
+A link is a single opaque string a host hands out: `claude-jam join <link>` is the guest's whole
+command — the link carries the address(es), the guest's name, and a per-invite secret.
+
+- **Format**: `cjam1_<base64url(json)>`, json = `{v:1, jam:<sessionId short>, name:"Yossi",
+  secret:<24 url-safe chars>, ws:["wss://<tunnel-host>","ws://<lan-ip>:<port>"], exp:<epoch s>}`.
+  Version prefix so a future format is a clean error, not a crash. The client tries the
+  addresses in order (tunnel first, then LAN) with a 3 s connect timeout each.
+- **Server side**: invites live in the daemon (and in the state dir so a restart keeps them),
+  each `{secret-hash, name, uses, maxUses, expires, revoked}`. `hello {invite:"<secret>"}` →
+  validate hash, expiry, uses, not revoked, name not currently taken → **admit immediately with
+  the embedded name, no knock, no ladder**. Anything invalid → the normal knock path (never a
+  silent failure), with a clear reason to the guest.
+- **Defaults**: multi-use (so a reconnect works), 24 h expiry, name-bound, revocable. A revoked
+  or expired invite disconnects nobody already admitted (they stay until they leave).
+- **Security wording (README/MANUAL/wiki, honest):** an invite link IS a credential — anyone
+  holding it joins as that name with no approval. Treat it like a password, send it over a
+  private channel, `/invite revoke` when done. Per-invite secrets are strictly better than the
+  shared `--token` (revocable individually, name-bound, expiring), and the shared token stays
+  for quick throwaway cases.
+- **Ephemeral-tunnel caveat**: a cloudflared respawn changes the hostname, so links minted
+  before it keep working only via their LAN address. The host menu shows a warning and a
+  one-key "re-issue all links" action; `--funnel` (stable hostname) avoids it entirely.
+- CLI parity: `claude-jam invite <Name> [--uses N] [--expires 24h]`, `claude-jam invites`,
+  `claude-jam invite revoke <Name|id>` — the menu drives these.
+
+### C. `/menu` in the client — the live control panel (host)
+Ink overlay (Select-driven, Esc closes, everything it does maps to an existing command):
+- **People**: who is here, RTT, invite vs token vs knock, actions: remove (`/kick <name>` —
+  close 4406, drop from roster, optionally revoke their invite so they cannot walk back in),
+  approve/deny anything pending, grant/withdraw standing approvals (`always` grants from the
+  ladders, listed and individually revocable — today they are invisible once given).
+- **Invites**: list with name/uses/expiry/status, create (name + uses + expiry), copy, revoke,
+  re-issue all after a tunnel change.
+- **Access**: token new/set/off, invite-only toggle, view (ttyd) on/off, tunnel/funnel start-stop.
+- **Session**: `/join` lines, `/files`, `/diff`, `/export` (for the host's own copy), `--replay`
+  size, end the jam (v0.18 `/end`), attach to the TUI (F3 hint).
+- **Guests** get a reduced `/menu`: what they can do (`/c`, `/mirror`, `/tools`, `/files`,
+  `/diff`, `/export`, `/send`, `/answer`, `/help`) with one-key launch, no host controls.
+`/menu` is discoverability: every feature we ship must appear there, and the standing doc rule
+(v0.21) extends to it — a new user-visible feature that is not reachable from `/menu` is a defect.
