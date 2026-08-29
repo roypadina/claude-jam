@@ -167,11 +167,25 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   counting the stream and killing the child by pid. `--max-budget-usd` exists and is a real spend
   cap, but it was NOT adopted: it is untestable without spending, and an inert or refusing flag
   would break every task. Prove: decide in the campaign whether to add it, after one live run.
-- 2026-08-29 · The ink client's peer surface — the consent block in the transcript, the `PeerBar`
-  row, the `a`/`d`/`n` keys and Esc-to-cancel — has no pty evidence. `smoke-peer` drives the
-  `--basic` client (the half that spawns), and the key decisions are unit-tested through
-  `peerKeyAction`, but nobody has LOOKED at the ink rendering. Prove: a pty run in the campaign,
-  in the style of `smoke-scroll`'s real ink guest.
+  **PARTLY DISCHARGED — campaign, 2026-08-30.** Re-checked on 2.1.251: `--max-turns` is still
+  absent, `--max-budget-usd` is still present. The live run happened (and found the turn-cap bug
+  above), so the decision no longer needs one. It is Roy's call, and it is carried as its own
+  entry at the end of this list rather than left inside a v0.29 note.
+- ~~2026-08-29 · The ink client's peer surface — the consent block in the transcript, the
+  `PeerBar` row, the `a`/`d`/`n` keys and Esc-to-cancel — has no pty evidence … nobody has LOOKED
+  at the ink rendering.~~
+  **DISCHARGED — campaign, 2026-08-30.** A real ink client on a real pty as the guest, with a
+  stand-in executor so it spent nothing. All four surfaces photographed: the consent block (tools
+  marked read-only, the caps, the scratch directory, "your own MCP servers are OFF for it", and
+  the prompt under "this is text from another machine, read it before you answer"), the
+  `[a]ccept · [d]ecline · [n]ever this session` line, `a` accepting, the `PeerBar` row
+  (`⇄ a task is running on THIS machine, in your Claude Code · Esc cancels it`), and **Esc
+  cancelling a running task**. Captures kept outside the repo, in the campaign folder
+  (`~/ClaudWork/2026-08-30-jam-campaign/ink-peer-shots/`), because a screenshot of a client is not
+  a fixture anything asserts against.
+  NOT converted into a smoke step: it needs a real pty, a second `$TMPDIR`/`$HOME` and a stand-in
+  executor, which is `smoke-peer`'s whole setup plus `smoke-scroll`'s — worth doing, not worth
+  doing at 01:00 without somebody to review the seam.
 - 2026-08-30 · **CAMPAIGN** `--funnel`'s trust boundary is UNVERIFIED in a second, new way. The
   campaign found and fixed a hole where every relayed socket reached the daemon from 127.0.0.1
   and so was treated as the host (see the campaign section below); the fix reads the upgrade
