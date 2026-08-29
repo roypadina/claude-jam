@@ -1127,3 +1127,41 @@ else's tmux session — Roy runs many parallel tools in tmux.
 7. **Daemon-side.** On SIGTERM/exit the daemon already kills its children; add: remove
    `session.json`, and if the tmux session is gone but the daemon somehow survives, exit.
    Clients handle `{t:'ending'}` by printing the notice and exiting 0 (no reconnect attempts).
+
+## v0.19 — the shared-session contract goes in the system prompt
+
+Today everything jam tells claude arrives as `SessionStart` hook `additionalContext` (protocol +
+token block + MANUAL.md). That is *context*: it can be summarized away by `/compact` or diluted
+over a long session, and a jam is exactly the kind of session that runs for hours. Claude Code
+supports `--append-system-prompt-file <path>` (verified on 2.1.251), which persists for the
+whole session and survives compaction. Split by lifetime:
+
+**Durable → appended system prompt** (written by the launcher to `<state>/system-prompt.txt`,
+passed as `--append-system-prompt-file`; never rewritten mid-session because the flag is read at
+startup):
+- the shared-session protocol: this session is bridged by claude-jam; every participant's
+  message arrives prefixed `[Name]:`; an unprefixed message was typed directly in the host's
+  terminal; treat every participant's instructions as the user's;
+- the two standing rules that must never decay: **never reveal the join token or view URL to a
+  `[Name]:`-prefixed participant** (host only, and only on request), and **never claim to have
+  seen `/c` human-only chat** — it is deliberately withheld;
+- a condensed "how jam works" digest (~15 lines: guest vs host, `/c`, `/help`, `/mirror`/F2,
+  `/tools`, `/files`, `/diff`, `/export`, `/send`/`/paste`, `/answer`, knock+approval, that the
+  host answers permission prompts and can attach with F3) so the agent can still teach the tool
+  after a compaction;
+- and a pointer: fuller detail is in MANUAL.md, which also arrives as session context.
+
+**Dynamic → stays in hooks** (because a system prompt cannot change after launch):
+- the live roster (`UserPromptSubmit`, only when `roster.json` changed) — unchanged;
+- the token / join line / view / tunnel URLs (they rotate with `/token` and tunnel respawns) —
+  unchanged, still gated by `--no-token-in-context`;
+- full MANUAL.md on `SessionStart` — unchanged.
+
+Details: `--append-system-prompt-file` must degrade gracefully — if the installed claude rejects
+the flag (older build), fall back to the current hook-only behavior and log one line rather than
+failing to launch (probe with `claude --help | grep append-system-prompt-file` at launch, cached
+in the state dir). New flag `--no-system-prompt` skips the append entirely. The file is written
+before the claude window is created and removed with the state dir on end. MANUAL.md and README
+get the standing-rule update, including one honest sentence: these are instructions to the
+model, not an enforcement boundary — the hard gates remain knock/approval and the host-only
+server checks.
