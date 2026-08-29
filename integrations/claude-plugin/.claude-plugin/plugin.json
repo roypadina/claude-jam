@@ -1,0 +1,10 @@
+{
+  "name": "claude-jam",
+  "version": "0.1.0",
+  "description": "/jam — share the Claude Code session you are already in with other humans, without restarting it. Wraps the claude-jam CLI; installing this is entirely optional.",
+  "author": {
+    "name": "Roy Padina",
+    "url": "https://github.com/roypadina"
+  },
+  "homepage": "https://github.com/roypadina/claude-jam"
+}

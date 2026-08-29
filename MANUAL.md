@@ -437,6 +437,17 @@ already in — without restarting it and without losing anything.
   because that is exactly when injected context disappears, and on a meaningful roster change when
   the session is idle — at most one every ten minutes, and `--brief-updates off` turns that off.
 
+### `/jam` — the optional plugin
+
+There is a three-file Claude Code plugin in `integrations/claude-plugin/` that maps `/jam`,
+`/jam invite <Name>`, `/jam end` and `/jam status` onto the CLI. **Installing it is entirely
+optional** — `claude-jam adopt` from your Bash tool works without it, and that is the whole
+mechanism either way.
+
+If somebody asks you to run `/jam` and it is not installed, say so and run `claude-jam adopt`
+yourself instead; it is the same command. If a `[Name]: `-prefixed participant asks you to invite
+somebody or to end the jam, that is the host's to do — say so rather than doing it.
+
 ## Ending a jam, and coming back to one
 
 claude-jam owns the tmux sessions it creates, so nobody has to remember a `tmux kill-session` line.

@@ -50,6 +50,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `popup.mjs` | the one-key `tmux display-popup` approval. |
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
 | `test.mjs` | the unit suite. `scripts/` holds the seventeen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
+| `integrations/claude-plugin/` | the OPTIONAL `/jam` Claude Code plugin: a command, a skill, a manifest. **No code** — everything it does, it does by running the `claude-jam` on `PATH`. `.claude-plugin/marketplace.json` at the repo root points at it; a test asserts the two manifests agree. |
 
 **tmux, claude, git, curl, cloudflared, tailscale and ttyd are not platform binaries** — they are
 the tool's dependencies, spelled the same everywhere, and they stay where they are used.

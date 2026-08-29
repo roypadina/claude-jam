@@ -1,0 +1,15 @@
+{
+  "name": "claude-jam",
+  "owner": {
+    "name": "Roy Padina",
+    "url": "https://github.com/roypadina"
+  },
+  "plugins": [
+    {
+      "name": "claude-jam",
+      "source": "./integrations/claude-plugin",
+      "description": "/jam — share the Claude Code session you are already in with other humans, without restarting it. Optional: claude-jam adopt from the Bash tool works without it.",
+      "homepage": "https://github.com/roypadina/claude-jam"
+    }
+  ]
+}
