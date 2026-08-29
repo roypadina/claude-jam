@@ -1386,3 +1386,25 @@ indication which was current.
   (`── invite ─────`), the current lines, and a dim `(earlier invite lines above are stale)`
   when the log already holds some — or better, tag every printed invite line with a short
   timestamp so "which one is live" is unambiguous. Same for `{t:'token'}` refreshes.
+
+## v0.25 — audible join events (Roy: a knock sound, and a different one for auto-join)
+
+Extends v0.17 P3/P4 (bell + desktop notification on `waiting`/mention) to arrivals, with two
+distinguishable sounds so the host knows without looking whether someone needs approving.
+
+- **Knock** (someone is waiting for you): `afplay /System/Library/Sounds/Submarine.aiff` — a
+  slow "knock" tone — plus the existing terminal bell as the fallback, plus a macOS
+  notification `⚑ <Name> wants to join`. Repeats once after 30 s if still unanswered, then
+  stops (never a loop).
+- **Auto-join** (token or invite link: they are already in): `Glass.aiff`, quieter semantics —
+  one short chime, notification `<Name> joined`, no repeat.
+- **Leave**: no sound (avoid noise); roster line only.
+- Implementation: one `notifySound(kind)` helper next to the existing bell/osascript code
+  (`spawn('afplay', [path], {stdio:'ignore'})`, non-blocking, failure ignored, macOS-only —
+  Linux tries `paplay`/`aplay` if present, else silent). Host client only; guests never get
+  arrival sounds. Verify the files exist at startup once and remember the answer.
+- Controls: `--no-sound` flag, a `/menu → Access/Notifications` toggle (sound on/off,
+  notifications on/off, bell on/off) persisted for the session, and `/sound on|off` for the
+  keyboard-only path. Respect it everywhere, including the v0.17 `waiting` bell.
+- Docs: README, MANUAL (so claude can answer "turn off the sounds"), wiki Hosting page,
+  CHANGELOG; and the sounds must appear in the `/menu` completeness test (v0.24).
