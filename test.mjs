@@ -39,7 +39,22 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   F3_BIND_ARGS, STATUS_RIGHT_HOME, statusRightText,
   // v0.19: the durable contract, as an appended system prompt, and how the flag is probed for.
   SYSTEM_PROMPT_FILE, CLAUDE_CAPS_FILE, buildSystemPrompt, SYSTEM_PROMPT_PROBE_FLAG,
-  systemPromptProbeArgs, systemPromptSupported } from './lib.mjs';
+  systemPromptProbeArgs, systemPromptSupported,
+  // v0.30: a landed paste has more than one shape, and a payload is never destroyed.
+  PASTE_PLACEHOLDER_RE, hasPastePlaceholder, inputAreaRows, INPUT_AREA_MAX, injectLanded,
+  inputBoxText, CLEAR_TRIES, chunkPayload, PASTE_CHUNK_MAX,
+  OUTBOX_DIR, OUTBOX_KEEP, outboxSlug, outboxName, parseOutboxName, outboxEntries, resolveOutbox,
+  outboxReport, keptMessageText,
+  historyPush, historyMove, parseHistoryFile, serializeHistory, HISTORY_LIVE, HISTORY_FILE_MAX,
+} from './lib.mjs';
+import fs from 'node:fs';
+
+// ---------------------------------------------------------------- pane fixtures ----
+// Real `tmux capture-pane -p` output, captured 2026-08-29 against claude 2.1.251 in a 100x32 (and
+// for the pickers 100x44) tmux window on jam's own socket. They are the corpus v0.30 and v0.31
+// are judged against: when a future Claude Code changes how it draws the input box, a paste
+// placeholder or a question picker, THESE tests fail instead of somebody's message.
+const pane = (name) => fs.readFileSync(new URL(`./fixtures/pane/${name}.txt`, import.meta.url), 'utf8');
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -2917,4 +2932,169 @@ test('v0.19 the flag is probed for by asking which unknown option the parser nam
   assert.equal(systemPromptSupported(`unknown option '--append-system-prompt-file' ${SYSTEM_PROMPT_PROBE_FLAG}`), false);
   assert.equal(SYSTEM_PROMPT_FILE, 'system-prompt.txt');
   assert.equal(CLAUDE_CAPS_FILE, 'claude-caps.json');
+});
+
+// ================================ v0.30: big pastes must not fail, and nothing is lost ====
+
+test('v0.30 the fixture corpus IS the real thing — every capture still looks like itself', () => {
+  // Cheap canary: if a fixture is ever re-captured from a claude that draws differently, the
+  // assertions below tell you WHICH shape moved rather than failing somewhere downstream.
+  // Measured and worth recording: the INPUT box writes `❯` + U+00A0, while an option row writes
+  // `❯` + a plain space. Every prompt-row regex here is written with `\s`, which covers both.
+  assert.match(pane('box-empty'), /^❯\u00a0$/m, 'an empty box is a bare prompt row');
+  assert.match(pane('box-short'), /^❯\u00a0\[Roy\]: hello there$/m);
+  assert.match(pane('box-wrapped'), /^❯\u00a0\[Roy\]: the quick brown fox/m);
+  assert.match(pane('box-placeholder'), /^❯\u00a0\[Pasted text #2 \+18 lines\]$/m);
+  assert.match(pane('question-single'), /^❯ 1\. Tabs$/m, 'an option row uses a plain space');
+  assert.match(pane('box-multiline-small'), /\[Pasted text #3 \+3 lines\]/);
+  assert.match(pane('question-single'), /☐ Indentation/);
+  assert.match(pane('question-multi'), /☐ Editor {2}☐ Shell/);
+  assert.match(pane('question-multi-2'), /☒ Editor {2}☐ Shell/);
+  assert.match(pane('permission-bash'), /Do you want to proceed\?/);
+  assert.match(pane('dialog-trust'), /Yes, I trust this folder/);
+});
+
+test('v0.30-1 the paste placeholder is matched on the family, not on one spelling', () => {
+  // The two the real thing produced, and the older no-counter form v0.30 was written against.
+  for (const s of ['❯ [Pasted text #2 +18 lines]', '❯ [Pasted text #3 +3 lines]',
+    '[Pasted text +19 lines]', '[Pasted text]', '  [PASTED TEXT #12 +1 lines]']) {
+    assert.equal(hasPastePlaceholder(s), true, s);
+  }
+  // And what must NOT count: an ordinary message that talks about pasting.
+  for (const s of ['❯ [Roy]: I pasted text into the box', 'pasted text +19 lines', '', null,
+    '[Image #1]', '[Pasted']) {
+    assert.equal(hasPastePlaceholder(s), false, JSON.stringify(s));
+  }
+  assert.equal(hasPastePlaceholder(pane('box-placeholder')), true);
+  assert.equal(hasPastePlaceholder(pane('box-empty')), false);
+});
+
+test('v0.30-1 inputAreaRows is the box, not the last three rows of the pane', () => {
+  // The bug this exists for: on 2.1.251 the last three rows are chrome that moves on its own.
+  const last3 = pane('box-empty').split('\n').slice(-3).map((r) => r.replace(/\s+$/, ''));
+  assert.match(last3.join('\n'), /manual mode on/, 'the tail of the pane really is chrome');
+  assert.deepEqual(inputAreaRows(pane('box-empty')), ['❯'], 'an empty box is one bare prompt row');
+  assert.deepEqual(inputAreaRows(pane('box-short')), ['❯\u00a0[Roy]: hello there']);
+  assert.deepEqual(inputAreaRows(pane('box-placeholder')), ['❯\u00a0[Pasted text #2 +18 lines]']);
+  // A wrapped line keeps its continuation rows, which is what makes it different from an empty box.
+  const wrapped = inputAreaRows(pane('box-wrapped'));
+  assert.equal(wrapped.length, 4);
+  assert.match(wrapped[0], /^❯\u00a0\[Roy\]: the quick brown fox/);
+  assert.match(wrapped.at(-1), /^ {2}brown fox/, 'continuation rows are indented, not prompted');
+  // A dialog owns the screen and has no input box; its own `❯ No, exit` cursor row is what gets
+  // found, capped and harmless — nothing ever pastes into a pane that is showing one.
+  assert.ok(inputAreaRows(pane('dialog-trust')).length <= INPUT_AREA_MAX);
+  assert.match(inputAreaRows(pane('dialog-trust'))[0], /No, exit/);
+  assert.deepEqual(inputAreaRows('a\nb\nc\nd'), ['b', 'c', 'd'], 'no prompt row at all: the last three');
+  assert.deepEqual(inputAreaRows(''), ['']);
+  assert.ok(inputAreaRows(`❯ x\n${'y\n'.repeat(50)}`).length <= INPUT_AREA_MAX);
+});
+
+test('v0.30-1 a landed paste is accepted by whichever of the three shapes it has', () => {
+  const empty = pane('box-empty');
+  // 1. the probe — a short message that claude echoes verbatim. This is the ONLY rule v0.30 had.
+  assert.equal(injectLanded({ probe: '[Roy]: hello there', before: empty, after: pane('box-short') }), 'probe');
+  // 2. the placeholder — the shape that failed live, where the probe can never match.
+  assert.equal(injectLanded({ probe: '[Roy]: here is a long brief', before: empty, after: pane('box-placeholder') }),
+    'placeholder', 'a multi-line paste renders as a placeholder and IS a landed paste');
+  assert.equal(injectLanded({ probe: '[Roy]: line one of three', before: empty, after: pane('box-multiline-small') }),
+    'placeholder', 'three lines is already enough to collapse — measured on 2.1.251');
+  // 3. the diff — a rendering jam has never seen, so nothing matches but the box did change.
+  assert.equal(injectLanded({ probe: '[Zed]: nothing like this at all', before: empty, after: pane('box-wrapped') }), 'changed');
+  // And the real failure: nothing was pasted at all.
+  assert.equal(injectLanded({ probe: '[Roy]: hello there', before: empty, after: empty }), null);
+  assert.equal(injectLanded({ probe: 'x', after: empty }), null, 'no before = no diff rule, not a crash');
+  // The chrome below the box moves on its own; that must never read as a landed paste.
+  const noisy = pane('box-empty').replace('⏸ manual mode on · ← for agents', 'paste again to expand');
+  assert.equal(injectLanded({ probe: '[Zed]: nothing like this at all', before: pane('box-empty'), after: noisy }), null,
+    'chrome outside the box is not the box');
+});
+
+test('v0.30-2 what is in the box decides whether anything gets cleared', () => {
+  assert.equal(inputBoxText(pane('box-empty')), '');
+  assert.equal(inputBoxText(pane('box-short')), '[Roy]: hello there');
+  assert.equal(inputBoxText(pane('box-placeholder')), '[Pasted text #2 +18 lines]');
+  assert.match(inputBoxText(pane('box-wrapped')), /^\[Roy\]: the quick brown fox/);
+  // Measured: one Ctrl-U kills one visual line, so a wrapped box needs several.
+  assert.ok(CLEAR_TRIES >= 3);
+});
+
+test('v0.30-4 a big payload is chunked on line boundaries and rejoins byte for byte', () => {
+  const body = Array.from({ length: 400 }, (_, i) => `line ${i}: ${'x'.repeat(60)}`).join('\n');
+  const parts = chunkPayload(body, 8 * 1024);
+  assert.ok(parts.length > 1, `${parts.length} chunks`);
+  assert.equal(parts.join(''), body, 'the payload survives the split exactly');
+  for (const p of parts) assert.ok(p.length <= 8 * 1024, `${p.length} > cap`);
+  // Boundaries land after a newline, so no chunk starts mid-line.
+  for (const p of parts.slice(0, -1)) assert.equal(p.at(-1), '\n');
+  // Small stays one piece — the common case must not grow a code path.
+  assert.deepEqual(chunkPayload('hello'), ['hello']);
+  assert.deepEqual(chunkPayload(''), ['']);
+  assert.deepEqual(chunkPayload('a\nb\n', 8 * 1024), ['a\nb\n'], 'a trailing newline is kept');
+  // One line longer than a whole chunk gets cut, because nothing else can cut it.
+  const huge = `short\n${'z'.repeat(25)}\ntail`;
+  const cut = chunkPayload(huge, 10);
+  assert.equal(cut.join(''), huge);
+  for (const p of cut) assert.ok(p.length <= 10);
+  assert.equal(PASTE_CHUNK_MAX, 8 * 1024);
+});
+
+test('v0.30-2 the outbox names a payload by when and by whom, and parses back', () => {
+  assert.equal(outboxName(1756480000000, 'Dana K'), '1756480000000-Dana-K.txt');
+  assert.equal(outboxName(1756480000000, '../../etc/passwd'), '1756480000000-etc-passwd.txt');
+  assert.equal(outboxName(1756480000000, ''), '1756480000000-someone.txt');
+  assert.deepEqual(parseOutboxName('1756480000000-Dana-K.txt'), { file: '1756480000000-Dana-K.txt', ts: 1756480000000, name: 'Dana-K' });
+  for (const bad of ['x.txt', '1756480000000-Dana K.txt', '../1756480000000-a.txt', '1-a.txt', '']) {
+    assert.equal(parseOutboxName(bad), null, JSON.stringify(bad));
+  }
+  const files = ['1756480000000-Dana.txt', '1756480009000-Roy.txt', 'junk', '1756480005000-Dana.txt'];
+  assert.deepEqual(outboxEntries(files).map((e) => e.ts), [1756480009000, 1756480005000, 1756480000000]);
+});
+
+test('v0.30-2 /retry finds the newest kept payload, and only the host sees everybody\'s', () => {
+  const entries = outboxEntries(['1756480000000-Dana.txt', '1756480009000-Roy.txt', '1756480005000-Dana.txt']);
+  assert.equal(resolveOutbox(entries, 'Roy', true).entry.file, '1756480009000-Roy.txt', 'host: the newest of all');
+  const dana = resolveOutbox(entries, 'Dana', false);
+  assert.equal(dana.entry.file, '1756480005000-Dana.txt', 'a guest: the newest of their own');
+  assert.equal(dana.count, 2);
+  const eve = resolveOutbox(entries, 'Eve', false);
+  assert.equal(eve.ok, false);
+  assert.match(eve.error, /nothing of yours/);
+  assert.match(resolveOutbox([], 'Roy', true).error, /nothing is kept/);
+  assert.match(outboxReport([]), /nothing is kept/);
+  const report = outboxReport(entries, 1756480010000);
+  assert.match(report, /3 messages kept/);
+  assert.match(report, /\/retry/);
+  assert.match(report, /1756480009000-Roy\.txt/);
+  assert.match(keptMessageText('/s/outbox/1-a.txt'), /couldn't confirm.*kept at \/s\/outbox\/1-a\.txt.*\/retry/);
+});
+
+test('v0.30-3 ↑/↓ walk your own submissions and never eat the draft', () => {
+  let h = [];
+  for (const t of ['one', 'two', 'two', '  ', 'three']) h = historyPush(h, t);
+  assert.deepEqual(h, ['three', 'two', 'one'], 'newest first, no blanks, no consecutive dupes');
+  assert.equal(historyPush([], 'x', 2).length, 1);
+  assert.deepEqual(historyPush(['a', 'b'], 'c', 2), ['c', 'a'], 'the cap drops the oldest');
+  // Walking up, then back down to the draft.
+  let idx = -1; let text = '';
+  ({ idx, text } = historyMove(h, idx, 'up', 'draft'));
+  assert.deepEqual([idx, text], [0, 'three']);
+  ({ idx, text } = historyMove(h, idx, 'up', 'draft'));
+  assert.deepEqual([idx, text], [1, 'two']);
+  ({ idx, text } = historyMove(h, idx, 'down', 'draft'));
+  assert.deepEqual([idx, text], [0, 'three']);
+  ({ idx, text } = historyMove(h, idx, 'down', 'draft'));
+  assert.deepEqual([idx, text], [-1, 'draft'], 'off the newest end hands the draft back');
+  // The ends hold: up at the oldest stays, down at the draft stays.
+  assert.deepEqual(historyMove(h, 2, 'up', 'd'), { idx: 2, text: 'one', moved: false });
+  assert.deepEqual(historyMove(h, -1, 'down', 'd'), { idx: -1, text: 'd', moved: false });
+  assert.deepEqual(historyMove([], -1, 'up', 'd'), { idx: -1, text: 'd', moved: false });
+  // The file is oldest-first (so it can be tailed) and capped.
+  assert.equal(serializeHistory(['b', 'a']), 'a\nb\n');
+  assert.equal(serializeHistory([]), '');
+  assert.deepEqual(parseHistoryFile('a\n\n b \nc\n'), ['a', 'b', 'c']);
+  const many = Array.from({ length: 250 }, (_, i) => `m${i}`);
+  assert.equal(parseHistoryFile(many.join('\n')).length, HISTORY_FILE_MAX);
+  assert.equal(serializeHistory(many).split('\n').filter(Boolean).length, HISTORY_FILE_MAX);
+  assert.equal(HISTORY_LIVE, 50);
 });
