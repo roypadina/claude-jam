@@ -877,8 +877,17 @@ test('extractKeys: a split sequence is held back, a lone ESC is not', () => {
   assert.deepEqual(extractKeys(first.hold + ';2u'), { keys: ['newline'], text: '', hold: '' });
   // Escape on its own must not be swallowed waiting for a sequence that will never come.
   assert.deepEqual(extractKeys('\x1b'), { keys: [], text: '\x1b', hold: '' });
-  // Every sequence in the table is reachable from its own prefix.
-  for (const [seq] of KEY_SEQS) assert.equal(extractKeys(seq).keys.length, 1, JSON.stringify(seq));
+  // Every sequence in the table is reachable from its own prefix. v0.28 added the two wheel
+  // entries, whose "sequence" is an anchored RegExp with the coordinates baked in — a sample
+  // report stands in for the literal there.
+  const WHEEL_SAMPLE = ['\x1b[<64;10;20M', '\x1b[M\x60\x21\x21'];
+  let wheels = 0;
+  for (const [seq] of KEY_SEQS) {
+    if (seq instanceof RegExp) { wheels++; continue; }
+    assert.equal(extractKeys(seq).keys.length, 1, JSON.stringify(seq));
+  }
+  assert.equal(wheels, WHEEL_SAMPLE.length, 'every RegExp entry has a sample');
+  for (const s of WHEEL_SAMPLE) assert.equal(extractKeys(s).keys.length, 1, JSON.stringify(s));
 });
 
 // --- v0.14: claude slash commands ------------------------------------------------
