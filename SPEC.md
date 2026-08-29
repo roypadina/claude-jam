@@ -1450,3 +1450,32 @@ that each recipient's own machine decides how to surface.
 - Docs: README, MANUAL (claude must be able to explain "how do I get Roy's attention"), wiki
   Joining/Hosting + Security-Model (the ntfy topic stays local), CHANGELOG; `/ping` and the
   notification toggles appear in `/menu` (v0.24 completeness test covers it).
+
+## v0.27 — upload policy: auto-allow files from already-admitted guests
+
+Today every `/send` and `/paste` asks the host (per-person `always` exists but must be granted
+one guest at a time). Roy wants a session-level choice.
+
+- **Policy**, settable at launch (`--uploads ask|auto|off`, default `ask` — unchanged) and at
+  runtime from `/menu → Access → Uploads` (three-way toggle, current value shown):
+  - `ask` — today's behavior: every transfer hits the approval ladder.
+  - `auto` — anyone already admitted (knock-approved, token, or invite link) may send files and
+    pasted images with no prompt. The transfer line still appears for everyone, and the host
+    still sees `⇪ Yossi sent screenshot.png (2.1 MB) → jam-uploads/…` in the log — visible, just
+    not gated.
+  - `off` — refuse all uploads with a clear reason, regardless of any standing per-person grant.
+  Per-person `always` grants keep working under `ask` and are listed/revocable in
+  `/menu → People` (v0.22C).
+- **What NEVER relaxes, in any policy** (these are the actual protections, not the prompt):
+  basename sanitizing and traversal refusal; the 20 MB per-file cap; one transfer in flight per
+  client; writes confined to `<cwd>/jam-uploads/`; nothing executed, nothing auto-opened;
+  announced-vs-actual byte mismatch still drops the upload.
+- **New guard that `auto` makes necessary — a session quota**: 40 files or 200 MB total per
+  session (whichever first), after which the policy falls back to `ask` with one line saying so
+  (`upload quota reached — asking again`). Prevents an `auto` session from quietly filling the
+  disk; host can raise it with `--upload-quota <n>[MB|files]` or reset it from the menu.
+- **Export stays separate and stays `ask` by default** — a transcript is the whole conversation,
+  including file contents claude read; it gets its own `--export ask|auto|off` toggle in the
+  same menu section, and the docs say plainly why the two defaults differ.
+- Docs: README, MANUAL (claude should be able to answer "why didn't it ask me this time"), wiki
+  Files-and-Export + Security-Model, CHANGELOG; both toggles appear in `/menu` (v0.24 test).
