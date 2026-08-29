@@ -1453,6 +1453,49 @@ What is worth knowing beyond the item text:
   one-key action (it belongs with the v0.24 relay switch), and the launcher menu that would drive
   all of this.
 
+#### v0.22A + all of v0.22C, v0.24, v0.24.1, v0.24.2 and v0.24b — shipped 2026-08-29
+
+Everything of v0.22 and v0.24 except v0.23 (named jams and mDNS discovery, which is untouched).
+280 unit tests. What is worth knowing beyond the item text:
+
+- **One tree, two renderers, and a test with teeth.** `menuTree()` in lib.mjs is the whole
+  product surface as data; `menu.mjs` (the launcher) and the `/menu` overlay in client-ink.mjs
+  are renderers over it, and `menuGaps()` is the completeness check. The check requires a
+  DESCRIPTION of at least eight characters, not merely an entry — otherwise a generated row per
+  `JAM_COMMANDS` entry would make the test vacuously true. Adding a command to `JAM_COMMANDS`
+  with no `COMMAND_HELP` line fails four tests (verified by adding `/summon`); adding a
+  `HOST_FLAGS` row with an empty description fails the flag half.
+- **`menuRunsBare()` asks the parser, not a list.** "One-key run" only makes sense for a command
+  that means something on its own, so the menu runs `/who` and puts `/kick ` on the input line —
+  decided by whether `parseClientLine('/kick')` is a usage error. Nothing to keep in sync.
+- **The panel has to take the keyboard whole.** The client pulls `↑`/`↓` out of the byte stream
+  for input recall and hands Esc to the approval bar *before ink sees them* (v0.10b's key
+  filter). With the panel open, a Select therefore never moved and Esc never closed it. The fix
+  is one early return in the stdin handler, and it is the reason `/menu` is an overlay that owns
+  the live region rather than a widget beside the input row.
+- **v0.24b was not a delivery bug.** Reproduced against a stub daemon: `{t:'token'}` reaches a
+  connected host client exactly as designed. The client rendered it into the MIRROR view's
+  three-row deferred strip — the mirror being the default view since v0.14 — where three
+  ordinary `sys` lines pushed it off within 1.5 s. So the announcement is a one-line `relay`
+  event with `strip:true` and deliberately NOT `toTranscript`: the transcript is where it would
+  scroll away, the strip is where the host is looking, and the deferred list is flushed into the
+  transcript on the way back, so nothing is lost either way.
+- **A re-issue has to wait for the hostname.** The first cut re-issued at switch time and the
+  live run proved it worthless: the daemon logged `minted … → ws://100.86.8.97:7881`, i.e. the
+  LAN address the re-issue exists to replace. It is now deferred to the `ready` branch of
+  `onTunnelChange()`; turning a relay OFF still re-issues immediately, because the LAN address
+  is already final.
+- **A re-issue is a NEW link, and says so.** The daemon keeps only the hash of each secret, so a
+  link cannot be re-encoded with new addresses. Re-issuing mints a fresh link per name (same
+  uses, same remaining expiry) and revokes the old record — which is the honest version, and
+  means the old links stop working.
+- **`--invite-only` closes the KNOCK door only.** A valid token and the host's own loopback
+  client are classified before it, so it never locks the host out of their own jam; the refusal
+  is a 4405 close with the reason, never a silent hang.
+- **Invite-only rides on `/token`, not a command of its own**, because it is the same question —
+  how people get in — and the reply is the same `token` frame that already carries the access
+  state. `/menu` and `/remote` are the only two names added to `JAM_COMMANDS`.
+
 ## v0.23 — named jams and LAN discovery
 
 Guests on the same network should be able to find jams instead of being handed a URL.
@@ -1519,6 +1562,11 @@ Two additions Roy asked for explicitly.
      for the guest's reduced menu (it must list exactly what a guest may do).
    - The menu shows current state next to each toggle (view on/off, announce on/off, access mode,
      relay + URL, replay size, participants, standing approvals) so it doubles as the status page.
+
+**Shipped 2026-08-29** — see the notes under v0.22B above. `announce on/off` is the one item not
+built, because v0.23 (mDNS) is not built; everything else in v0.24, v0.24.1, v0.24.2 and v0.24b
+is in, plus `--invite-only` and a runtime on/off for the browser view, which v0.22C's Access
+section needed and which did not exist.
 
 ## v0.24b — invite-line noise and the missing relay-up announcement
 
