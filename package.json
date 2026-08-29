@@ -10,8 +10,21 @@
     "claude-jam": "claude-jam",
     "jam": "jam"
   },
+  "files": [
+    "claude-jam",
+    "jam",
+    "*.mjs",
+    "!test.mjs",
+    "hooks.sh",
+    "MANUAL.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "test": "node --test test.mjs"
+    "test": "node --test test.mjs",
+    "prepublishOnly": "node --test test.mjs"
   },
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
