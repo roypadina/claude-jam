@@ -31,7 +31,14 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   tmuxSocketFor, tmuxSocketArgs, tmuxAttachLine, TMUX_DEFAULT_SOCKET, F3_BIND_ARGS, statusRightText,
   // v0.19: the durable half of what jam tells claude, as an appended system prompt.
   SYSTEM_PROMPT_FILE, CLAUDE_CAPS_FILE, buildSystemPrompt, systemPromptProbeArgs,
-  systemPromptSupported } from './lib.mjs';
+  systemPromptSupported,
+  // v0.30: a landed paste has three shapes, and a payload is never destroyed.
+  PREFIX_RE, injectLanded, inputBoxText, CLEAR_TRIES, chunkPayload,
+  OUTBOX_DIR, OUTBOX_KEEP, outboxName, outboxEntries, resolveOutbox, outboxReport, keptMessageText,
+  // v0.31: the status is whatever the pane says, and a question is not a permission.
+  classifyPrompt, questionBlock, promptStatusText, answersMode, answerDecision,
+  resolveAnswerTarget, answerLock, ANSWER_TEXT_MAX,
+} from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `jam end` are one code path with one set of gates.
 import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
@@ -81,6 +88,9 @@ function parseArgs(argv) {
     else throw new Error(`unexpected argument: ${a}`);
   }
   o.port = Number(o.port);
+  // v0.31: who may answer a QUESTION outright. `host` puts questions back on the approval ladder;
+  // permissions are never affected by it either way.
+  o.answers = answersMode(o.answers);
   return o;
 }
 
@@ -296,6 +306,7 @@ async function launch() {
     ...(opts.funnelCli ? ['--funnel-cli', opts.funnelCli] : []),
     ...(opts.heartbeat ? ['--heartbeat', String(opts.heartbeat)] : []),
     '--replay', String(opts.replay), // v0.17 H1: the daemon is the process that seeds history
+    '--answers', opts.answers, // v0.31: who may answer a question outright
     ...(opts.configDir ? ['--config-dir', opts.configDir] : []), // daemon globs that profile's transcripts too
     ...(opts.resume ? ['--resume', opts.resume] : [])]; // daemon needs this to skip pre-existing JSONL history
 
@@ -638,6 +649,12 @@ const HISTORY_MAX = Math.max(300, opts.replay);
 const touched = new Map();
 let nextId = 1;
 const status = { busy: false, waiting: false };
+// v0.31: what the CLAUDE PANE is showing right now — none | question | permission | dialog, with
+// the question, its options and (for a form) which one is focused. Re-read on a timer, so it is a
+// fact about the screen rather than a memory of an event.
+let prompt = classifyPrompt('');
+// First-answer-wins, keyed on the prompt's signature: it lifts by itself when the picker moves on.
+let answered = {};
 let busyGen = 0; // bumped when a turn starts, so a slow Stop drain cannot clear a newer turn
 let toolResults = 0; // `⎿` lines broadcast this turn; capped so a big grep cannot flood
 
@@ -668,7 +685,13 @@ function broadcast(ev) {
 
 function names() { return [...clients.values()].map((c) => c.name); }
 
-function pushStatus() { broadcast({ t: 'status', busy: status.busy, waiting: status.waiting }); }
+// v0.31: `waiting` is now DERIVED from the pane (see pumpPrompt), and `prompt` is what the pane
+// actually says — so the status row can name the tool, show the question, or say the host is
+// needed at the keyboard, and can never claim a prompt that is no longer on screen.
+function statusFrame() {
+  return { t: 'status', busy: status.busy, waiting: status.waiting, prompt, answers: opts.answers };
+}
+function pushStatus() { broadcast(statusFrame()); }
 
 function rosterChanged(extra) {
   writeRoster([...clients.values()].map(({ name, joinedAt }) => ({ name, joinedAt })));
@@ -964,6 +987,31 @@ function setMirror(ws, on) {
   console.log(`[mirror] ${clients.get(ws)?.name || '?'} ${on ? 'on' : 'off'} (${mirrors.size} watching)`);
 }
 
+// ------------------------------------------- v0.31: the prompt, read off the pane ----
+// The whole of v0.31's first item. `capture-pane` is one cheap tmux call; it runs only while
+// somebody is connected (a jam nobody is in polls nothing), and only a CHANGE is broadcast, so an
+// idle prompt costs one call per tick and zero bytes on the wire. Everything that can move the
+// screen calls it too — the Notification hook, a typed answer, a new assistant record — so the
+// status is usually right within a frame rather than within a tick.
+const PROMPT_GAP = 400;
+function pumpPrompt() {
+  if (!clients.size) return prompt;
+  const now = classifyPrompt(capture());
+  if (now.sig === prompt.sig) return prompt;
+  prompt = now;
+  status.waiting = now.kind !== 'none';
+  console.log(`[prompt] ${now.kind}${now.header ? ` (${now.header})` : ''}`
+    + `${now.question ? ` — ${now.question.slice(0, 70)}` : ''}`);
+  pushStatus();
+  return prompt;
+}
+function startPromptPoll() {
+  const timer = setInterval(pumpPrompt, PROMPT_GAP);
+  timer.unref?.();
+  console.log(`prompts: the pane is classified every ${PROMPT_GAP}ms while anybody is connected `
+    + `(answers: ${opts.answers})`);
+}
+
 // ----------------------------------------------------------- knock popups ----
 // The host approves a knock without leaving the claude window. Popups land only on clients
 // attached to the jam session itself — ttyd viewers sit on grouped sessions and never see
@@ -1228,6 +1276,7 @@ function startHeartbeat(wss) {
   }, HEARTBEAT_GAP);
   timer.unref?.();
   console.log(`heartbeat: ping every ${HEARTBEAT_GAP}ms, terminate on a missed round`);
+  startPromptPoll();
 }
 
 function onRequest(req, res) {
@@ -1306,15 +1355,20 @@ function onHook(event, body) {
     // the JSONL a beat later (~100 ms measured) and the tail only polls every 300 ms.
     // Drain until the file goes quiet, so the final agent text is broadcast BEFORE
     // busy:false instead of after it.
-    status.waiting = false;
+    // v0.31: `waiting` is NOT cleared here any more. A turn can end with a prompt still on the
+    // screen, and clearing it from an event rather than from the pane is half of what made the
+    // old flag lie. pumpPrompt owns it.
     const gen = busyGen;
     drainTail().catch((e) => console.error('drain failed:', e.message)).then(() => {
       if (gen === busyGen) status.busy = false; // a new turn started meanwhile: leave it busy
       pushStatus();
     });
   } else if (event === 'notification') {
-    const msg = String(payload.message || '');
-    if (/permission|approve|allow/i.test(msg)) { status.waiting = true; pushStatus(); }
+    // v0.31: the hook no longer SETS anything. It fires when claude wants attention, which is a
+    // fine reason to look at the screen a beat sooner than the poll would — but what the status
+    // says is read off the screen, so it cannot describe a prompt that is not there.
+    console.log(`[notification] ${String(payload.message || '').slice(0, 120)}`);
+    pumpPrompt();
   }
 }
 
@@ -1343,7 +1397,7 @@ function admitSocket(ws, name, host, loopback = false, via = 'token') {
     },
   });
   rosterChanged({ joined: name, via });
-  send(ws, { t: 'status', id: nextId++, ts: Date.now(), busy: status.busy, waiting: status.waiting });
+  send(ws, { ...statusFrame(), id: nextId++, ts: Date.now() });
   // Knocks and approval requests stay out of `history`, so a host client that connects (or
   // reconnects) while somebody is waiting would otherwise never hear about them.
   if (host) {
@@ -1618,6 +1672,9 @@ function onSocket(ws, req) {
       // with one of them. `permok` is the host's yes/no on the same ladder as everything else.
     } else if (m.t === 'perm') {
       onPerm(ws, me, m);
+      // v0.30: what the daemon kept when it could not confirm a message landed, and re-sending it.
+    } else if (m.t === 'outbox') {
+      onOutbox(ws, me, m.op === 'retry' ? 'retry' : 'list');
     } else if (m.t === 'permok') {
       onLadderAnswer('permission', ws, me, m);
     } else if (m.t === 'key') {
@@ -1722,7 +1779,8 @@ const ladders = {
   },
   // v0.17 P2: ONE digit into a permission prompt that is up right now. The record carries the
   // choice, the option text it stood for and how many options there were, because all three are
-  // re-checked against the live screen before anything is typed (see runPermission).
+  // re-checked against the live screen before anything is typed (see runAnswer). v0.31: this
+  // ladder is now the PERMISSION half only — a question goes straight through.
   permission: {
     label: 'permission',
     frame: (r) => ({ t: 'permreq', name: r.name, choice: r.choice, option: r.optionText, options: r.count }),
@@ -1730,7 +1788,7 @@ const ladders = {
     busy: (r) => `your answer (${r.choice}) is still waiting for the host — one at a time`,
     expired: (r) => `answering ${r.choice} expired — nobody approved it, and nothing was typed`,
     denied: () => `${opts.name} answered the prompt themselves — nothing of yours was typed`,
-    run: (r, always) => runPermission(r, always),
+    run: (r, always) => runAnswer(r, always),
   },
 };
 // requests: ws -> record {name, ws, detail?, size?, timer, popped}. always: lowercased names.
@@ -1841,83 +1899,140 @@ async function typeSlash(text) {
   tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
 }
 
-// ------------------------------------ v0.17 P2: the permission relay ----
-// The ceiling this lifts: "guests cannot answer permission prompts". NOT by giving a guest F3's
+// ------------------------ v0.17 P2 + v0.31: answering what claude is showing ----
+// The ceiling v0.17 lifted: "guests cannot answer permission prompts". NOT by giving a guest F3's
 // raw key passthrough — arbitrary bytes into the host's TUI from off-box is a security regression,
 // and it stays refused. Instead the daemon reads the prompt's own numbered options off the pane,
-// shows them to the guest who asked, puts ONE chosen digit on the same approval ladder as a
-// command, and — only after the host says yes — types that digit and nothing else.
+// shows them to whoever asked, and types ONE chosen digit and nothing else.
 //
-// Five gates, and all five have to hold: `status.waiting` (there is a prompt), the options parse
-// (we know what is on screen), the digit is one of them, the host approved THAT digit, and the
-// screen still says the same thing at the moment of typing. Any of them missing is a refusal;
-// none of them guesses.
+// v0.31 splits that in two, because one wording for three different screens was a lie:
+//   question   → a product decision. Anyone may answer it outright (see answerDecision).
+//   permission → a security grant. The v0.17 ladder, untouched: guest asks, host approves.
+//   dialog     → nothing jam can safely type. The host is told to take the keyboard.
+// The gates that survive from v0.17: the prompt is read off the CURRENT screen (not from a hook
+// event), the options parse, the digit is one of them, and the screen still says exactly the same
+// thing at the moment of typing — `sig` is that check, and it is stronger than v0.17's
+// text+count comparison because it also covers which question of a form is focused.
 
-// `/answer` and `/answer <n>` from any client.
+// `/answer`, `/answer <n>`, `/answer <q> <n>`, `/answer other <text>` from any client.
 function onPerm(ws, me, m) {
-  // No prompt, no relay. This is the difference between answering a question and typing into
-  // claude's input box, and it is the guard that makes the rest safe.
-  if (!status.waiting) {
-    return sendError(ws, 'nothing is waiting for a permission answer right now — '
-      + `the ⚠ in the status row is when /answer works${trusted(me) ? '' : ', and the host can always answer with F3'}`);
+  pumpPrompt(); // the freshest possible read: an answer is about THIS screen, not a cached one
+  const p = prompt;
+  const host = trusted(me);
+  if (p.kind === 'none') {
+    return sendError(ws, 'nothing is waiting for an answer right now — '
+      + `the ⚠ in the status row is when /answer works${host ? '' : ', and the host can always answer with F3'}`);
   }
-  const options = parsePermOptions(capture());
-  if (!options.length) {
+  if (p.kind === 'dialog') {
+    return sendError(ws, 'claude is showing a dialog with nothing numbered on it, so there is no digit '
+      + `I could safely type — ${host ? 'F3 attaches the real TUI' : 'the host has to take the keyboard (F3)'}`);
+  }
+  if (!p.options.length) {
     return sendError(ws, 'I cannot read numbered options off claude\'s screen, so there is nothing '
       + 'I could safely answer — the host answers this one (F3 attaches the real TUI)');
   }
   // Bare `/answer`: what IS on the screen. Read-only, so it needs no approval — it describes a
   // screen the asker is already watching in the mirror. Only they see it (orientation, not news).
   if (m.choice == null || m.choice === '') {
-    return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: permOptionsReport(options) });
+    const text = p.kind === 'question'
+      ? questionBlock(p, { answers: opts.answers, host })
+      : permOptionsReport(p.options);
+    return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text });
   }
-  const v = validPermChoice(m.choice, options);
+  // Free text is not a digit, and typing arbitrary text into the TUI is raw keyboard access —
+  // so it is the host's whatever `--answers` says, and a guest asking for it goes on the ladder
+  // with the text visible to the host BEFORE anything is typed.
+  if (m.choice === 'other') {
+    if (p.kind !== 'question') {
+      return sendError(ws, 'free text answers a question, not a permission prompt — /answer <n> here');
+    }
+    const free = p.options.find((o) => o.free);
+    if (!free) return sendError(ws, 'this question has no free-text option — /answer <n> picks one of the ones on screen');
+    const text = String(m.text ?? '').trim().slice(0, ANSWER_TEXT_MAX);
+    if (!text) return sendError(ws, 'usage: /answer other <what to type>');
+    const rec = { name: me.name, ws, choice: free.n, optionText: free.text, sig: p.sig, kind: p.kind, free: true, text };
+    if (host) return runAnswer(rec);
+    return askHost('permission', ws, me, { ...rec, detail: `answer other: ${text}`.slice(0, PERM_TEXT_MAX + 14) });
+  }
+  // Which question of a form this is aimed at. Only the focused one can be answered: moving
+  // between tabs is a Tab keypress, which is exactly what a guest never gets.
+  const t = resolveAnswerTarget(p, m.q ?? null);
+  if (!t.ok) return sendError(ws, t.error);
+  const v = validPermChoice(m.choice, p.options);
   if (!v.ok) return sendError(ws, v.error);
-  const rec = { name: me.name, ws, choice: v.n, optionText: v.text, count: options.length };
-  // The host already drives this pane directly; their own /answer is the same validated digit,
-  // just with nobody to ask. A guest with standing approval (`/allow-perm … always`) likewise —
-  // and both still go through runPermission's re-check.
-  if (trusted(me) || standing('permission', me)) return runPermission(rec, standing('permission', me));
+  const opt = p.options.find((o) => o.n === v.n) || {};
+  let decision = answerDecision({ kind: p.kind, host, answers: opts.answers, free: !!opt.free });
+  // v0.17: a guest the host granted standing approval to is pre-approved on the permission
+  // ladder — but never for a free-text option, which is raw keyboard access by another name.
+  if (decision === 'ask' && !opt.free && standing('permission', me)) decision = 'run';
+  const rec = { name: me.name, ws, choice: v.n, optionText: v.text, count: p.options.length, sig: p.sig, kind: p.kind };
+  if (decision === 'run') return runAnswer(rec, !host && standing('permission', me));
   askHost('permission', ws, me, { ...rec, detail: `answer ${v.n}: ${v.text}`.slice(0, PERM_TEXT_MAX + 12) });
 }
 
-// Approved (or the host's own). The last gate is here, not at request time: the host approved ONE
-// option of ONE prompt, and a prompt that moved on in between would take that digit as the answer
-// to a different question. So the screen is read again and has to still say the same thing.
-function runPermission(rec, always = false) {
-  if (!status.waiting) {
+// Approved (or nobody's approval was needed). The last gate is here, not at request time: an
+// answer stands for ONE option of ONE prompt, and a prompt that moved on in between would take
+// that digit as the answer to a different question. So the screen is read again and has to still
+// say the same thing — `sig` covers the kind, the question, every option and which one is focused.
+function runAnswer(rec, always = false) {
+  pumpPrompt();
+  const p = prompt;
+  if (p.kind === 'none' || p.kind === 'dialog') {
     return sendError(rec.ws, 'that prompt was already answered — nothing was typed');
   }
-  const options = parsePermOptions(capture());
-  const v = validPermChoice(rec.choice, options);
-  if (!v.ok || v.text !== rec.optionText || options.length !== rec.count) {
-    console.log(`[permission] ${rec.name}'s ${rec.choice} dropped: the screen changed under it`);
+  if (p.sig !== rec.sig) {
+    console.log(`[answer] ${rec.name}'s ${rec.choice} dropped: the screen changed under it`);
     return sendError(rec.ws, 'claude\'s screen changed after you asked, so your answer would have '
       + 'gone to a different question — nothing was typed. Look again and /answer once more');
   }
-  broadcast({ t: 'sys', text: `${rec.name} answered the permission prompt: ${rec.choice}. ${rec.optionText}`
-    + ` (approved by ${opts.name}${always ? ' — standing' : ''})` });
+  // v0.31: first answer wins. The lock is the prompt's signature, so it lifts by itself the
+  // moment the picker moves on — no timer, and a form's next question is a fresh question.
+  const lock = answerLock(answered, p.sig, rec.name);
+  if (!lock.ok) return sendError(rec.ws, `already answered by ${lock.by} — nothing of yours was typed`);
+  answered = lock.state;
+  const what = rec.free ? `${rec.choice}. ${rec.optionText} → ${rec.text}` : `${rec.choice}. ${rec.optionText}`;
+  broadcast({ t: 'sys',
+    text: p.kind === 'question'
+      ? `${rec.name} answered: ${what}`
+      : `${rec.name} answered the permission prompt: ${what} (approved by ${opts.name}${always ? ' — standing' : ''})` });
   // Serialized on the injection queue, like a slash command: a digit typed while a message is
   // mid-paste would interleave two inputs.
-  queue = queue.then(() => typePermChoice(rec.choice)).catch((e) => console.error('permission answer failed:', e.message));
+  queue = queue.then(() => (rec.free ? typeFreeText(rec.choice, rec.text) : typePermChoice(rec.choice)))
+    .catch((e) => console.error('answer failed:', e.message));
 }
 
 // The one write. `sendKeyArgs` is F3's own encoder (hex per ASCII character, never a shell), fed
 // exactly one digit — the cap and the encoding are the same ones raw passthrough has always used.
-// Measured on claude 2.1.251: the bare digit answers the prompt on its own. The Enter is sent only
-// if the same options are STILL up afterwards, so a picker that needs it gets it and a prompt that
-// already closed never receives a stray submit into claude's input box.
+// Measured on claude 2.1.251: the bare digit answers a permission prompt AND an AskUserQuestion
+// picker on its own. The Enter is sent only if numbered options are STILL up afterwards, so a
+// picker that needs it gets it and a prompt that already closed never receives a stray submit.
 async function typePermChoice(n) {
   for (const args of sendKeyArgs(String(n))) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
   bumpActivity(); // the answer wants its echo on the next 40 ms frame
   await sleep(300);
   if (parsePermOptions(capture()).length) {
     tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
-    console.log(`[permission] typed ${n} and Enter (the options were still up)`);
+    console.log(`[answer] typed ${n} and Enter (the options were still up)`);
   } else {
-    console.log(`[permission] typed ${n} — the prompt took the digit on its own`);
+    console.log(`[answer] typed ${n} — the prompt took the digit on its own`);
   }
   bumpActivity();
+  pumpPrompt();
+}
+
+// v0.31: the host's free-text answer. The digit opens claude's own text field, then the text goes
+// in as one capped run and Enter submits it. Host-only by construction — onPerm never reaches
+// here for a guest without the host having seen the exact text first.
+async function typeFreeText(n, text) {
+  for (const args of sendKeyArgs(String(n))) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
+  bumpActivity();
+  await sleep(400);
+  for (const args of sendKeyArgs(String(text).slice(0, ANSWER_TEXT_MAX))) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
+  await sleep(200);
+  tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+  console.log(`[answer] typed ${n} and ${String(text).length} characters of free text`);
+  bumpActivity();
+  pumpPrompt();
 }
 
 // ----------------------------------------------- v0.12/v0.13: file transfers ----
@@ -2129,9 +2244,13 @@ let bufN = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function enqueueInject(name, text, ws) {
-  queue = queue.then(() => inject(name, text)).catch((e) => {
-    console.error('inject failed:', e.message);
-    if (ws) sendError(ws, `injection failed: ${e.message}`);
+  queue = queue.then(() => inject(name, text, ws)).catch((e) => {
+    // v0.30: `kept` is not a failure to report twice — inject() already told the sender where
+    // their message is and how to send it again. Anything else is a real fault.
+    if (e.message !== 'kept') {
+      console.error('inject failed:', e.message);
+      if (ws) sendError(ws, `injection failed: ${e.message}`);
+    }
     // Nothing was submitted, so no Stop hook is coming to clear this.
     if (status.busy) { status.busy = false; pushStatus(); }
   });
@@ -2173,8 +2292,82 @@ async function ensureReady() {
   // injection re-checks instead of assuming a dialog can no longer appear.
 }
 
-async function inject(name, text) {
+// -------------------------------------------------- v0.30: the outbox ----
+// Every payload is on disk BEFORE it is pasted and is deleted only after a verified submit, so
+// "I could not confirm it arrived" and "it is gone" are never the same event. 0600 inside the
+// 0700 state dir: it is somebody's unsent message, not shared state.
+const outboxDir = () => path.join(opts.state, OUTBOX_DIR);
+
+function outboxWrite(name, payload) {
+  const dir = outboxDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, outboxName(Date.now(), name));
+    fs.writeFileSync(file, payload, { mode: 0o600 });
+    outboxPrune();
+    return file;
+  } catch (e) {
+    // A message that cannot be kept still has to be sent: the outbox is a safety net, not a gate.
+    console.error(`[outbox] could not keep ${name}'s message: ${e.message}`);
+    return null;
+  }
+}
+
+const outboxList = () => {
+  try { return outboxEntries(fs.readdirSync(outboxDir())); } catch { return []; }
+};
+
+// A pane that has been broken for an hour must not fill a disk.
+function outboxPrune() {
+  for (const e of outboxList().slice(OUTBOX_KEEP)) {
+    try { fs.rmSync(path.join(outboxDir(), e.file), { force: true }); } catch { /* already gone */ }
+  }
+}
+
+const outboxDrop = (file) => { if (file) try { fs.rmSync(file, { force: true }); } catch { /* already gone */ } };
+
+// ------------------------------------------------ v0.30: pasting, verified ----
+// The v0.30 failure was one verification rule for a paste that has three shapes. Now: capture the
+// box, paste, and accept the probe OR a paste placeholder OR the box simply not being what it was.
+// Nothing is submitted until a chunk is seen to land, and nothing is cleared blindly.
+const PASTE_POLLS = 24; // × 250 ms — the same budget the single-shot version had
+const SUBMIT_POLLS = 12;
+
+async function pasteChunk(chunk, probe) {
+  const before = capture();
+  const buf = `jam${++bufN}`;
+  const file = path.join(opts.state, 'inject.txt');
+  try {
+    fs.writeFileSync(file, chunk, { mode: 0o600 }); // never argv, never a shell
+    tmux('load-buffer', '-b', buf, file);
+    tmux('paste-buffer', '-b', buf, '-d', '-p', '-t', CLAUDE_PANE);
+    for (let i = 0; i < PASTE_POLLS; i++) {
+      const how = injectLanded({ probe, before, after: capture() });
+      if (how) return how;
+      await sleep(250);
+    }
+    return null;
+  } finally {
+    fs.rmSync(file, { force: true });
+    tmux('delete-buffer', '-b', buf);
+  }
+}
+
+// Measured on 2.1.251: ONE Ctrl-U kills one visual line, not the whole input, so a wrapped box
+// needs several — and an EMPTY box needs none at all. Blindly pressing it is what wiped the
+// message that started v0.30.
+function clearBox() {
+  for (let i = 0; i < CLEAR_TRIES; i++) {
+    if (!inputBoxText(capture())) return true;
+    tmux('send-keys', '-t', CLAUDE_PANE, 'C-u');
+  }
+  return !inputBoxText(capture());
+}
+
+async function inject(name, text, ws = null, kept = null) {
   const payload = `[${name}]: ${text}`;
+  // On disk first. `kept` is a /retry, which already has a file — re-keeping it would leave two.
+  const file = kept || outboxWrite(name, payload);
   await ensureReady();
   // Wait for the input box. Claude Code queues text typed mid-response, so a timeout
   // is not fatal — paste anyway.
@@ -2182,34 +2375,69 @@ async function inject(name, text) {
     if (/❯|^> ?$/m.test(capture().split('\n').slice(-5).join('\n'))) break;
     await sleep(250);
   }
-  const file = path.join(opts.state, 'inject.txt');
-  const buf = `jam${++bufN}`;
-  try {
-    fs.writeFileSync(file, payload); // never argv, never a shell
-    tmux('load-buffer', '-b', buf, file);
-    tmux('paste-buffer', '-b', buf, '-d', '-p', '-t', CLAUDE_PANE);
-    // Assert it landed before submitting; pressing Enter into a pane that never got the
-    // paste would submit whatever was already there.
-    // The probe must be ONE visual line: claude indents continuation/wrapped lines, so a
-    // probe containing a newline (or wider than the pane) can never match the capture.
-    // ponytail: probe is the message's own first chars, so two identical consecutive
-    // messages can match a stale echo. Prepend a nonce line (see rr-ctl.sh) if it bites.
-    const width = Number(tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width}').stdout) || 80;
-    const probe = payload.split('\n')[0].slice(0, Math.max(8, Math.min(40, width - 12)));
-    for (let i = 0; i < 24; i++) {
-      if (capture().split('\n').slice(-15).join('\n').includes(probe)) {
-        tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
-        return;
-      }
-      await sleep(250);
+  // The probe must be ONE visual line: claude indents continuation/wrapped lines, so a probe
+  // containing a newline (or wider than the pane) can never match the capture. It is also the
+  // rule that CANNOT work for a multi-line payload — 2.1.x collapses those to `[Pasted text …]` —
+  // which is exactly why injectLanded has two more.
+  // ponytail: probe is the message's own first chars, so two identical consecutive messages can
+  // match a stale echo. The placeholder and diff rules have the same ceiling; the outbox is what
+  // makes being wrong survivable.
+  const width = Number(tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width}').stdout) || 80;
+  const chunks = chunkPayload(payload);
+  for (let c = 0; c < chunks.length; c++) {
+    // Only the FIRST chunk starts at the box's left edge; a later one lands wherever the previous
+    // one left the cursor, so its own first line is not a line claude will draw on its own.
+    const probe = c === 0 ? chunks[c].split('\n')[0].slice(0, Math.max(8, Math.min(40, width - 12))) : '';
+    const how = await pasteChunk(chunks[c], probe);
+    if (!how) {
+      // NOT a blind Ctrl-U. Capture the box, clear it only if something is actually in it (a half
+      // -landed chunk would glue itself to the next message), and keep the payload either way.
+      const had = !!inputBoxText(capture());
+      if (had) clearBox();
+      const where = file || '(nowhere — the outbox is not writable, see the daemon log)';
+      console.log(`[inject] ${name}'s message did not land${chunks.length > 1 ? ` (chunk ${c + 1}/${chunks.length})` : ''}`
+        + ` — kept at ${where}, box ${had ? 'had text and was cleared' : 'was empty'}`);
+      if (ws) sendError(ws, keptMessageText(where));
+      // Nothing new is broadcast: the room already saw the message when it was said.
+      throw new Error('kept');
     }
-    // Leave nothing in the input box, or the next injection submits both messages glued.
-    tmux('send-keys', '-t', CLAUDE_PANE, 'C-u');
-    throw new Error('pasted text never appeared in the claude pane');
-  } finally {
-    fs.rmSync(file, { force: true });
-    tmux('delete-buffer', '-b', buf);
+    if (chunks.length > 1) console.log(`[inject] chunk ${c + 1}/${chunks.length} landed (${how})`);
   }
+  // Enter, once, after the last chunk.
+  tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+  // A verified send prunes the outbox — and "verified" means the box emptied, which is what
+  // submitting does. If it did not, the payload stays kept and the sender is told.
+  for (let i = 0; i < SUBMIT_POLLS; i++) {
+    if (!inputBoxText(capture())) { outboxDrop(file); return; }
+    await sleep(250);
+  }
+  console.log(`[inject] ${name}'s message was pasted but the box did not clear — kept at ${file}`);
+  if (ws) sendError(ws, keptMessageText(file || '(nowhere)'));
+  throw new Error('kept');
+}
+
+// ------------------------------------------------- v0.30: /retry and /outbox ----
+// A kept payload belongs to whoever wrote it; the host may retry anybody's, because they can see
+// the room. Serialized on the same queue as everything else that types into the pane.
+function onOutbox(ws, me, op) {
+  const entries = outboxList();
+  if (op === 'list') {
+    return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: outboxReport(entries) });
+  }
+  const r = resolveOutbox(entries, me.name, trusted(me));
+  if (!r.ok) return sendError(ws, r.error);
+  const file = path.join(outboxDir(), r.entry.file);
+  let payload;
+  try { payload = fs.readFileSync(file, 'utf8'); } catch { return sendError(ws, 'that message is no longer kept'); }
+  // Sent as the person it was kept for, not as whoever pressed /retry: the attribution in the
+  // payload is already theirs, and the room saw it under that name the first time.
+  const text = payload.replace(PREFIX_RE, '');
+  broadcast({ t: 'sys', text: `${me.name} re-sent ${r.entry.name}'s kept message` });
+  status.busy = true; startTurn(); pushStatus();
+  queue = queue.then(() => inject(r.entry.name, text, ws, file)).catch((e) => {
+    if (e.message !== 'kept') { console.error('retry failed:', e.message); sendError(ws, `retry failed: ${e.message}`); }
+    if (status.busy) { status.busy = false; pushStatus(); }
+  });
 }
 
 // ------------------------------------------------------------- jsonl tail ----
@@ -2307,11 +2535,10 @@ async function drainTail(maxMs = 2000) {
 }
 
 function onTranscript(e) {
-  // An assistant record (text OR the tool_use that just started running) means the
-  // permission prompt was answered. A tool RESULT is deliberately NOT in that set: it rides
-  // in a user record but is pure plumbing, and it must not touch busy, waiting or
-  // attribution — only produce a `⎿` line.
-  if ((e.kind === 'text' || e.kind === 'tool') && status.waiting) { status.waiting = false; pushStatus(); }
+  // v0.31: this used to clear `waiting` on the first assistant record, i.e. guess that a prompt
+  // was answered because something else happened. It is the pane that knows, and pumpPrompt is
+  // what reads it — a transcript record is not evidence about what is on screen.
+  if (e.kind === 'text' || e.kind === 'tool') pumpPrompt();
   // v0.17 F2: the live half of the file set — the backfill seeded the rest at boot.
   noteFilePath(touched, e.file);
   // Agent text lands in everyone's terminal, so strip escapes here too.

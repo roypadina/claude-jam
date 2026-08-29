@@ -10,7 +10,14 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   endingNotice, confirmYes,
   // v0.22B/C: invite links (the address list a link carries, what a minted one prints) and the
   // offer that follows a kick.
-  INVITE_CONNECT_MS, inviteMintedLines, kickOffer } from './lib.mjs';
+  INVITE_CONNECT_MS, inviteMintedLines, kickOffer,
+  // v0.31: the status line and the question block are drawn from the daemon's classification of
+  // the live pane. v0.30-3: readline already gives ↑/↓ recall — this makes it survive a restart.
+  promptStatusText, questionBlock,
+  historyPush, parseHistoryFile, serializeHistory, historyFilePath, HISTORY_LIVE } from './lib.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const argv = process.argv.slice(2);
@@ -46,7 +53,9 @@ const fg256 = (n) => `\x1b[38;5;${n}m`; // everybody else's stable per-name colo
 const SPIN = ['✻', '✼', '✽', '✼']; // claude's own working glyph cycle
 const seen = new Set(); // dedupe replayed history across reconnects
 const typing = new Map(); // name -> last typing ms
-let state = { busy: false, waiting: false };
+// v0.31: `prompt` is the daemon's classification of the claude pane — none | question |
+// permission | dialog. The status line is drawn from it, so it cannot outlive what is on screen.
+let state = { busy: false, waiting: false, prompt: { kind: 'none' }, answers: 'anyone' };
 let roster = [];
 let ws = null;
 let backoff = 1000;
@@ -66,6 +75,19 @@ let ending = false; // v0.18: the jam is over on purpose, so the close below mus
 let confirming = null; // v0.18-4: `/end` asked, and the next line is the answer
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: '' });
+// v0.30-3: readline gives `↑`/`↓` recall for free — what it does not do is remember across runs.
+// Seed rl.history (newest first, which is readline's own order) and write it back on every
+// submitted row. Every disk step is wrapped: a read-only home costs recall, never the client.
+const HISTORY_PATH = historyFilePath(os.homedir(), process.env);
+try { rl.history = parseHistoryFile(fs.readFileSync(HISTORY_PATH, 'utf8')).reverse().slice(0, HISTORY_LIVE); }
+catch { /* no file yet, or not readable */ }
+function rememberInput(text) {
+  rl.history = historyPush(rl.history || [], text, HISTORY_LIVE);
+  try {
+    fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(HISTORY_PATH, serializeHistory(rl.history), { mode: 0o600 });
+  } catch { /* the recall still works for this session */ }
+}
 
 // v0.17 P3/P4: claude needs an answer, or somebody said your name. The bell is the portable half;
 // macOS gets a real notification with it. Rate-gated, so a burst is one nudge.
@@ -82,7 +104,8 @@ function statusLine() {
   if (t.length) bits.push(`${t.join(', ')} ${t.length > 1 ? 'are' : 'is'} typing…`);
   // Back to dim after the orange bit: the whole status sits inside one dim bracket.
   if (state.busy) bits.push(`${C.accent}${SPIN[spin]} claude is working…${C.off}${C.dim}`);
-  if (state.waiting) bits.push(`⚠ waiting for permission${IS_HOST ? '' : ' — /answer shows the options'}`);
+  const p = promptStatusText(state.prompt, { host: IS_HOST, answers: state.answers });
+  if (p) bits.push(p);
   const rtt = rttText(net, Date.now(), net?.heartbeat);
   if (rtt) bits.push(rtt);
   return bits.join(' · ');
@@ -196,10 +219,16 @@ function render(ev) {
     case 'typing': if (ev.from !== NAME) { typing.set(ev.from, Date.now()); reprompt(); } return;
     case 'status': {
       // v0.17 P3: the host is who can always answer a prompt, so the host is who gets rung.
-      if (IS_HOST && ev.waiting && !state.waiting) {
-        nudge('claude needs an answer', 'a permission prompt is waiting in the jam');
+      // v0.31: unless it is a QUESTION, which is anybody's to answer — so everybody is told, and
+      // the question itself is printed rather than the bare fact that one exists.
+      const p = ev.prompt || { kind: ev.waiting ? 'permission' : 'none' };
+      const was = state.prompt?.kind || 'none';
+      const fresh = p.kind !== was && p.kind !== 'none';
+      if (fresh && (IS_HOST || p.kind === 'question')) {
+        nudge('claude needs an answer', promptStatusText(p, { host: IS_HOST, answers: ev.answers }));
       }
-      state = { busy: ev.busy, waiting: ev.waiting };
+      state = { busy: ev.busy, waiting: ev.waiting, prompt: p, answers: ev.answers || 'anyone' };
+      if (fresh && p.kind === 'question') sys(questionBlock(p, { answers: state.answers, host: IS_HOST }));
       setSpinner(state.busy);
       return reprompt();
     }
@@ -392,6 +421,7 @@ function sendUpload(ev) {
 }
 
 rl.on('line', (raw) => {
+  rememberInput(raw); // v0.30-3: before anything else — even a line that turns out to be a typo
   // v0.18-4: /end asked "really end this jam for everyone?", and this is the answer —
   // taken before anything is parsed, so a bare `y` can never become a message to claude.
   // v0.22C adds the second question of the same shape: revoke the kicked person's link?
@@ -454,10 +484,17 @@ rl.on('line', (raw) => {
     case 'diff': sendMsg({ t: 'diff', path: act.path || undefined }); break;
     // v0.17 P2: only the daemon can see claude's screen, so it reads the options and does the
     // typing. A bare `/answer` asks what they are; `/answer <n>` offers one to the host.
-    case 'perm':
-      sendMsg({ t: 'perm', choice: act.choice ?? undefined });
-      if (act.choice != null && !IS_HOST) sys(`asked the host to answer ${act.choice} — nothing is typed until they say yes`);
+    case 'perm': {
+      sendMsg({ t: 'perm', choice: act.choice ?? undefined, q: act.q ?? undefined, text: act.text ?? undefined });
+      // v0.31: a question goes straight through; a permission, a locked-down jam or free text
+      // goes to the host. The daemon decides — this only says which to expect.
+      const kind = state.prompt?.kind || 'none';
+      const gated = !IS_HOST && (kind !== 'question' || act.choice === 'other' || state.answers === 'host');
+      if (act.choice != null && gated) sys(`asked the host to answer ${act.choice} — nothing is typed until they say yes`);
       break;
+    }
+    // v0.30: what the daemon kept when it could not confirm a message reached claude.
+    case 'outbox': sendMsg({ t: 'outbox', op: act.op }); break;
     case 'perm-ok':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'permok', op: act.op, name: act.name || undefined, always: act.always });

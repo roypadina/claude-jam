@@ -325,16 +325,19 @@ export function parseClientLine(line) {
     const v = validDiffPath(t.slice(5));
     return v.ok ? { kind: 'diff', path: v.path } : { kind: 'error', text: v.error };
   }
-  // v0.17 P2: answering the permission prompt claude is showing. Bare `/answer` asks what the
-  // options are (the daemon reads them off the screen and tells the asker alone); `/answer <n>`
-  // is the request the host approves. A single digit is the ONLY thing that can ever be typed
-  // into the prompt, so a single digit is the only thing this parses.
+  // v0.17 P2 / v0.31: answering whatever claude is showing. Bare `/answer` describes the prompt
+  // that is up; `/answer <n>` picks an option; `/answer <q> <n>` picks one on a multi-question
+  // form; `/answer other <text>` is the host's free-text answer. A digit is the only thing ever
+  // typed into a picker — `other` is the one exception, and it is host-only in the daemon.
   if (t === '/answer' || t.startsWith('/answer ')) {
-    const rest = t.slice(7).trim();
-    if (!rest) return { kind: 'perm', choice: null };
-    return /^[1-9]$/.test(rest) ? { kind: 'perm', choice: Number(rest) }
-      : { kind: 'error', text: 'usage: /answer (list the options) | /answer <1-9>' };
+    const v = parseAnswerCommand(t.slice(7));
+    return v.ok ? { kind: 'perm', q: v.q ?? null, choice: v.choice ?? null, text: v.text ?? null }
+      : { kind: 'error', text: v.error };
   }
+  // v0.30: nothing typed is ever lost. `/outbox` lists what the daemon kept when it could not
+  // confirm a message landed; `/retry` sends the newest one again.
+  if (t === '/outbox') return { kind: 'outbox', op: 'list' };
+  if (t === '/retry') return { kind: 'outbox', op: 'retry' };
   // v0.22B: invite links — mint one, list them, take one back. Host-only (the daemon enforces
   // it): a link is a credential, and minting one is admitting somebody in advance.
   if (t === '/invites') return { kind: 'invites' };
@@ -385,8 +388,11 @@ export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror',
   '/accept-file', '/deny-file',
   // v0.17 F2/F3: the paths this session touched, and git's own answer about them.
   '/files', '/diff',
-  // v0.17 P2: the permission relay — a guest asks, the host allows or denies.
+  // v0.17 P2: the permission relay — a guest asks, the host allows or denies. v0.31: the same
+  // command answers a QUESTION outright, because a question is a decision, not a grant.
   '/answer', '/allow-perm', '/deny-perm',
+  // v0.30: what the daemon kept when it could not confirm a message landed, and sending it again.
+  '/outbox', '/retry',
   // v0.18-4: the host ends the jam for everybody.
   '/end',
   // v0.22B/C: invite links, and removing somebody who is already in.
@@ -871,6 +877,12 @@ export const KEY_SEQS = [
   ['\x1b[12~', 'mirror'], // F2, vt220
   ['\x1b[[B', 'mirror'], // F2, linux console
   ...['\x1bOR', '\x1b[13~', '\x1b[[C'].map((s) => [s, 'passthrough']), // F3: SS3 / vt220 / linux
+  // v0.30-3: `↑`/`↓` recall what you submitted. Both spellings, because a terminal in application
+  // cursor mode sends SS3 and one in normal mode sends CSI. ink's text field does nothing with a
+  // vertical arrow, so nothing is taken away by claiming them — and in passthrough mode they are
+  // not in PASSTHROUGH_SEQS, so they still go straight to claude's own TUI.
+  ['\x1b[A', 'histprev'], ['\x1bOA', 'histprev'],
+  ['\x1b[B', 'histnext'], ['\x1bOB', 'histnext'],
 ];
 
 // v0.14: while passthrough is on, every byte belongs to the claude TUI — the only key the
@@ -932,9 +944,12 @@ export function onboardingLines(name = 'You', host = false) {
       '/c <text>         → humans only — claude never sees it',
       'F2                → transcript ⇄ live TUI (this screen)',
       'F3                → attach the real TUI (Ctrl-b d back)',
-      'a / d             → answer the ⚑ bar · i/Esc hides it',
+      // v0.31: `a`/`d` answer a REQUEST; `/answer <n>` answers claude itself.
+      'a / d             → answer the ⚑ bar · /answer <n> answers ⚠',
       '/model /compact…  → run any claude command in the TUI',
       '/send <path>      → offer a file · /export /files /diff',
+      // v0.30-3: recall, and the escape hatch for a message that did not land.
+      '↑ / ↓             → recall what you sent · /retry · /outbox',
       '/help /who /join  → this block · participants · invite line']
     : [`plain line        → claude (attributed [${name}])`,
       '/c <text>         → humans only — claude never sees it',
@@ -942,8 +957,9 @@ export function onboardingLines(name = 'You', host = false) {
       '/who /files /diff → participants · files · git diff',
       '/send <path>      → give claude a file · /paste · /export',
       // v0.17 P2: a guest CAN answer a permission prompt now, so the block that teaches the
-      // client has to say so — it is the one thing they used to have to wait for the host for.
-      '/answer [n]       → answer claude\'s ⚠ prompt (host oks)',
+      // client has to say so. v0.31: and a QUESTION needs nobody's approval at all.
+      '/answer <n>       → a question: straight through · a tool: host',
+      '↑ / ↓             → recall what you sent · /retry · /outbox',
       'Shift+Enter or \\  → multi-line · /tools /help /quit',
       'Lost? just ask claude — it knows this jam\'s whole manual.'];
   return [head, ...rows, '─'.repeat(ONBOARD_W)];
@@ -2292,9 +2308,15 @@ HOW A JAM WORKS (the short version; ${manual} arrives in your context with the l
   git's own view of the working tree.
 - \`/export\` hands a guest this session's transcript (the host approves) · \`/send\` and \`/paste\`
   put a file in \`jam-uploads/\` for you to read (the host approves) · \`/get\` takes one back.
-- Permission prompts are the host's: F3 attaches this real terminal to them (F3 again, or
-  Ctrl-b d, comes back). A guest may ASK to answer with \`/answer <n>\`; the host approves, and
-  only a digit already visible on your screen is ever typed.
+- When YOU ask a question (AskUserQuestion), ANYONE in the jam may answer it with \`/answer <n>\` —
+  no approval, first answer wins, and the room is told who answered. A question is a product
+  decision, so it belongs to whoever is here. (\`--answers host\` keeps it to the host; the
+  free-text \"Type something\" option is always the host's, because that is raw keyboard access.)
+- PERMISSION prompts (a tool wanting approval) are different, and stay the host's: F3 attaches this
+  real terminal to them (F3 again, or Ctrl-b d, comes back). A guest may ASK with \`/answer <n>\`;
+  the host approves, and only a digit already visible on your screen is ever typed.
+- If somebody's message never reached you, jam kept it: \`/outbox\` lists what is kept and
+  \`/retry\` sends the newest again. \`↑\`/\`↓\` recall what they typed. Tell them so if they ask.
 - Any other \`/command\` is one of yours: from the host it is typed straight in, from a guest it
   becomes a request the host approves. \`/exit\`, \`/clear\` and \`/resume\` are never approved for a
   guest, because they would end or wipe the session for everybody.
@@ -2492,6 +2514,14 @@ export function historyMove(list = [], idx = -1, dir = 'up', draft = '') {
   const next = idx - 1;
   if (next < 0) return { idx: -1, text: draft, moved: idx !== -1 };
   return { idx: next, text: list[next], moved: true };
+}
+// Where the file lives. XDG if it is set, `~/.config/claude-jam/history` otherwise — pure, so the
+// clients (which are the only things that touch a disk here) decide when to read and write it.
+export const HISTORY_FILE = 'history';
+export function historyFilePath(home = os.homedir(), env = {}) {
+  const base = env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME)
+    ? env.XDG_CONFIG_HOME : path.join(home, '.config');
+  return path.join(base, 'claude-jam', HISTORY_FILE);
 }
 export function parseHistoryFile(text) {
   return String(text ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-HISTORY_FILE_MAX);

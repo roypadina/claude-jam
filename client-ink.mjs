@@ -19,6 +19,9 @@
 // hanging indent needs an explicit width on the text Box — with one, ink wraps and aligns the
 // continuation to the text column by itself and lib.mjs's wrapText is not needed here.
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
@@ -35,7 +38,12 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   // the offer that follows a kick.
   INVITE_CONNECT_MS, inviteMintedLines, kickOffer,
   // v0.20: jam's tmux lives on its own socket, so F3's attach has to name it.
-  tmuxSocketArgs, TMUX_DEFAULT_SOCKET, tmuxAttachLine } from './lib.mjs';
+  tmuxSocketArgs, TMUX_DEFAULT_SOCKET, tmuxAttachLine,
+  // v0.31: the status row and the question block are both drawn from the daemon's classification
+  // of the live pane, so a client can never show a prompt that is no longer on screen.
+  promptStatusText, questionBlock,
+  // v0.30-3: `↑`/`↓` walk what THIS client submitted, whatever the daemon did with it.
+  historyPush, historyMove, parseHistoryFile, serializeHistory, historyFilePath, HISTORY_LIVE } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
@@ -86,13 +94,38 @@ const NO_WRAP_W = 4096; // wider than any terminal: ink leaves the line alone, t
 // soft-wraps it, and an invite command stays one selectable run instead of gaining a newline.
 const STRIP_ROWS = 3; // rows of chat/system lines kept under the mirror (v0.14 chat strip)
 
+// ---------------------------------------------- v0.30-3: your own input history ----
+// Nothing here talks to the daemon. `↑`/`↓` walk what THIS client submitted, so anything typed can
+// be recalled and re-sent whatever the daemon did with it — which is the reason a lost message
+// hurt as much as it did. The file is 0600 in the user's own config dir and capped, and every
+// disk step is wrapped: a read-only home must cost recall, never the client.
+const HISTORY_PATH = historyFilePath(os.homedir(), process.env);
+let history = [];
+try { history = parseHistoryFile(fs.readFileSync(HISTORY_PATH, 'utf8')).reverse().slice(0, HISTORY_LIVE); }
+catch { /* no file yet, or not readable — recall simply starts empty */ }
+let histIdx = -1; // -1 = typing something new
+let histDraft = '';
+
+function rememberInput(text) {
+  history = historyPush(history, text, HISTORY_LIVE);
+  histIdx = -1;
+  histDraft = '';
+  try {
+    fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(HISTORY_PATH, serializeHistory(history), { mode: 0o600 });
+  } catch { /* the recall still works for this session */ }
+}
+
 // ------------------------------------------------------------------- state ----
 // One store, no React. `entries` is append-only: <Static> renders each item exactly once.
 const store = {
   entries: [],
   labelW: labelWidth([]), // width of the `[Name]` column, recomputed on roster change
   roster: [],
-  status: { busy: false, waiting: false },
+  // v0.31: `prompt` is the daemon's classification of the CLAUDE PANE right now — none |
+  // question | permission | dialog. The status row and the question block are drawn from it, so
+  // neither can outlive what is on screen.
+  status: { busy: false, waiting: false, prompt: { kind: 'none' }, answers: 'anyone' },
   typing: new Map(), // name -> last typing ms
   cont: [], // pending lines of a multi-line message (trailing `\`, Shift+Enter, Alt+Enter)
   session: null, // welcome's session block; .join only ever set for the host
@@ -318,17 +351,21 @@ function render(ev) {
       return touch();
     }
     case 'typing': if (ev.from !== NAME) { store.typing.set(ev.from, Date.now()); touch(); } return;
-    case 'status':
+    case 'status': {
       // v0.17 P3: the transition into waiting is the single most actionable moment in a jam, and
-      // it used to be silent for anyone not looking. The host is who can always answer, so the
-      // host is who gets rung — a guest may only ASK to answer (P2), and a bell for a request
-      // they might not be allowed to make is noise.
-      if (IS_HOST && ev.waiting && !store.status.waiting) {
-        nudge('claude needs an answer', 'a permission prompt is waiting — F3 attaches the TUI');
+      // it used to be silent for anyone not looking.
+      // v0.31: WHO gets rung now depends on what the screen says. A permission or a dialog is the
+      // host's to answer, so only the host is interrupted; a QUESTION is anybody's, so everybody
+      // is — that is the whole point of the split.
+      const p = ev.prompt || { kind: ev.waiting ? 'permission' : 'none' };
+      const was = store.status.prompt?.kind || 'none';
+      if (p.kind !== was && p.kind !== 'none' && (IS_HOST || p.kind === 'question')) {
+        nudge('claude needs an answer', promptStatusText(p, { host: IS_HOST, answers: ev.answers }));
       }
-      store.status = { busy: ev.busy, waiting: ev.waiting };
+      store.status = { busy: ev.busy, waiting: ev.waiting, prompt: p, answers: ev.answers || 'anyone' };
       if (!ev.busy) flushTools(); // the turn is over: collapse what it ran
       return touch();
+    }
     // v0.17 P5: this socket's own round trip, measured by the daemon's heartbeat. Live state, not
     // transcript — the newest one replaces the last and nothing is kept.
     case 'net':
@@ -530,7 +567,7 @@ function connect() {
     if (e.code >= 4400 && e.code <= 4429) return leave(1, `! rejected: ${e.reason || 'auth'}`);
     // The jam ended on purpose: this close is the expected end of it, not a fault.
     if (ending) return;
-    store.status = { busy: false, waiting: false }; // nothing is known while the socket is down
+    store.status = { busy: false, waiting: false, prompt: { kind: 'none' }, answers: store.status.answers }; // nothing is known while the socket is down
     attempts++;
     // v0.22B: while the invite's address list has not been walked once, the next address is tried
     // straight away — a dead tunnel must not cost a backoff before the LAN address gets a turn.
@@ -768,6 +805,7 @@ function sendUpload(ev) {
 // One submitted input row. Identical dispatch to the readline client, including the
 // continuation buffer: a trailing `\` collects, the first line without one flushes.
 function submit(raw) {
+  rememberInput(raw); // v0.30-3: before anything else — even a line that turns out to be a typo
   // v0.18-4: /end asked "really end this jam for everyone?", and this is the answer — taken
   // before anything is parsed, so a bare `y` can never become a message to claude. v0.22C adds
   // the second question of the same shape: revoke the link of the person you just kicked?
@@ -847,9 +885,18 @@ function submit(raw) {
     case 'diff': sendMsg({ t: 'diff', path: act.path || undefined }); break;
     // v0.17 P2: only the daemon can see claude's screen, so it reads the options and it does the
     // typing; this end sends a digit and waits. A bare `/answer` just asks what the options are.
-    case 'perm':
-      sendMsg({ t: 'perm', choice: act.choice ?? undefined });
-      if (act.choice != null && !IS_HOST) sys(`asked the host to answer ${act.choice} — nothing is typed until they say yes`);
+    case 'perm': {
+      sendMsg({ t: 'perm', choice: act.choice ?? undefined, q: act.q ?? undefined, text: act.text ?? undefined });
+      // v0.31: whether this goes straight through or to the host depends on what the pane is
+      // showing, which the daemon decides — so say what will happen rather than guessing.
+      const kind = store.status.prompt?.kind || 'none';
+      const gated = !IS_HOST && (kind !== 'question' || act.choice === 'other' || store.status.answers === 'host');
+      if (act.choice != null && gated) sys(`asked the host to answer ${act.choice} — nothing is typed until they say yes`);
+      break;
+    }
+    // v0.30: what the daemon kept when it could not confirm a message reached claude.
+    case 'outbox':
+      sendMsg({ t: 'outbox', op: act.op });
       break;
     case 'perm-ok':
       if (!IS_HOST) err('host only');
@@ -955,6 +1002,22 @@ function ApprovalBar({ items, armed, now }) {
   return h(Box, null, h(Text, { color: C.accent, wrap: 'truncate' }, bar.text));
 }
 
+// v0.31-2: the question itself, not just the fact that one exists — and in every client, in both
+// views. A guest in the transcript view could see `⚠` and nothing else; now they see what is being
+// asked, the numbered options, and the command that answers it. Drawn from the daemon's
+// classification of the live pane, so it disappears the moment the picker does.
+function QuestionBlock({ status }) {
+  const text = questionBlock(status.prompt, { answers: status.answers, host: IS_HOST });
+  if (!text) return null;
+  return h(Box, { flexDirection: 'column' },
+    text.split('\n').map((line, i) => h(Text, {
+      key: `q-${i}`,
+      color: i === 0 ? C.accent : C.dim,
+      bold: i === 0,
+      wrap: 'truncate',
+    }, line)));
+}
+
 function StatusBar({ status, typing, spin, mirror, passthrough, net }) {
   const now = Date.now();
   const who = [...typing.entries()].filter(([, at]) => now - at < 4000).map(([n]) => n);
@@ -967,15 +1030,14 @@ function StatusBar({ status, typing, spin, mirror, passthrough, net }) {
   // chip's job is to make the F2 alternate discoverable long after the onboarding block
   // has scrolled away.
   const view = mirror ? '⧉ live TUI' : '≡ transcript';
-  // A permission prompt is the one moment the host must leave the jam layer, so the status
-  // row says which key does it. v0.15: F3 now attaches the real TUI, so it says so — and
-  // names the way back, which is tmux's, not jam's. Guests are told who to wait for instead.
-  // v0.17 P2: a guest is no longer only a spectator here — `/answer` shows them the options and
-  // offers one to the host — so the row says that instead of "wait for somebody else".
+  // v0.31: ONE source for this row — the daemon's classification of the pane. A permission still
+  // says F3 (and now names the tool); a question says what claude is asking and that /answer
+  // takes it; a dialog says the host is needed at the keyboard. Nothing on the pane is an empty
+  // string, which is what makes a stale ⚠ impossible.
   // v0.20: F3 is bound to detach-client on jam's own tmux server, so the key that goes in is
   // also the key that comes out. Ctrl-b d still works and stays named for anyone whose host runs
   // with `--tmux-socket default`, where the bare binding is deliberately skipped.
-  const waiting = `⚠ waiting for permission${IS_HOST ? ' — F3 attaches the TUI (F3 or Ctrl-b d back)' : ' — /answer shows the options'}`;
+  const waiting = promptStatusText(status.prompt, { host: IS_HOST, answers: status.answers });
   return h(Box, { minHeight: 1 },
     h(Box, { flexGrow: 1 },
       passthrough
@@ -983,8 +1045,8 @@ function StatusBar({ status, typing, spin, mirror, passthrough, net }) {
         : h(React.Fragment, null,
           h(Text, { color: C.dimmer }, `${view}  `),
           status.busy ? h(Text, { color: C.accent }, `${SPIN[spin]} claude is working…`) : null,
-          status.busy && status.waiting ? h(Text, { color: C.dim }, ' · ') : null,
-          status.waiting ? h(Text, { color: C.accent }, waiting) : null)),
+          status.busy && waiting ? h(Text, { color: C.dim }, ' · ') : null,
+          waiting ? h(Text, { color: C.accent, wrap: 'truncate' }, waiting) : null)),
     right ? h(Text, { color: C.dim }, right) : null);
 }
 
@@ -1036,13 +1098,29 @@ function App() {
     const onNewline = () => { store.cont.push(input); setInput(''); store.input = ''; touch(); };
     const onMirror = () => toggleMirror();
     const onPassthrough = () => onF3();
+    // v0.30-3: recall. The draft is remembered on the first ↑ and handed back on the last ↓, so
+    // walking the history and coming back never eats what was being typed.
+    const walk = (dir) => {
+      if (histIdx === -1) histDraft = input;
+      const r = historyMove(history, histIdx, dir, histDraft);
+      histIdx = r.idx;
+      setInput(r.text);
+      store.input = r.text;
+      touch();
+    };
+    const onPrev = () => walk('up');
+    const onNext = () => walk('down');
     keys.on('newline', onNewline);
     keys.on('mirror', onMirror);
     keys.on('passthrough', onPassthrough);
+    keys.on('histprev', onPrev);
+    keys.on('histnext', onNext);
     return () => {
       keys.off('newline', onNewline);
       keys.off('mirror', onMirror);
       keys.off('passthrough', onPassthrough);
+      keys.off('histprev', onPrev);
+      keys.off('histnext', onNext);
     };
   }, [input]);
 
@@ -1111,6 +1189,7 @@ function App() {
     IS_HOST && !s.passthrough
       ? h(ApprovalBar, { items: barHidden() ? [] : s.pending, armed: barArmed(), now: Date.now() })
       : null,
+    !s.passthrough ? h(QuestionBlock, { status: s.status }) : null,
     h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough, net: s.net }),
     s.cont.length && !s.passthrough
       ? h(Box, { flexDirection: 'column' },
