@@ -1,7 +1,10 @@
 {
   "name": "claude-jam",
-  "version": "0.1.0",
+  "version": "0.14.0",
   "description": "Two or more humans, one real interactive Claude Code session",
+  "license": "MIT",
+  "author": "Roy Padina",
+  "repository": "github:roypadina/claude-jam",
   "type": "module",
   "bin": {
     "jam": "jam"
