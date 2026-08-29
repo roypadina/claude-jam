@@ -87,7 +87,10 @@ try {
   await step('v0.14: the client opens on the LIVE TUI, with a clean `Dana ❯` row under it', async () => {
     // The connect block is printed above the frame, which then fills the screen — so the
     // welcome line lives in the scrollback, not necessarily on the visible rows.
-    await until('welcome', () => /jam [0-9a-f-]{36} — host /.test(back(PEER_SESSION)));
+    // v0.23: the welcome leads with the jam's NAME and the 8-char session id, not a full UUID
+    // nobody reads. The name here is the default one — the cwd's basename, which for this
+    // daemon is the repo directory.
+    await until('welcome', () => /jam "[^"]+" \([0-9a-f]{8}\) — host /.test(back(PEER_SESSION)));
     const all = await until('the mirrored TUI plus the live-view chip', () => {
       const r = rows(PEER_SESSION);
       return r.some((l) => /Claude Code v|⏵⏵|❯/.test(l)) && r.some((l) => /⧉ live TUI/.test(l)) ? r : null;
