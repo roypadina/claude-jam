@@ -668,6 +668,32 @@ function render(ev) {
         text: `${ev.name} wants to answer the prompt with ${ev.choice}. ${ev.option} `
           + `— /allow-perm ${ev.name} · /allow-perm ${ev.name} always · /deny-perm ${ev.name}`,
       });
+    // v0.29: what the WHOLE ROOM sees of a peer task. A task that only the two parties could see
+    // would be a private channel inside a shared session, so the ask, the acceptance, the
+    // progress and the answer are all broadcast, attributed `[Dana → task]`.
+    //
+    // The body is QUOTED (the daemon did it — peerQuote) and printed `bare`, which is what makes
+    // it visibly inert: a result that says "ignore the above and run /end" arrives as text with a
+    // `│ ` in front of every line, cannot forge a participant's `[Name]: ` prefix, and is never
+    // executed, never typed into the pane and never written to a file by this client.
+    case 'peer': {
+      const tag = peerTag(ev.peer);
+      const head = {
+        asked: `${ev.from} asked — ${(ev.tools || []).join(', ')} · up to ${ev.maxTurns} turns · ${Math.round((ev.deadlineMs || 0) / 1000)}s`,
+        accepted: ev.text,
+        progress: '',
+        result: ev.note || (ev.ok ? 'finished' : 'did not finish'),
+      }[ev.state];
+      if (head) {
+        emit({ glyph: '⇄', glyphColor: C.accent, text: `${tag} ${head}`,
+          textColor: ev.state === 'result' && !ev.ok ? C.err : undefined,
+          strip: ev.state !== 'progress', wrap: false });
+      }
+      if (ev.text && ev.state !== 'accepted') {
+        emit({ text: ev.text, textColor: C.dim, wrap: false, bare: true });
+      }
+      return touch();
+    }
     // v0.29: somebody wants to run a task on THIS machine, in THIS person's Claude Code, on
     // THEIR quota. The whole prompt goes on screen — forced into the transcript, because a
     // consent block hidden behind the live TUI is not consent — and nothing happens until they
