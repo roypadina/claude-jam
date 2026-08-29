@@ -52,7 +52,9 @@ All three are gone.
   is row-for-row what `capture-pane -S` returns, that a guest can scroll, that End returns to
   live with the held frames, that three F2 round trips leave the transcript intact and
   un-duplicated in native scrollback, that `/history all` goes from 5 replayed lines to all 30,
-  and that the top-of-history line appears exactly once.
+  and that the top-of-history line appears exactly once. Step 12 kills the client while the
+  mirror is up and watches tmux's own `#{alternate_on}` go 1 → 0, with the transcript still on
+  screen underneath — a terminal nobody has to `reset` their way out of.
 
 ### v0.25 — audible join events
 

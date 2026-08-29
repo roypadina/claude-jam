@@ -139,7 +139,9 @@ Then, in any order, the ones that bring their own everything:
     400 numbered lines and then one `TICK` per change of a control file, so "the screen moved" is
     something the smoke decides rather than waits for — which is what makes the held-frame count
     assertable. It runs a REAL ink client on a real pty as a GUEST, and compares what that guest
-    sees, scrolled back, against `capture-pane -S` on the host pane row for row.
+    sees, scrolled back, against `capture-pane -S` on the host pane row for row. Its last step
+    kills that client while the mirror is up and watches tmux's `#{alternate_on}` go 1 → 0 — by
+    the exact pid of a process this smoke started, found by parent pid, never by name.
 
 Prefer 8–16 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
 real tokens, so run them once, at the end, and use `--model haiku`.

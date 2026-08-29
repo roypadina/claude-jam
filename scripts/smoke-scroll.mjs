@@ -15,6 +15,8 @@
 //       there after two round trips, and every line exactly ONCE
 //   10  /history all prints more than the default replay, under its own dim divider
 //   11  the top-of-history line appears exactly once, however many times you hit the top
+//   12  a client KILLED while the mirror is up gives the alternate screen back: tmux's
+//       #{alternate_on} goes 1 → 0 on a SIGTERM and the transcript is on screen underneath
 //
 // HONESTY: there is no real `claude` here and none is needed — what is under test is tmux's
 // scrollback, the daemon's capture and the client's rendering of it. The pane is a shell script
@@ -254,8 +256,11 @@ try {
   await until('the ring to hold all thirty', () => host.events.filter((e) => e.t === 'chat').length >= 30);
 
   // ------------------------------------------------- the real pty client ----
+  // Wrapped in a shell that outlives it, so step 12 can look at the pane AFTER the client is
+  // gone — a pane whose only command has exited takes the session with it.
   const born = tmux('new-session', '-d', '-s', INK, '-x', '110', '-y', '32',
-    process.execPath, CLIENT, `ws://127.0.0.1:${PORT}`, '--name', 'Guest', '--token', TOKEN, '--no-sound');
+    'sh', '-c', `${JSON.stringify(process.execPath)} ${JSON.stringify(CLIENT)} `
+      + `ws://127.0.0.1:${PORT} --name Guest --token ${TOKEN} --no-sound; sleep 120`);
   ok(born.status === 0, `tmux new-session: ${born.stderr}`);
   const inkRows = (from = 0) => paneRows(INK, from);
   const inkText = (from = 0) => inkRows(from).join('\n');
@@ -371,7 +376,8 @@ try {
     console.log(`      ${beforeSet.size} → ${afterSet.size} distinct chat lines · divider: ${JSON.stringify(divider.trim().slice(0, 78))}`);
   });
 
-  show('the guest client, transcript view, after /history all', INK);
+  // The evidence a human reads: the guest's scrolled-back mirror, and the same range straight
+  // out of tmux, one under the other.
   press('f2');
   await until('the mirror once more', () => /⧉ live TUI/.test(inkText()), 10000);
   press('pgup');
@@ -380,6 +386,34 @@ try {
   console.log('----- the same range, straight from tmux -----');
   console.log((tmux('capture-pane', '-p', '-t', CLAUDE_PANE, '-S', String(-(32 - MIRROR_CHROME)), '-E', '-1').stdout || '').trimEnd());
   console.log('-----------------------------------------------------------------\n');
+  press('end');
+  await until('live again', () => !/scrolled back/.test(inkText()), 10000);
+
+  // ------------------------------------ 12: killed while the mirror is up ----
+  await step('12 a client killed while in the mirror leaves the terminal in the NORMAL buffer', async () => {
+    // The evidence block above left this client in the live TUI; flip only if it did not.
+    if (!/⧉ live TUI/.test(inkText())) press('f2');
+    await until('the mirror', () => /⧉ live TUI/.test(inkText()), 10000);
+    const altOn = () => (tmux('display-message', '-p', '-t', INK, '#{alternate_on}').stdout || '').trim();
+    eq(await until('the alternate screen to be up', () => (altOn() === '1' ? '1' : null), 8000), '1',
+      'the mirror really is drawn in the alternate screen buffer');
+    // The pane's own shell is this smoke's child; its node child is the client. Kill THAT pid,
+    // by pid — never a name, never a pattern.
+    const shell = (tmux('display-message', '-p', '-t', INK, '#{pane_pid}').stdout || '').trim();
+    ok(/^\d+$/.test(shell), `the pane pid is a number (${shell})`);
+    const kid = (spawnSync('pgrep', ['-P', shell], { encoding: 'utf8' }).stdout || '').trim().split('\n')[0];
+    ok(/^\d+$/.test(kid), `the client pid is a child of the pane's shell (${kid})`);
+    process.kill(Number(kid), 'SIGTERM');
+    eq(await until('the alternate screen to be given back', () => (altOn() === '0' ? '0' : null), 10000), '0',
+      'the terminal is back in the normal buffer');
+    // And the transcript that was in that buffer is still there — the shell prompt lands under
+    // it, not on top of a screen somebody has to `reset` their way out of.
+    const after = paneRows(INK, -800);
+    ok(after.some((r) => /SCROLLCHAT \d+/.test(r)), 'the transcript is on screen where the client left it');
+    console.log(`      alternate_on 1 → SIGTERM → 0, and ${after.filter((r) => /SCROLLCHAT/.test(r)).length} transcript row(s) still there`);
+  });
+
+  show('the guest client, after the client was killed in the mirror view', INK);
 
   exitCode = failed ? 1 : 0;
 } catch (e) {
