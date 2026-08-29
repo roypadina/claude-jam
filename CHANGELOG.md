@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+### One name: `claude-jam`
+
+The product, the executable, the tmux session and the ownership marker all say **claude-jam**
+now. `jam` survives only as an installed alias — nothing prints it.
+
+- **`claude-jam` is the real executable.** `jam` is a four-line shim that execs it, so an
+  install or a habit from 0.18.0 keeps working. It appears in no usage text, no error and no
+  hint; the README names it once, as deprecated. Both bins are installed.
+- **The default tmux session is `claude-jam`** (a second one is `claude-jam-2`), from one
+  `DEFAULT_TMUX` constant rather than the five places that each spelled it out.
+- **The ownership marker is `@claude-jam-owned`**, and the old `@jam-owned` is still **read** —
+  newest name first — so a jam created by 0.18.0 stays listable and endable. An old marker
+  grants nothing a new one would not: the value still has to resolve to a `session.json` that
+  names the session back.
+- Every usage, help, error, hint, attach line, `sessions`/`end`/`clean` row, menu label, the
+  tmux status line and the shared-session contract in claude's system prompt say `claude-jam`.
+  The NOUN is unchanged — "this jam is still running" is what the product is called.
+- Internal `JAM_*` environment variables are unchanged on purpose (`JAM_CLAUDE`, `JAM_TMUX_BIN`,
+  `JAM_TAILSCALE`, `JAM_INSTALLED`, `JAM_HOOK_SECRET`), as are the `x-jam-secret` header and the
+  `--jam-addresses` internal flag. They are documented as internal rather than churned.
+- **A test asserts no user-visible string emits a bare `jam ` command form** — a lint over the
+  string literals of every module plus the launcher's `echo` lines, so it catches the string
+  nobody happened to render in a test.
+
+### Docs an agent can install from
+
+- **`AGENTS.md`** — how an agent works ON this repo: layout, `node --test test.mjs`, the 13
+  smokes and the order to run them in, commit-per-change, the hard rules, where `SPEC.md` fits.
+- **A repo wiki** — Home, Install, Agent-Install, Hosting-a-Jam, Joining-a-Jam, Remote-Access,
+  Files-and-Export, Security-Model, Architecture, Troubleshooting. `Agent-Install` is the page
+  another person's agent is pointed at: numbered non-interactive commands, what to verify after
+  each, what needs a human, what must never be done, ending in a self-test.
+- **README** gains a short "For agents" section linking both.
+- **Standing rule** (extends the MANUAL.md one): a change that alters a user-visible surface —
+  flag, command, key, access mode, install step — updates `README.md`, `MANUAL.md`,
+  `CHANGELOG.md` and the affected wiki page(s) **in the same change**. Stale docs are a defect.
+
+### `platform.mjs` — the platform seam (v0.32 W0)
+
+Groundwork for Windows, with no Windows code in it yet. One module now owns every call that
+only means something on one operating system: `clipboardImage()`, `notify()`, `playSound()`,
+`stateDir()`, `configDir()`, `historyFile()`, `secureWrite()`, `openExternal()` and `copyText()`.
+
+- The macOS implementations moved behind it **unchanged**: pngpaste-then-osascript for `/paste`,
+  the argv-only `osascript` notification, `$TMPDIR`, `~/.config` (XDG-aware), 0600 files inside
+  0700 directories.
+- **A test asserts no module outside `platform.mjs` spawns a platform binary** — checked at the
+  spawn and as a bare string, so the `const cmd = ['pbcopy', []]` shape is caught too. tmux,
+  claude, git, curl, cloudflared, tailscale and ttyd are not platform binaries and stay put.
+- `playSound()` and `openExternal()` have no caller yet; they exist so the batch that needs them
+  does not also have to build the seam. Each function carries the TODO naming what W1 fills in.
+
 ### The menu is the product surface
 
 `claude-jam` **with no arguments** is now a launcher menu, and **`/menu`** inside a client is a
@@ -162,7 +214,7 @@ Observed live (15:26): the status row said `⚠ waiting for permission` while th
   the key that hands the host the real TUI is the key that hands it back. `Ctrl-b d` still works.
 - **Every tmux session jam makes lives on socket `claude-jam-<port>`**, not the shared server —
   which is what makes that binding safe, and means jam cannot see (or kill) your own tmux
-  sessions even in principle. v0.18's `@jam-owned` marker check stays on top of it.
+  sessions even in principle. v0.18's `@claude-jam-owned` marker check stays on top of it.
 - Reaching the raw TUI from elsewhere now needs the socket:
   `tmux -L claude-jam-<port> attach -t <name>:claude`. That exact line is printed by the
   launcher, by the "keep it running" message, and once per live row in `claude-jam sessions`.
@@ -202,22 +254,22 @@ Observed live (15:26): the status row said `⚠ waiting for permission` while th
 
 ### jam owns its tmux sessions
 
-- **`jam sessions`** (`jam ls`) lists the jams jam itself started — name, port, state, uptime,
+- **`claude-jam sessions`** (`claude-jam ls`) lists the jams jam itself started — name, port, state, uptime,
   session id, who is connected, which relays are on, cwd — with a `!` against an orphaned state
   dir or a session whose daemon has died. `--json` for scripting.
-- **`jam end [name]`** (`jam kill`) ends a jam properly: every client is told and exits cleanly
+- **`claude-jam end [name]`** (`claude-jam kill`) ends a jam properly: every client is told and exits cleanly
   instead of trying to reconnect, the daemon stops its children (ttyd, tunnel, popups), the tmux
   session is killed and its state dir removed. `--all` ends every one, after confirmation.
-- **`jam clean`** removes leftover state dirs from sessions that are gone, and nothing else.
+- **`claude-jam clean`** removes leftover state dirs from sessions that are gone, and nothing else.
 - **`/end` in the host's client** ends the jam for everybody, after a `[y/N]` confirmation.
 - **Closing the host's client now asks** `keep it running · end it · cancel` instead of silently
   leaving a daemon, a TUI and a browser view running with no hint of how to stop them.
   `--no-prompt`, `--keep-on-exit` and `--end-on-exit` answer it up front; a non-interactive stdin
   keeps the jam.
-- **`jam host --attach`** reopens your client on a jam that is already running, and `jam host` on
+- **`claude-jam host --attach`** reopens your client on a jam that is already running, and `claude-jam host` on
   a name that is already a jam offers to attach, start a second one (auto-named, on a free port),
   end it and start fresh, or cancel — instead of the old flat refusal.
-- **jam ends only what jam created.** Every session it starts is stamped with an `@jam-owned`
+- **jam ends only what jam created.** Every session it starts is stamped with an `@claude-jam-owned`
   marker pointing at its own state dir, and nothing is ever killed unless that marker and the
   `session.json` in that directory agree, for the exact name given. No name patterns, no sweeps
   over `tmux list-sessions`, no `kill-server`: your other tmux sessions are invisible to jam and
@@ -271,7 +323,7 @@ Observed live (15:26): the status row said `⚠ waiting for permission` while th
   in chat; a matching macOS desktop notification fires alongside it.
 - The status bar now shows a live connection-quality indicator (round-trip time, or a
   staleness warning).
-- Slash commands now autocomplete: typing `/` shows a filtered list of jam's own commands.
+- Slash commands now autocomplete: typing `/` shows a filtered list of claude-jam's own commands.
 - Fixed a color in the per-user palette that was too close to the "you" color, making another
   participant's name easy to mistake for your own.
 
