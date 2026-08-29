@@ -115,8 +115,10 @@ Useful flags: `--port`, `--tmux <name>` (a second jam), `--jam-name <X>` (what t
 CALLED — default: this directory's name), `--no-announce` (keep it off the local network),
 `--token <value>`, `--view`,
 `--tunnel`, `--funnel`, `--resume <session-id>` (continue an existing session),
-`--replay <N>` (how much of an existing transcript a joining guest is shown, default 300 events,
-`0` for none), `--config-dir <dir>` (run
+`--replay <N|all>` (how much of an existing transcript a joining guest is shown, default 300
+events, `0` for none, `all` for everything the jam kept),
+`--history <N>` (how many events the jam keeps for replay and `/history`, default 2000, cap
+20000), `--config-dir <dir>` (run
 the TUI as another claude profile), `--uploads ask|auto|off` (whether you are asked about every
 file a guest sends), `--upload-quota <n>[MB|files]`, `--export ask|auto|off` (the transcript's
 own, separate toggle), `--no-sound` (start your client silent),
@@ -142,7 +144,10 @@ claude-jam join ws://<host-ip>:7777 --name Dana --token abc123…
 
 You land on the live TUI — the host's real Claude Code screen, plus the backlog of what
 happened before you arrived (up to `--replay` events, with a
-`── history above · live from here ──` divider under it). A plain line goes to the agent
+`── history above · live from here ──` divider under it). **PgUp** scrolls that live TUI back
+through the host's real pane history — the actual scrollback, colours and all, up to 2000 lines —
+and **End** (or `G`, or `Esc`) returns to live; `/history [n|all]` re-prints further back than the
+replay you were given. A plain line goes to the agent
 as `[Dana]: …`; `/c <text>` is human-only chat; **F2** flips to the transcript; `/files` and
 `/diff` say what the session has changed; `/answer` answers a permission prompt (the host still
 approves); `/help` reprints the onboarding block. Typing `/` raises a dim list of claude-jam's own
@@ -356,7 +361,10 @@ approves.
 | `/menu` | anyone | the live control panel: People · Invites · Access · Session · Notifications · Help & guides. Shows the jam's state next to every toggle, runs any command with one key, and renders MANUAL.md inline. A guest's `/menu` lists exactly what a guest may do. **Every feature has to be reachable from it — a unit test fails when one is not** |
 | `/ping <Name\|all> [message]` | anyone | *(alias `/nudge`)* get somebody to look at their screen. The person addressed gets a highlighted `👋 Roy is asking for you: …` plus their own bell/sound/notification; **everybody else sees a dim `* Roy nudged Yossi`**, so a nudge is never secret. Refused for somebody who is not connected — never queued. One per sender per target per 30 s. `!` at the end repeats it **once** after a minute if they are still not active |
 | `/sound [on\|off]` | anyone | this client's own sounds. Bare `/sound` reports all three tiers |
-| `/mirror`, **F2** | anyone | swap live TUI ⇄ transcript |
+| `/mirror`, **F2** | anyone | swap live TUI ⇄ transcript. The live TUI renders in the terminal's **alternate screen buffer**, so the transcript keeps the normal one and flipping either way loses nothing |
+| **PgUp** / **PgDn** | anyone | in the live TUI: scroll back through the host's **real pane history** (`capture-pane`, colours included), 2000 lines at most. **Shift+↑/↓** moves one line, the wheel three *if your terminal sends wheel events* — claude-jam never turns mouse reporting on, because that would take text selection away from you |
+| **End** / `G` / **Esc** | anyone | back to the live screen. While you are scrolled, live frames are **held, not dropped** — the status row says how many are waiting |
+| `/history [n\|all]` | anyone | re-print further back than the replay you were given, a page at a time, under a dim divider that says what is still behind it. `/export` is always the complete record |
 | **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. **F3 again** (or `Ctrl-b d`) comes back. Host **and** loopback only |
 | `a` `d` `i`/Esc | host | answer the approval bar above the status row — accept · deny · dismiss. Only while the input line is empty |
 | `/tools`, `/tools on\|off` | anyone | reprint the last turn's full tool log · stop/resume collapsing tool lines |
@@ -521,9 +529,9 @@ test instead of somebody's message.
   dir, and a `/retry` is a fresh attempt — nothing re-sends on its own, and ending the jam takes
   the state dir (and anything still kept in it) with it.
 - The host answers a prompt with F3 — which *is* a `tmux attach`.
-  While the host is attached their own mirror is paused, and coming back re-feeds only the last
-  40 transcript lines to the client: the rest stays in the terminal's own scrollback, because
-  ink's `<Static>` would otherwise reprint the whole session on every return.
+  While the host is attached their own mirror is paused. Coming back re-feeds **nothing**: tmux
+  draws on the alternate screen and hands the normal one back untouched, so the transcript is
+  exactly where it was. (Before v0.28 it re-fed the last 40 lines and dropped the rest.)
 - The frame signal is a poll, not `tmux pipe-pane`: the cadence adapts (40 ms active, 250 ms
   idle) but an active mirror still costs one `capture-pane` per tick.
 - **An invite link is a bearer credential.** It joins as that name with no approval, so whoever
@@ -557,9 +565,18 @@ test instead of somebody's message.
   changed by a shell command inside a `Bash` call is invisible to it — that is what `/diff` is
   for. `/diff` is `git diff`, i.e. the **unstaged** working tree only, capped at 120 lines, and
   any participant may run it.
-- The history a joiner is shown is `--replay` events (300 by default) parsed out of the last
-  8 MB of the transcript. Everything older is only in `/export`, and a replayed event is
-  stamped with the daemon's boot time, not the moment it originally happened.
+- The history a joiner is shown is `min(--replay, --history)` events (300 out of a 2000-event
+  ring by default) parsed out of the last 8 MB of the transcript. `/history [n|all]` reaches the
+  rest of the ring; everything older than the ring is only in `/export`, and a replayed event is
+  stamped with the daemon's boot time, not the moment it originally happened. The client says so
+  out loud the first time you scroll to the top: `— that is as far back as this jam kept …`.
+- **Scrolling the mirror reads the host's pane, not a recording.** The last 2000 lines, in pages
+  of at most 200 rows, cached for 2 s per range — so a page you re-read inside that window can be
+  up to two seconds stale, and lines that have already fallen out of the pane's own
+  `history-limit` are gone from there too. `/export` is the complete transcript; the pane's
+  scrollback is not.
+- Scrolling is **ink-only**. `--basic` has no live region to redraw a screen into, so it gets
+  `/history` but not PgUp.
 - Nothing scans an uploaded file. It is written 0644, never executed, never opened — but the
   moment claude `Read`s it, its contents are in the context, and therefore in anybody's later
   `/export`.
@@ -603,7 +620,7 @@ test instead of somebody's message.
   port. A state dir whose port is held by something else is flagged, not deleted.
 - The exit prompt is the launcher's, so it exists only for the host client the launcher spawned.
   A `claude-jam join --host` client started by hand just closes, and the jam keeps running.
-- The live view, tool collapse, F2/F3 and the newline keys are ink-only — `--basic` is a
+- The live view, scrolling it, tool collapse, F2/F3 and the newline keys are ink-only — `--basic` is a
   transcript-only client.
 - No rate limiting, no web client, one session per host, no Windows.
 

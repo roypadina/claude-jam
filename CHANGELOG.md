@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### v0.28 — real scrollback ("I can only see very little")
+
+Three separate ceilings made the client feel amnesiac next to an ordinary Claude Code session.
+All three are gone.
+
+- **The live TUI renders in the terminal's alternate screen buffer** (`\x1b[?1049h`), the way
+  `less`, `vim` and tmux do. The transcript keeps the normal buffer, so its lines ARE the
+  terminal's own scrollback and flipping F2 ⇄ mirror loses nothing in either direction. What it
+  fixes, measured in ink 5.2.1: once the live region is as tall as the terminal, ink writes
+  `ansiEscapes.clearTerminal` — whose `\x1b[3J` clears the terminal's saved lines — and then
+  reprints its entire `<Static>` log. A full-screen mirror frame is exactly that tall, so every
+  flip did it. The alternate buffer has no `<Static>` at all, so it cannot happen.
+- **The client now opens on the transcript** and turns the mirror on once the welcome block is
+  printed, so the block a first-time guest needs is in their own scrollback rather than in a
+  buffer that is thrown away.
+- **The F3 attach re-feed is gone**, with the README ceiling that named it: tmux draws on the
+  alternate screen and hands the normal one back untouched, so the transcript is exactly where it
+  was. It used to re-feed the last 40 lines and drop the rest.
+- **The mirror scrolls, and what it scrolls is the host's REAL pane history.** `PgUp`/`PgDn`
+  page, `Shift+↑/↓` (and `Ctrl+↑/↓`) move a line, the wheel moves three *if the terminal sends
+  wheel events* — claude-jam never turns mouse reporting on, because that takes text selection
+  away from the human. `End`, `G` or `Esc` returns to live. The client asks
+  `{t:'screen-history', before, rows}` and the daemon answers from
+  `tmux capture-pane -e -p -S … -E …` on the claude pane: the actual scrollback, colours
+  included, the last 2000 lines, in pages of at most 200 rows, one capture per range per 2 s.
+  **Guests get this exactly as the host does** — it is a capture, there is no path from it back
+  into the pane, and a guest who could not look back was the complaint.
+- **Live frames are held, not dropped, while somebody is scrolled**, and the status row says how
+  many are waiting: `⧉ mirror · scrolled back 40 lines · 3 live frames waiting — End/G returns
+  to live`.
+- **The transcript history is no longer a 300-event stump.** `--history <N>` sizes the daemon's
+  ring (2000 by default, 20000 cap) and `--replay <N|all>` decides how much of it a joiner is
+  shown — `min(--replay, --history)`, with `all` meaning everything the ring can hold. New
+  `/history [n|all]` re-prints further back on demand, a page at a time, under a dim divider
+  saying what is still behind it. `/export` remains the exact, complete record.
+- **No silent truncation anywhere.** The welcome says how many earlier events are still kept; the
+  first scroll to the very top prints, once, `— that is as far back as this jam kept (N events ·
+  host pane 2000 lines) · /export for the full transcript`; and a `--replay` bigger than the ring
+  is one line at boot rather than a short replay nobody can explain.
+- The terminal is restored on exit, on SIGINT/SIGTERM and on an uncaught error — and the error is
+  printed *after* leaving the alternate screen, or the stack trace goes into a buffer nobody sees.
+- `--basic` gets `/history` (it is all transcript already); scrolling the mirror stays ink-only.
+- **13 new unit tests (338 green)** and a sixteenth end-to-end smoke, `scripts/smoke-scroll.mjs`:
+  self-contained, free, no real claude, and it proves on a REAL pty that a scrolled-back mirror
+  is row-for-row what `capture-pane -S` returns, that a guest can scroll, that End returns to
+  live with the held frames, that three F2 round trips leave the transcript intact and
+  un-duplicated in native scrollback, that `/history all` goes from 5 replayed lines to all 30,
+  and that the top-of-history line appears exactly once.
+
 ### v0.25 — audible join events
 
 Two distinguishable sounds, so the host knows **without looking** whether somebody needs

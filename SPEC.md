@@ -752,7 +752,7 @@ The public README keeps a short list. This is all of them.
 
 ## Running the end-to-end smokes
 
-Fifteen end-to-end smokes, all fifteen verified 2026-08-29 on node 24.15 / tmux 3.7c /
+Sixteen end-to-end smokes, verified 2026-08-29 on node 24.15 / tmux 3.7c /
 claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -847,6 +847,17 @@ node scripts/smoke-answer.mjs
 # auto-join are two different sounds" and "only the client a nudge was addressed to was
 # interrupted" are facts on disk instead of inferences. Verified 2026-08-29: all 15 steps pass.
 node scripts/smoke-nudge.mjs
+
+# v0.28: the sixteenth smoke. NO arguments, no daemon of yours, no real claude, no network. Own
+# $TMPDIR, own cwd, port 7901, two tmux sessions (jamscroll and jamscrollink) killed by exact
+# name on its own socket. ~90 s, costs nothing.
+#
+# The pane is a shell stub that prints 400 numbered lines and then one `TICK` per change of a
+# control file — so the pane has REAL scrollback to page back through, and "the screen moved
+# while somebody was scrolled" is something the smoke decides rather than waits for. It runs a
+# real ink client on a real pty as a GUEST and compares what that guest sees, scrolled back,
+# with `capture-pane -S` on the host pane, row for row. Verified 2026-08-29: all 11 steps pass.
+node scripts/smoke-scroll.mjs
 ```
 
 ### What each smoke covers of v0.25/v0.26/v0.27
@@ -1775,6 +1786,32 @@ traversal, size cap, and only THEN the policy. The quota is spent where the byte
 than where they were announced, so a dropped mismatch costs the session nothing.
 
 ## v0.28 — real scrollback (Roy: "I can only see very little")
+
+**SHIPPED 2026-08-29.** All five items. Five things the implementation found that the spec did
+not know:
+
+1. **The scrollback churn had a specific, measurable cause**, and it was not repainting as such.
+   In ink 5.2.1 `onRender` takes a different path once the live region is as tall as the
+   terminal: it writes `ansiEscapes.clearTerminal` — whose `\x1b[3J` clears the terminal's SAVED
+   LINES — and then reprints the whole `<Static>` log. `fitFrame` sizes a mirror frame to exactly
+   that height. So the alternate screen is the right fix for a second reason: in the mirror view
+   there is now no `<Static>` at all, so the branch has nothing to reprint and nothing to clear.
+2. **`<Static>`'s index only moves forward**, so one ink instance cannot print into two buffers.
+   The client therefore mounts again on every view flip, which forces one invariant to be written
+   down and kept: `store.entries` is what has NOT yet reached the terminal, ink's final render on
+   unmount writes it, and it is emptied immediately afterwards. That invariant is also what
+   retired the F3 re-feed.
+3. **The client has to OPEN on the transcript** and enter the mirror once the welcome block is
+   printed. Entering the alternate screen first would have put the block a first-time guest needs
+   into a buffer that the first F2 throws away — the v0.24b bug, in a new costume. The same
+   problem for later `toTranscript` blocks (the invite lines) is solved by drawing them over the
+   mirror for 45 s as well as queueing them for the transcript.
+4. **`#{history_size}`, not `history-limit`**, is what "as far back as it goes" has to come from:
+   the limit is what the pane MAY keep, and a jam two minutes old has almost none of it. Measured
+   on the smoke's own pane: 373 lines above a 30-row window.
+5. **The ring and the replay had to become two numbers.** They were one, which is why the
+   complaint had no answer that did not also flood every new arrival. `--replay` bigger than
+   `--history` is now one line at boot rather than a short replay nobody can explain.
 
 Three distinct gaps make the client feel amnesiac next to a normal Claude Code session:
 (a) the mirror repaints the same terminal region, churning the native scrollback the transcript
