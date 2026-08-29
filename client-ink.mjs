@@ -1036,10 +1036,23 @@ function unmountFlush() {
   store.entries = [];
 }
 
+// A line that belongs OVER the mirror as well as in the transcript — `toTranscript` is what
+// marks it as a notice (see emit), and this is the two-line spelling of that.
+function overMirror(text) { toTranscript++; sys(text); toTranscript--; }
+
+let hintedF2 = false;
 function applyScreen(alt) {
   store.mirror = alt;
   store.alt = alt;
   writeOut(alt ? SMCUP : RMCUP);
+  // v0.28 and the one thing the alternate screen costs: the connect block is printed to the
+  // NORMAL buffer (so it is in this terminal's scrollback for good) and the mirror then covers
+  // it. A first-time guest would otherwise lose the block that teaches them F2 exists — which is
+  // the v0.10c complaint, in a new costume — so one row says where it went. Once per client.
+  if (alt && !hintedF2) {
+    hintedF2 = true;
+    overMirror('the welcome block, the keys and the history are in the transcript — F2 shows it · /help reprints the keys');
+  }
   // Coming back to the normal buffer: everything that arrived while the mirror was up is
   // flushed into the transcript, in order, and the fresh mount prints exactly those rows under
   // what is already in the terminal's scrollback. Nothing is reprinted and nothing is lost.
