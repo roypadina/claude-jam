@@ -2208,3 +2208,312 @@ test('P7 the swap did not disturb the stable-per-name property', () => {
   assert.equal(userColor('Dana'), 39, 'unchanged by the swap');
   assert.equal(userColor('Roy'), 110, 'unchanged by the swap');
 });
+
+// --- v0.18: jam owns its tmux sessions -------------------------------------------
+// The safety rule is the feature, so it is tested from the refusal side first: every one of
+// these is a session jam must NOT end.
+
+const OWNED_DIR = '/tmp/claude-jam-7799';
+const ownedInfo = (over = {}) => sessionInfo({
+  tmux: 'jamtest', port: 7799, viewPort: 7801, cwd: '/x', sessionId: 'f00dcafe-0000-4000-8000-000000000000',
+  createdAt: 1000, pid: 4242, state: OWNED_DIR, secret: 'hooksecret', ...over,
+});
+const onDisk = (info) => parseSessionJson(JSON.stringify(info));
+
+test('v0.18 the marker verifies only when name, marker and session.json all agree', () => {
+  const v = verifyOwned('jamtest', OWNED_DIR, onDisk(ownedInfo()));
+  assert.equal(v.ok, true);
+  assert.equal(v.dir, OWNED_DIR);
+  assert.equal(v.info.tmux, 'jamtest');
+  // Everything the kill path needs is in the file, so nothing has to be guessed at kill time.
+  for (const k of ['tmux', 'port', 'viewPort', 'cwd', 'sessionId', 'createdAt', 'pid', 'state']) {
+    assert.ok(k in v.info, k);
+  }
+});
+
+test('v0.18 REFUSAL: a tmux session with no @jam-owned option is never jam\'s to end', () => {
+  for (const marker of [null, undefined, '', 0, false]) {
+    const v = verifyOwned('jam', marker, null);
+    assert.equal(v.ok, false, String(marker));
+    assert.match(v.why, /carries no @jam-owned marker/);
+    assert.match(v.why, /jam will not end it/);
+  }
+});
+
+test('v0.18 REFUSAL: a hand-written marker pointing at a dir jam never wrote', () => {
+  // The spoof: `tmux set-option @jam-owned /tmp/somewhere` on somebody's own session. The
+  // directory has no session.json of jam's, so there is nothing that says jam built this.
+  const v = verifyOwned('decoy', '/tmp/not-a-jam-state-dir', null);
+  assert.equal(v.ok, false);
+  assert.match(v.why, /where there is no session\.json jam wrote/);
+  assert.match(v.why, /by hand, refusing/);
+});
+
+test('v0.18 REFUSAL: a session.json copied into a directory it was not written for', () => {
+  // Same file, different directory: `state` no longer matches the marker, so the pair was not
+  // written together and the copy proves nothing.
+  const v = verifyOwned('jamtest', '/tmp/claude-jam-9999', onDisk(ownedInfo()));
+  assert.equal(v.ok, false);
+  assert.match(v.why, /says its state dir is \/tmp\/claude-jam-7799/);
+  assert.match(v.why, /not written together, refusing/);
+});
+
+test('v0.18 REFUSAL: a real state dir does not authorise a DIFFERENT session name', () => {
+  // The prefix-matching trap, in the one place it would matter: tmux would happily resolve the
+  // target `jam` onto a session called `jamtest`, so the name in session.json has to match the
+  // name asked for exactly.
+  const v = verifyOwned('jam', OWNED_DIR, onDisk(ownedInfo()));
+  assert.equal(v.ok, false);
+  assert.match(v.why, /belongs to session "jamtest", not "jam"/);
+  assert.equal(verifyOwned('jamtes', OWNED_DIR, onDisk(ownedInfo())).ok, false);
+  assert.equal(verifyOwned('jamtest2', OWNED_DIR, onDisk(ownedInfo())).ok, false);
+  assert.equal(verifyOwned('JAMTEST', OWNED_DIR, onDisk(ownedInfo())).ok, false, 'no case folding either');
+});
+
+test('v0.18 REFUSAL: a marker that is not an absolute path, and no name at all', () => {
+  const rel = verifyOwned('jamtest', 'claude-jam-7799', onDisk(ownedInfo()));
+  assert.equal(rel.ok, false);
+  assert.match(rel.why, /not an absolute state dir/);
+  for (const n of [null, '', undefined]) {
+    const v = verifyOwned(n, OWNED_DIR, onDisk(ownedInfo()));
+    assert.equal(v.ok, false);
+    assert.match(v.why, /never guesses one/);
+  }
+});
+
+test('v0.18 parseSessionJson: anything that is not jam\'s own shape is null', () => {
+  assert.equal(parseSessionJson(''), null);
+  assert.equal(parseSessionJson('not json'), null);
+  assert.equal(parseSessionJson('[]'), null);
+  assert.equal(parseSessionJson('null'), null);
+  assert.equal(parseSessionJson('"a string"'), null);
+  // A JSON file that happens to sit in the directory is not a marker: the tag has to be there.
+  assert.equal(parseSessionJson(JSON.stringify({ tmux: 'jamtest', state: OWNED_DIR, port: 7799 })), null);
+  assert.equal(parseSessionJson(JSON.stringify({ ...ownedInfo(), jam: 'something-else' })), null);
+  assert.equal(parseSessionJson(JSON.stringify({ ...ownedInfo(), v: '1' })), null);
+  assert.equal(parseSessionJson(JSON.stringify({ ...ownedInfo(), tmux: '' })), null);
+  assert.equal(parseSessionJson(JSON.stringify({ ...ownedInfo(), state: '' })), null);
+  assert.equal(parseSessionJson(JSON.stringify({ ...ownedInfo(), port: 0 })), null);
+  assert.equal(parseSessionJson(JSON.stringify({ ...ownedInfo(), port: 99999 })), null);
+  assert.equal(parseSessionJson(JSON.stringify({ ...ownedInfo(), port: '7799' })), null);
+  assert.equal(SESSION_TAG, 'claude-jam');
+  assert.equal(SESSION_V, 1);
+  assert.equal(SESSION_FILE, 'session.json');
+  assert.equal(OWNED_OPTION, '@jam-owned');
+});
+
+test('v0.18 the state dir is jam\'s whole namespace, and only exact names are in it', () => {
+  assert.equal(stateDirFor('/tmp', 7799), `/tmp/${STATE_PREFIX}7799`);
+  assert.equal(portFromStateDir('claude-jam-7799'), 7799);
+  assert.equal(portFromStateDir(`${STATE_PREFIX}7777`), 7777);
+  // Everything else in $TMPDIR is somebody else's business.
+  for (const n of ['claude-jam', 'claude-jam-', 'claude-jam-x', 'claude-jam-7799-old', 'claude-jam-7799 ',
+    'Claude-jam-7799', 'jam-7799', 'claude-jam-0', 'claude-jam-70000', 'claude-jam-777777', '', null]) {
+    assert.equal(portFromStateDir(n), null, JSON.stringify(n));
+  }
+  // The round trip is what keeps the launcher and `jam sessions` looking at the same place.
+  const dir = stateDirFor('/var/folders/x', 7801);
+  assert.equal(portFromStateDir(dir.slice(dir.lastIndexOf('/') + 1)), 7801);
+});
+
+test('v0.18 classifyJam names all five states, and only the orphan may be deleted', () => {
+  assert.equal(classifyJam({ tmuxAlive: true, owned: true, portAlive: true }), 'live');
+  assert.equal(classifyJam({ tmuxAlive: true, owned: true, portAlive: false }), 'no-daemon');
+  assert.equal(classifyJam({ tmuxAlive: false, owned: false, portAlive: false }), 'orphan');
+  // Nothing to kill, but something still holds the port — jam leaves both alone.
+  assert.equal(classifyJam({ tmuxAlive: false, owned: false, portAlive: true }), 'no-session');
+  // The session exists and does not verify: this is somebody else's tmux session.
+  assert.equal(classifyJam({ tmuxAlive: true, owned: false, portAlive: true }), 'foreign');
+  assert.equal(classifyJam({ tmuxAlive: true, owned: false, portAlive: false }), 'foreign');
+  assert.equal(classifyJam(), 'orphan');
+  assert.deepEqual([...JAM_STATES].sort(), ['foreign', 'live', 'no-daemon', 'no-session', 'orphan']);
+  for (const state of JAM_STATES) {
+    assert.equal(cleanable({ state }), state === 'orphan', state);
+    assert.equal(jamMark(state), state === 'live' ? ' ' : '!', state);
+  }
+  assert.equal(cleanable(undefined), false);
+});
+
+test('v0.18 resolveTarget: one jam is unambiguous, several is a picker, a name is exact', () => {
+  const a = { name: 'jam', state: 'live' };
+  const b = { name: 'jamtest', state: 'no-daemon' };
+  assert.deepEqual(resolveTarget([a]), { ok: true, row: a });
+  assert.deepEqual(resolveTarget([a], null), { ok: true, row: a });
+  const many = resolveTarget([a, b]);
+  assert.equal(many.ok, false);
+  assert.match(many.why, /2 jams are running — name one/);
+  assert.deepEqual(many.choices, [a, b]);
+  const none = resolveTarget([]);
+  assert.equal(none.ok, false);
+  assert.match(none.why, /no jam of jam's own is running/);
+  // A name is matched exactly: no prefix, no case folding, no pattern.
+  assert.deepEqual(resolveTarget([a, b], 'jamtest'), { ok: true, row: b });
+  for (const bad of ['jamt', 'JAM', 'jam*', 'jam ', 'jamtest2', 'ja']) {
+    const v = resolveTarget([a, b], bad);
+    assert.equal(v.ok, false, bad);
+    assert.match(v.why, /no jam-owned tmux session is called/);
+  }
+});
+
+test('v0.18 resolveTarget never offers a foreign session as a target', () => {
+  const mine = { name: 'jamtest', state: 'live' };
+  const theirs = { name: 'work', state: 'foreign' };
+  // Even named outright, a session that did not verify is not a target — and with it excluded,
+  // the one jam left is resolvable without a picker.
+  assert.equal(resolveTarget([mine, theirs], 'work').ok, false);
+  assert.deepEqual(resolveTarget([mine, theirs]), { ok: true, row: mine });
+  assert.deepEqual(resolveTarget([mine, theirs]).row.name, 'jamtest');
+});
+
+test('v0.18 pickNumber and promptChoice: nothing destructive on a stray keypress', () => {
+  const choices = [{ name: 'a' }, { name: 'b' }];
+  assert.deepEqual(pickNumber('1', choices), choices[0]);
+  assert.deepEqual(pickNumber(' 2 ', choices), choices[1]);
+  for (const bad of ['0', '3', '', 'a', '1a', '-1', '1.0', null, undefined, '999']) {
+    assert.equal(pickNumber(bad, choices), null, JSON.stringify(bad));
+  }
+  assert.equal(promptChoice('k', EXIT_KEYS), 'k');
+  assert.equal(promptChoice('E\n', EXIT_KEYS), 'e');
+  assert.equal(promptChoice('  c  ', EXIT_KEYS), 'c');
+  // Enter alone, junk, or a key this prompt does not offer: ask again.
+  for (const bad of ['', '\n', 'x', 'y', 'a', '  ', null]) {
+    assert.equal(promptChoice(bad, EXIT_KEYS), null, JSON.stringify(bad));
+  }
+  assert.deepEqual(EXIT_KEYS, ['k', 'e', 'c']);
+  assert.deepEqual(TAKEN_KEYS, ['a', 'n', 'e', 'c']);
+  assert.equal(promptChoice('n', TAKEN_KEYS), 'n');
+});
+
+test('v0.18-1 exitDecision: the flags win, and anything that cannot answer keeps the jam', () => {
+  assert.equal(exitDecision({ isHost: true, isTty: true }), 'prompt');
+  assert.equal(exitDecision({ isHost: true, isTty: false }), 'keep', 'a pipe cannot answer a prompt');
+  assert.equal(exitDecision({ isHost: true, isTty: true, noPrompt: true }), 'keep');
+  assert.equal(exitDecision({ isHost: true, isTty: true, keepOnExit: true }), 'keep');
+  assert.equal(exitDecision({ isHost: true, isTty: false, endOnExit: true }), 'end', 'the explicit flag still ends it');
+  assert.equal(exitDecision({ isHost: true, isTty: true, endOnExit: true }), 'end');
+  // Two contradictory flags are a startup error, never a guess about which one was meant.
+  assert.equal(exitDecision({ endOnExit: true, keepOnExit: true }), 'conflict');
+  // A guest is never asked and can never end anything: their client was a window onto somebody
+  // else's session.
+  for (const flags of [{}, { endOnExit: true }, { noPrompt: true }, { isTty: true }]) {
+    assert.equal(exitDecision({ ...flags, isHost: false }), 'keep', JSON.stringify(flags));
+  }
+  assert.equal(exitDecision(), 'keep');
+});
+
+test('v0.18-1 the exit prompt counts the guests and offers exactly three ways out', () => {
+  assert.equal(exitPromptText(2), 'this jam is still running (2 guests connected) — [k]eep it running · [e]nd it · [c]ancel');
+  assert.match(exitPromptText(1), /\(1 guest connected\)/);
+  assert.match(exitPromptText(0), /\(0 guests connected\)/);
+  for (const k of EXIT_KEYS) assert.match(exitPromptText(0), new RegExp(`\\[${k}\\]`));
+});
+
+test('v0.18-1 the way back is one wording, and it names the v0.18 commands', () => {
+  const lines = reattachLines({ tmux: 'jamtest', port: 7799, name: 'Roy', token: 'tok', clientCmd: 'jam join' });
+  const all = lines.join('\n');
+  assert.match(all, /jam host --attach --tmux jamtest/);
+  assert.match(all, /jam sessions/);
+  assert.match(all, /jam end jamtest/);
+  assert.match(all, /tmux attach -t jamtest/);
+  assert.match(all, /jam join ws:\/\/127\.0\.0\.1:7799 --name Roy --token tok --host/);
+  // The default session needs no --tmux, and no token means no --token in the line.
+  assert.match(reattachLines({}).join('\n'), /jam host --attach$/m);
+  assert.equal(/--token/.test(reattachLines({ port: 7777 }).join('\n')), false);
+});
+
+test('v0.18-5 a taken name offers four ways out, and a foreign one offers none', () => {
+  const p = takenPromptText('jam', 'jam-2');
+  assert.match(p, /already a jam of yours/);
+  for (const k of TAKEN_KEYS) assert.match(p, new RegExp(`\\[${k}\\]`));
+  assert.match(p, /\[n\]ew session \(jam-2\)/);
+  const f = foreignSessionText('work', 'no @jam-owned marker');
+  assert.match(f, /is NOT one of jam's — jam will not touch it/);
+  assert.match(f, /--tmux work-jam/);
+  assert.match(f, /tmux attach -t work/);
+  // Not one of the four keys is offered for a session jam does not own: there is nothing to
+  // choose, because ending it is not on the table.
+  for (const k of TAKEN_KEYS) assert.equal(new RegExp(`\\[${k}\\]`).test(f), false, k);
+});
+
+test('v0.18-5 autoSessionName steps to the first free suffix', () => {
+  assert.equal(autoSessionName('jam', []), 'jam');
+  assert.equal(autoSessionName('jam', ['jam']), 'jam-2');
+  assert.equal(autoSessionName('jam', ['jam', 'jam-2']), 'jam-3');
+  assert.equal(autoSessionName('jam', ['jam', 'jam-3']), 'jam-2');
+  assert.equal(autoSessionName('work', ['work']), 'work-2');
+  assert.equal(autoSessionName('jam', ['jam', ...Array.from({ length: 98 }, (_, i) => `jam-${i + 2}`)]), null);
+});
+
+test('v0.18-7 endingNotice: one line, exit 0, and never a reconnect', () => {
+  assert.deepEqual(endingNotice({ by: 'Roy' }), { code: 0, text: 'Roy ended the jam — nothing to reconnect to' });
+  assert.deepEqual(endingNotice({}), { code: 0, text: 'the host ended the jam — nothing to reconnect to' });
+  assert.match(endingNotice({ by: 'Roy', reason: '/end' }).text, /Roy ended the jam \(\/end\)/);
+  // An orderly end is not a failure, whatever rode in on the frame.
+  for (const ev of [{}, { by: '' }, { by: 42 }, { by: '../../etc' }, { reason: 'x'.repeat(400) }, null]) {
+    assert.equal(endingNotice(ev).code, 0, JSON.stringify(ev));
+  }
+  // The frame is data: a name that is not a name is dropped, and control bytes never reach a
+  // terminal through it.
+  assert.match(endingNotice({ by: '\x1b[2Jgotcha' }).text, /^the host ended the jam/);
+  assert.equal(endingNotice({ by: 'Roy', reason: 'a\x1b[2Jb' }).text.includes('\x1b'), false);
+  assert.ok(endingNotice({ reason: 'x'.repeat(400) }).text.length < 200);
+});
+
+test('v0.18-4 /end is jam\'s own command, and it asks twice', () => {
+  assert.deepEqual(parseClientLine('/end'), { kind: 'end' });
+  assert.deepEqual(parseClientLine(' /end '), { kind: 'end' });
+  assert.ok(JAM_COMMANDS.includes('/end'), 'or the client would type it into claude instead');
+  assert.ok(commandMatches('/en').includes('/end'));
+  // Only a real yes ends a jam; Enter alone, or anything else, is a no.
+  for (const yes of ['y', 'Y', 'yes', 'YES', ' y ']) assert.equal(confirmYes(yes), true, yes);
+  for (const no of ['', '\n', 'n', 'no', 'ye', 'yep', 'sure', null, undefined, 'y y']) {
+    assert.equal(confirmYes(no), false, JSON.stringify(no));
+  }
+});
+
+test('v0.18-2 uptimeText reads as a duration at every scale', () => {
+  assert.equal(uptimeText(0), '0s');
+  assert.equal(uptimeText(41_000), '41s');
+  assert.equal(uptimeText(59_999), '59s');
+  assert.equal(uptimeText(60_000), '1m');
+  assert.equal(uptimeText(90 * 60_000), '1h 30m');
+  assert.equal(uptimeText(26 * 3600_000), '26h 0m');
+  assert.equal(uptimeText(-5), '0s', 'a clock that went backwards is not negative uptime');
+  assert.equal(uptimeText(null), '0s');
+});
+
+test('v0.18-2 the sessions table marks what is wrong and never prints a credential', () => {
+  const now = 1_000_000;
+  const rows = [
+    { name: 'jamtest', state: 'live', port: 7799, viewPort: 7801, cwd: '/Users/roy/p', sessionId: 'abcdef12-3456-4789-8abc-def012345678', createdAt: now - 90 * 60_000, participants: ['Roy', 'Dana'], view: true, tunnel: true, dir: '/tmp/claude-jam-7799' },
+    { name: null, state: 'orphan', port: 7805, cwd: '/tmp/x', sessionId: '', createdAt: null, participants: [], dir: '/tmp/claude-jam-7805' },
+  ];
+  const t = sessionsTable(rows, now);
+  const lines = t.split('\n');
+  assert.match(lines[0], /#\s+name\s+port\s+state\s+up\s+session\s+here\s+urls\s+cwd/);
+  assert.match(lines[1], /^\s+1 jamtest\s+7799 live\s+1h 30m abcdef12 Roy, Dana\s+view\+tunnel \/Users\/roy\/p$/);
+  assert.match(lines[2], /^! 2 —\s+7805 orphan/);
+  assert.match(t, /! orphan = the tmux session is gone/);
+  // Presence only: the join line carries the token and the view URL carries the view key, so
+  // neither ever appears in a listing.
+  assert.equal(/tok|ws:\/\/|http:\/\//.test(t), false);
+  assert.match(sessionsTable([], now), /no jams/);
+  // The row is derived, so the table and --json cannot disagree about what state something is in.
+  assert.equal(sessionsRow(rows[0], now, 0).state, 'live');
+  assert.equal(sessionsRow(rows[1], now, 1).mark, '!');
+});
+
+test('v0.18-2 --json carries the facts a script needs, including what clean would take', () => {
+  const now = 2_000_000;
+  const rows = [
+    { name: 'jamtest', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, participants: ['Roy'], view: false, tunnel: false, dir: '/tmp/claude-jam-7799' },
+    { name: null, state: 'orphan', port: 7805, cwd: null, sessionId: null, createdAt: null, participants: [], dir: '/tmp/claude-jam-7805' },
+  ];
+  const j = sessionsJson(rows, now);
+  assert.equal(j.length, 2);
+  assert.deepEqual(j[0], { name: 'jamtest', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, uptimeMs: 5000, participants: ['Roy'], view: false, tunnel: false, state_dir: '/tmp/claude-jam-7799', cleanable: false });
+  assert.equal(j[1].cleanable, true, 'the orphan is the only thing clean may remove');
+  assert.equal(j[1].uptimeMs, null);
+  // It has to survive JSON.stringify unchanged — that is the whole point of --json.
+  assert.deepEqual(JSON.parse(JSON.stringify(j)), j);
+});
