@@ -23,7 +23,8 @@ message**. Humans also get a side channel the agent never sees.
   `tailscale` for `--funnel`, `git` for `/diff`,
   `pngpaste` for `/paste` (macOS falls back to `osascript`)
 
-macOS and Linux. No Windows.
+macOS and Linux. No Windows. The bell is portable; the desktop notification beside it is macOS
+only (`osascript`), exactly like `/paste`.
 
 ## Install
 
@@ -88,8 +89,10 @@ You land on the live TUI — the host's real Claude Code screen, plus the backlo
 happened before you arrived (up to `--replay` events, with a
 `── history above · live from here ──` divider under it). A plain line goes to the agent
 as `[Dana]: …`; `/c <text>` is human-only chat; **F2** flips to the transcript; `/files` and
-`/diff` say what the session has changed; `/help` reprints the onboarding block. `--basic` swaps ink for a plain readline client (transcript
-only, no live view, no F2/F3) and is picked automatically when stdin is not a tty.
+`/diff` say what the session has changed; `/answer` answers a permission prompt (the host still
+approves); `/help` reprints the onboarding block. Typing `/` raises a dim list of jam's own
+commands. `--basic` swaps ink for a plain readline client (transcript
+only, no live view, no F2/F3, no command list) and is picked automatically when stdin is not a tty.
 
 ## Access: token, knock, tunnel, funnel
 
@@ -139,18 +142,31 @@ approves.
 | `/tools`, `/tools on\|off` | anyone | reprint the last turn's full tool log · stop/resume collapsing tool lines |
 | `/files` | anyone | every path this session read, wrote or edited — newest first, with a count |
 | `/diff [path]` | anyone | `git diff --stat` of the host's working tree, or the real hunks for one path |
+| `/answer`, `/answer <n>` | anyone | list the options on claude's permission prompt · offer one of them (the host approves before a key is typed) |
 | `/join`, `/token new\|set\|off` | host | reprint the invite lines · rotate or drop the token |
 | `/accept [name]`, `/deny <name>` | host | answer a knock |
 | `/allow-cmd [name] [always]`, `/deny-cmd <name>` | host | answer a guest's claude command |
+| `/allow-perm [name] [always]`, `/deny-perm <name>` | host | answer a guest's permission answer |
 | `/send <path>`, `/paste [caption]` | anyone | guest uploads a file to `<cwd>/jam-uploads/` (host approves); host **offers** one instead |
 | `/get [name]` | guest | save a host offer into `./jam-downloads/` |
 | `/export` | guest | take the session transcript home as `./jam-session-<id>.jsonl`, with the recipe to `claude --resume` it (host approves) |
 | `/allow-export`, `/deny-export`, `/accept-file`, `/deny-file` | host | the other two approval ladders |
 
-Every guest-initiated command, transfer and export goes through the same ladder: **default
-deny**, one request in flight per person, a two-minute expiry, and `always` for standing
-approval that lives in daemon memory and dies with it. `/exit`, `/clear` and `/resume` are
+Every guest-initiated command, transfer, export and permission answer goes through the same
+ladder: **default deny**, one request in flight per person, a two-minute expiry, and `always` for
+standing approval that lives in daemon memory and dies with it. `/exit`, `/clear` and `/resume` are
 refused outright — they would end or wipe the session for everyone.
+
+Three of claude's own commands are the exception: **`/cost`, `/status` and `/context` run for a
+guest with no round trip at all**, because they print a panel and change nothing. Exactly those
+three, and exactly bare — `/cost --json` is an argument this list has not read, so it asks like
+anything else. Their output lands on the shared screen like any other command, so a guest can put
+the host's `/status` panel in front of everybody; that is the whole cost of it.
+
+**Answering a permission prompt** (`/answer`) is the one guest action that reaches the real TUI, so
+it is the narrowest: only while claude is actually waiting, only a digit the daemon can see on the
+screen, only after the host approves that digit, and only if the screen still says the same thing
+when the key is typed. A guest never gets raw keys — that is F3, and it stays host-only.
 
 Multi-line input: `Shift+Enter` (kitty/CSI-u), `Option/Alt+Enter`, or a trailing `\` (works
 everywhere).
@@ -175,9 +191,15 @@ rendered as a real `-`/`+` diff rather than truncated JSON, because its argument
 the diff. And at boot the daemon seeds its 300-event history ring from the transcript already on
 disk, so the first guest to join a `--resume`d session gets the conversation, not a blank room.
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **182 tests**. Nine
+Two moments ring your terminal's bell (`\x07`, plus a macOS notification): claude waiting for a
+permission answer — the host's client only, since the host can always answer — and anybody saying
+your own name in a message or in `/c` chat. At most one per three seconds. The status row also
+carries this connection's own round trip, measured by the 30 s heartbeat: a dim `~120ms`, or
+`⚠ stale Ns` once a pong is overdue.
+
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **199 tests**. Ten
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
-in `SPEC.md` (`smoke-transport.mjs` and `smoke-replay.mjs` bring their own).
+in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs` and `smoke-perm.mjs` bring their own).
 
 ## Known ceilings (deliberate)
 
@@ -185,7 +207,13 @@ in `SPEC.md` (`smoke-transport.mjs` and `smoke-replay.mjs` bring their own).
 - Claude Code's JSONL format is officially unstable. All parsing lives in one function
   (`parseJsonlLine`), so a format change is a one-place fix.
 - A message injected mid-response is queued by Claude Code as the next turn, not merged.
-- Guests cannot answer permission prompts; the host does, with F3 — which *is* a `tmux attach`.
+- Guests can now answer a permission prompt, but only through the relay: the daemon reads the
+  prompt's numbered options off the screen, the host approves one, and the daemon types that one
+  digit. It refuses anything it cannot read cleanly (it wants the picker's own `❯` or a question
+  line above the options, and a 10-option prompt is more than one digit can pick), and a prompt
+  that changed between the request and the approval is refused rather than answered. Guests still
+  never get raw keys.
+- The host answers a prompt with F3 — which *is* a `tmux attach`.
   While the host is attached their own mirror is paused, and coming back re-feeds only the last
   40 transcript lines to the client: the rest stays in the terminal's own scrollback, because
   ink's `<Static>` would otherwise reprint the whole session on every return.
@@ -215,7 +243,17 @@ in `SPEC.md` (`smoke-transport.mjs` and `smoke-replay.mjs` bring their own).
   moment claude `Read`s it, its contents are in the context, and therefore in anybody's later
   `/export`.
 - Standing approval (`always`) is per name, in daemon memory, with no way to revoke short of a
-  restart.
+  restart. On the permission ladder that means a named guest may answer prompts unasked — still
+  only a digit that is on the screen, still re-checked every time, but it is the widest grant in
+  the tool. A one-key `a` on the approval bar never grants it; only the typed
+  `/allow-perm <name> always` does.
+- Participant colours are hashed per name from a fixed palette of eight. It is contrast-checked
+  (every one clears 4.5:1 on a dark terminal) and no longer holds a green that could be mistaken
+  for your own name's green — but eight fixed hues cannot all stay distinct for a dichromat, so two
+  pairs read alike under deuteranopia. The `[Name]` label beside the colour is the identity; the
+  colour is a hint.
+- The bell and the macOS notification are per-client and cannot be turned off short of your
+  terminal's own bell setting.
 - A transfer is held whole in memory at both ends and has no resume; uploads cap at 20 MB, the
   transcript and offers at 50 MB.
 - A dead relay child (`cloudflared`, `tailscale funnel`) IS restarted now, 1s doubling to 30s,
