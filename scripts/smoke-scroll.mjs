@@ -327,6 +327,8 @@ try {
     ok(welcome, 'the welcome block is in the terminal\'s own scrollback');
     const once = count(/as far back as this jam kept/);
     eq(once, 1, 'the top-of-history line, counted in the scrollback');
+    console.log(`      ${seen().find((r) => /as far back as this jam kept/.test(r)).trim()}`);
+    console.log(`      ${seen().find((r) => /F2 shows it/.test(r))?.trim() || '(the F2 hint row has expired)'}`);
     const chats = count(/SCROLLCHAT \d+/);
     ok(chats >= 1, `the replayed chat lines are there (${chats})`);
     // Two more round trips. The alternate screen is what makes this lossless: the mirror never
