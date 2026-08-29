@@ -24,7 +24,8 @@ import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
 import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
-import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames } from './lib.mjs';
+import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
 
@@ -76,6 +77,9 @@ const store = {
   tools: [], // v0.10: this turn's ⚙/⎿ lines, still collapsible
   toolsExpanded: false, // `/tools on` — never collapse
   lastTools: [], // the last completed turn's full tool log, for `/tools`
+  xfers: new Map(), // v0.12/v0.13: incoming transfers, xfer id -> assembling record
+  upload: null, // a file read and waiting for the host's yes: {name, data, caption}
+  offers: new Map(), // v0.13: what the host has offered, name -> {from, size}
   listeners: new Set(),
 };
 const touch = () => { for (const l of store.listeners) l(); };
@@ -257,6 +261,40 @@ function render(ev) {
         text: `${ev.name} wants to run ${ev.cmd} — /allow-cmd ${ev.name} · /allow-cmd ${ev.name} always · /deny-cmd ${ev.name}`,
         strip: true,
       });
+    // v0.12: a guest wants the transcript. Host clients only, and the line is the answer.
+    case 'exportreq':
+      return emit({
+        glyph: '⇩',
+        glyphColor: C.accent,
+        text: `${ev.name} requests the session transcript — /allow-export ${ev.name} · /allow-export ${ev.name} always · /deny-export ${ev.name}`,
+        strip: true,
+      });
+    // v0.13: a guest wants to send a file in. Host clients only.
+    case 'filereq':
+      return emit({
+        glyph: '⇪',
+        glyphColor: C.accent,
+        text: `${ev.name} wants to send ${ev.file} (${humanBytes(ev.size)}) — /accept-file ${ev.name} · /accept-file ${ev.name} always · /deny-file ${ev.name}`,
+        strip: true,
+      });
+    // v0.13: the host offered a file to everyone; `/get` pulls it.
+    case 'offer': {
+      store.offers.set(ev.name, { from: ev.from, size: ev.size });
+      return emit({
+        glyph: '⇩',
+        glyphColor: C.accent,
+        text: `${ev.from} offers ${ev.name} (${humanBytes(ev.size)}) — /get ${ev.name} saves it to ./${DOWNLOAD_DIR}/`,
+        strip: true,
+      });
+    }
+    // v0.13: the host said yes — send the bytes we are holding.
+    case 'xfergrant': return sendUpload(ev);
+    // v0.12/v0.13: an incoming transfer — its header, then its chunks.
+    case 'xfer': { xferStart(store.xfers, ev); return touch(); }
+    case 'file': {
+      const done = xferChunk(store.xfers, ev);
+      return done ? saveIncoming(done) : undefined;
+    }
     case 'token': {
       // Every invite string the daemon knows, tunnel pair included: a `/token` rotation
       // changes the credential inside all four.
@@ -373,6 +411,58 @@ function toggleMirror(on) {
   touch();
 }
 
+// ------------------------------------------ v0.12/v0.13: the export and files ----
+// A finished incoming transfer: write it, say where it went, and — for an export — print the
+// recipe that revives it. Forced into the transcript (`toTranscript`) so it is readable while
+// the live TUI fills the screen: nobody wants their instructions hidden behind an F2.
+function saveIncoming(rec) {
+  toTranscript++;
+  try {
+    const file = saveXfer(rec);
+    sys(`saved ${file} (${humanBytes(rec.data.length)})`);
+    if (rec.kind === 'export') {
+      for (const l of resumeInstructions(rec.session, file, process.cwd())) {
+        emit({ text: l, textColor: C.dim, wrap: false, bare: true });
+      }
+    }
+  } catch (e) { err(`could not save the transfer: ${e.message}`); }
+  toTranscript--;
+}
+
+// `/send <path>`: the host OFFERS the file to everyone (each guest pulls it with `/get`); a
+// guest UPLOADS it, and the host has to accept before a byte moves.
+function doSend(p) {
+  if (IS_HOST) return sendMsg({ t: 'offer', path: p });
+  let file;
+  try { file = readForUpload(p); } catch (e) { return err(e.message); }
+  stageUpload(file.name, file.data, '');
+}
+
+// `/paste`: the clipboard's image, the same upload path — for the host too, since a clipboard
+// image has no path claude could be pointed at instead.
+function doPaste(caption) {
+  let img;
+  try { img = clipboardPng(); } catch (e) { return err(e.message); }
+  stageUpload(img.name, img.data, caption);
+}
+
+function stageUpload(name, data, caption) {
+  store.upload = { name, data, caption };
+  sendMsg({ t: 'upload', name, size: data.length, caption: caption || undefined });
+  if (!IS_HOST) sys(`${name} (${humanBytes(data.length)}) — waiting for the host to accept it`);
+}
+
+// The grant names the file it is for, so a stale buffer (an earlier `/send` the host refused)
+// can never go out under a later approval.
+function sendUpload(ev) {
+  const up = store.upload;
+  if (!up) return err('a file was approved that I am no longer holding — /send it again');
+  if (ev.name && ev.name !== up.name) return err(`${ev.name} was approved, but I am holding ${up.name}`);
+  store.upload = null;
+  sys(`sending ${up.name} (${humanBytes(up.data.length)})…`);
+  pumpFrames(xferFrames(ev.xfer, up.data), (f) => sendMsg(f), () => ws?.readyState === 1);
+}
+
 // One submitted input row. Identical dispatch to the readline client, including the
 // continuation buffer: a trailing `\` collects, the first line without one flushes.
 function submit(raw) {
@@ -406,11 +496,27 @@ function submit(raw) {
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'admit', name: act.name || undefined, ok: act.kind === 'accept' });
       break;
-    // v0.14: answering a guest's /command request.
+    // v0.14: answering a guest's /command request. v0.12/v0.13: the same ladder for the
+    // transcript and for a file — the daemon enforces host+loopback on all three.
     case 'cmd':
+    case 'export-ok':
+    case 'file-ok':
       if (!IS_HOST) err('host only');
-      else sendMsg({ t: 'cmd', op: act.op, name: act.name || undefined, always: act.always });
+      else {
+        const t = { cmd: 'cmd', 'export-ok': 'exportok', 'file-ok': 'fileok' }[act.kind];
+        sendMsg({ t, op: act.op, name: act.name || undefined, always: act.always });
+      }
       break;
+    // v0.12: ask for the session transcript (the host is asked first, unless it IS the host).
+    case 'export':
+      sendMsg({ t: 'export' });
+      if (!IS_HOST) sys('asked the host for the session transcript…');
+      break;
+    // v0.13: a file out (host: an offer; guest: an upload the host must accept), the
+    // clipboard's image, and taking something the host offered.
+    case 'send': doSend(act.path); break;
+    case 'paste': doPaste(act.caption); break;
+    case 'get': sendMsg({ t: 'get', name: act.name || undefined }); break;
     case 'token':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'token', op: act.op, value: act.value });
