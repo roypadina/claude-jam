@@ -5,9 +5,10 @@
 // own row: animated spinner left, typing indicator right, prompt row untouched), and the
 // host's own chat surface.
 // Extended for v0.10 (tool collapse + /tools), v0.10b (Shift/Alt+Enter newlines), v0.10c
-// (the onboarding block + /help) and v0.14 — where the mirror of the real TUI is the DEFAULT
+// (the onboarding block + /help), v0.14 — where the mirror of the real TUI is the DEFAULT
 // view, F2 is the transcript, the chat strip carries what the mirror cannot show, and the
-// host's tmux session sits detached with the claude window alone in it.
+// host's tmux session sits detached with the claude window alone in it — and v0.30-3, where
+// `↑`/`↓` recall this client's own submissions and hand the draft back at the end.
 // Needs a jam daemon already running with a token (see README).
 // usage: node scripts/smoke-ink.mjs <ws-url> <token> <host-tmux-session>
 import { spawnSync } from 'node:child_process';
@@ -327,6 +328,36 @@ try {
       () => /\[cmd\] Dana wants \/compact[^\n]*/.exec(log + (tmux('capture-pane', '-p', '-S', '-400', '-t', `${hostSession}:daemon`).stdout || ''))?.[0], 8000);
     console.log(`      ${asked.trim()}`);
     if (/❯ \/compact/.test(pane(`${hostSession}:claude`))) throw new Error('an unapproved command reached the pane');
+  });
+
+  await step('v0.30-3: ↑ and ↓ recall what THIS client submitted, on a real pty', async () => {
+    // Three of its own submissions are already behind it (/c first line…, third line, /help…),
+    // so send two known ones and walk back to them. `↑` is CSI A here — the client claims both
+    // that and the SS3 spelling out of the byte stream before ink's text field can see them.
+    line('/c recall alpha');
+    await until('alpha to land', () => /\[humans-only\] recall alpha/.test(pane(PEER_SESSION)), 8000);
+    line('/c recall beta');
+    await until('beta to land', () => /\[humans-only\] recall beta/.test(pane(PEER_SESSION)), 8000);
+    type('half typed draft'); // the draft has to survive the walk and come back
+    hex('1b', '5b', '41'); // ESC [ A — up
+    await until('the newest submission in the input row',
+      () => /❯ \/c recall beta\s*$/.test(rows(PEER_SESSION).at(-1)), 8000);
+    hex('1b', '5b', '41'); // up again — one older
+    const older = await until('the one before it',
+      () => (/❯ \/c recall alpha\s*$/.test(rows(PEER_SESSION).at(-1)) ? rows(PEER_SESSION).at(-1) : null), 8000);
+    console.log(`      ↑↑ → ${JSON.stringify(older)}`);
+    hex('1b', '5b', '42'); // ESC [ B — down, back towards the draft
+    await until('the newer one again',
+      () => /❯ \/c recall beta\s*$/.test(rows(PEER_SESSION).at(-1)), 8000);
+    hex('1b', '5b', '42'); // down off the end: the draft comes back untouched
+    const back = await until('the draft',
+      () => (/❯ half typed draft\s*$/.test(rows(PEER_SESSION).at(-1)) ? rows(PEER_SESSION).at(-1) : null), 8000);
+    console.log(`      ↓↓ → ${JSON.stringify(back)}`);
+    // Nothing was sent by any of that: recall edits the input row and nothing else.
+    if (eli.frames.some((f) => f.t === 'chat' && /half typed draft/.test(f.text))) {
+      throw new Error('walking the history submitted something');
+    }
+    key('C-u'); // leave the row clean for whatever runs next
   });
 
   show('Dana — 120x40 ink client', PEER_SESSION);
