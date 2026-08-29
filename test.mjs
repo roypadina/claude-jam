@@ -3659,6 +3659,130 @@ test('v0.24.2 the menu runs a bare command with one key, and TYPES one that need
 // It reads string literals only: a comment may still say whatever it likes, and the scanner
 // therefore has to know the difference between a quote in code, a quote in a comment and a
 // quote inside a regex literal (`/[^"\n]/` used to look like the start of a string).
+// Every identifier in the file, each with the significant token before and after it. Same shape
+// as jsStringLiterals below — comments, strings, template literals and regex literals skipped —
+// but it emits the NAMES rather than the strings, because the lint under it asks a question no
+// amount of `node --check` can answer: is this thing we are calling actually defined anywhere?
+// `${...}` inside a template literal is scanned as code, because that is where a client builds
+// most of its strings and a call in there is a call like any other.
+function jsIdentifiers(src) {
+  const out = [];
+  const s = String(src);
+  let i = 0, line = 1, lastSig = '', lastWord = '';
+  const stack = [];
+  const opens = [];
+  const closeOf = new Map();
+  const BEFORE_REGEX = new Set(['return', 'typeof', 'case', 'in', 'of', 'delete', 'void', 'instanceof', 'do', 'else', 'yield', 'await']);
+  // Walk the template body until its end or the next `${`; shared by the opening backtick and
+  // by the `}` that closes an interpolation.
+  const eatTemplate = () => {
+    while (i < s.length) {
+      if (s[i] === '\\') { i += 2; continue; }
+      if (s[i] === '\n') { line++; i++; continue; }
+      if (s[i] === '`') { stack.pop(); i++; return; }
+      if (s[i] === '$' && s[i + 1] === '{') { i += 2; stack.push('expr'); return; }
+      i++;
+    }
+  };
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '\n') { line++; i++; continue; }
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === '/' && s[i + 1] === '/') { while (i < s.length && s[i] !== '\n') i++; continue; }
+    if (c === '/' && s[i + 1] === '*') {
+      i += 2;
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) { if (s[i] === '\n') line++; i++; }
+      i += 2; continue;
+    }
+    if (c === "'" || c === '"') {
+      const q = c; i++;
+      while (i < s.length && s[i] !== q) { if (s[i] === '\\') i++; if (s[i] === '\n') line++; i++; }
+      i++; lastSig = 'x'; lastWord = ''; continue;
+    }
+    if (c === '`') { stack.push('tmpl'); i++; eatTemplate(); if (stack.at(-1) !== 'expr') { lastSig = 'x'; lastWord = ''; } continue; }
+    if (c === '}' && stack.at(-1) === 'expr') { stack.pop(); i++; eatTemplate(); if (stack.at(-1) !== 'expr') { lastSig = 'x'; lastWord = ''; } continue; }
+    if (c === '/' && (lastSig === '' || '(,=:[!&|?{};+-*%~^<>'.includes(lastSig) || BEFORE_REGEX.has(lastWord))) {
+      i++;
+      for (let cls = false; i < s.length; i++) {
+        if (s[i] === '\\') { i++; continue; }
+        if (s[i] === '[') cls = true;
+        else if (s[i] === ']') cls = false;
+        else if (s[i] === '/' && !cls) { i++; break; }
+        else if (s[i] === '\n') break;
+      }
+      while (i < s.length && /[gimsuyvd]/.test(s[i])) i++;
+      lastSig = 'x'; lastWord = ''; continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      const start = i;
+      while (i < s.length && /[A-Za-z0-9_$]/.test(s[i])) i++;
+      const name = s.slice(start, i);
+      let j = i;
+      while (j < s.length && /\s/.test(s[j])) j++;
+      out.push({ name, prev: lastWord || lastSig, next: s[j] === '?' && s[j + 1] === '.' ? '?.' : s[j] || '', line,
+        openAt: s[j] === '(' ? j : -1 });
+      lastWord = name; lastSig = 'x'; continue;
+    }
+    if (/[0-9]/.test(c)) { while (i < s.length && /[0-9a-fA-FxXoObBn_.]/.test(s[i])) i++; lastSig = 'x'; lastWord = ''; continue; }
+    if (c === '?' && s[i + 1] === '.') { lastSig = '.'; lastWord = '?.'; i += 2; continue; }
+    // Parens are matched as they go by, skipping every one inside a string, comment or regex —
+    // which is the whole reason this has to happen HERE and not in a second pass over the text.
+    if (c === '(') opens.push(i);
+    else if (c === ')' && opens.length) closeOf.set(opens.pop(), i);
+    lastSig = c; lastWord = ''; i++;
+  }
+  // `name(...) {` is a DEFINITION — an object-literal shorthand method or a class method — and
+  // `name(...)` anywhere else is a call. Without this, every shorthand method reads as a call to
+  // something undefined. Found by this lint's own canary on 2026-08-30.
+  const afterClose = (open) => {
+    let k = closeOf.get(open);
+    if (k == null) return '';
+    for (k++; k < s.length;) {
+      if (/\s/.test(s[k])) { k++; continue; }
+      if (s[k] === '/' && s[k + 1] === '/') { while (k < s.length && s[k] !== '\n') k++; continue; }
+      if (s[k] === '/' && s[k + 1] === '*') { k += 2; while (k < s.length && !(s[k] === '*' && s[k + 1] === '/')) k++; k += 2; continue; }
+      return s[k];
+    }
+    return '';
+  };
+  for (const t of out) t.definition = t.openAt >= 0 && afterClose(t.openAt) === '{';
+  return out;
+}
+
+// The lint's own rule, kept separate so a canary can drive it: a name used in CALL position that
+// appears nowhere else in the module, is not a keyword and is not a runtime global, resolves to
+// nothing and will throw the moment that branch runs.
+const LINT_GLOBALS = new Set(['console', 'process', 'Buffer', 'URL', 'URLSearchParams', 'WebSocket',
+  'JSON', 'Math', 'Date', 'Object', 'Array', 'String', 'Number', 'Boolean', 'Promise', 'Set', 'Map',
+  'WeakMap', 'WeakSet', 'Symbol', 'Error', 'TypeError', 'RangeError', 'SyntaxError', 'RegExp',
+  'Proxy', 'Reflect', 'BigInt', 'isNaN', 'isFinite', 'parseInt', 'parseFloat', 'structuredClone',
+  'queueMicrotask', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate',
+  'clearImmediate', 'fetch', 'AbortController', 'TextEncoder', 'TextDecoder', 'encodeURIComponent',
+  'decodeURIComponent', 'require', 'Intl', 'performance', 'ArrayBuffer', 'Uint8Array', 'DataView',
+  'Blob', 'File', 'FormData', 'Headers', 'Request', 'Response', 'Event', 'EventTarget', 'crypto',
+  'globalThis', 'atob', 'btoa']);
+const LINT_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'function', 'class', 'new',
+  'do', 'else', 'try', 'finally', 'throw', 'yield', 'in', 'of', 'instanceof', 'case', 'default',
+  'break', 'continue', 'const', 'let', 'var', 'export', 'import', 'extends', 'return', 'typeof',
+  'void', 'delete', 'await', 'async', 'this', 'super', 'null', 'true', 'false', 'static', 'get',
+  'set', 'from', 'as', 'with', 'debugger']);
+
+function unresolvedCalls(src) {
+  const called = new Map();
+  const elsewhere = new Set();
+  for (const t of jsIdentifiers(src)) {
+    if (LINT_KEYWORDS.has(t.name)) continue;
+    if (t.prev === '.' || t.prev === '?.') continue; // a property of something, not a free name
+    // `function name(` and `function* name(` and `class name(` are DECLARATIONS that happen to
+    // be followed by a paren. Without the `*`, every generator reads as its own missing call.
+    const declaration = t.prev === 'function' || t.prev === 'class' || t.prev === '*' || t.definition;
+    if (t.next === '(' && !declaration) { if (!called.has(t.name)) called.set(t.name, t.line); }
+    else elsewhere.add(t.name);
+  }
+  return [...called].filter(([n]) => !LINT_GLOBALS.has(n) && !elsewhere.has(n))
+    .map(([name, line]) => ({ name, line }));
+}
+
 function jsStringLiterals(src) {
   const out = [];
   const s = String(src);
@@ -5800,5 +5924,50 @@ test('neutralizePrefixes still leaves ordinary text alone', () => {
   for (const line of ['[Roy]', 'see [1] for details', 'a [note] here', '[]:', 'x[Roy]: y',
     `[${'n'.repeat(25)}]: too long a name to be one of ours`]) {
     assert.equal(neutralizePrefixes(line), line, `${JSON.stringify(line)} must be untouched`);
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// Campaign 2026-08-30: the lint TESTING.md owed for the v0.25 `nudge()` -> `alert()` rename.
+// ---------------------------------------------------------------------------------------
+
+test('every call site in every module resolves to something', () => {
+  // The bug this exists for: after v0.25 renamed nudge() to alert(), client-basic.mjs still
+  // called nudge() on the "a mention in /c chat rings the bell" path. `node --check` passes that
+  // file — it is valid syntax — so nothing failed until a human was mentioned in a --basic
+  // client, and it took a release gate (smoke-perm P3) rather than a test to find it.
+  const modules = fs.readdirSync(new URL('./', import.meta.url))
+    .filter((f) => f.endsWith('.mjs') && f !== 'test.mjs').sort();
+  assert.ok(modules.length >= 10, modules.join(' '));
+  for (const f of modules) {
+    const src = fs.readFileSync(new URL(`./${f}`, import.meta.url), 'utf8');
+    const missing = unresolvedCalls(src);
+    assert.deepEqual(missing, [],
+      `${f} calls ${missing.map((m) => `${m.name}() at line ${m.line}`).join(', ')} — defined nowhere in the module`);
+  }
+});
+
+test('the call-site lint actually fires — both halves of a half-finished rename', () => {
+  // A lint that has never gone red proves nothing, so drive it with the real bug, both ways.
+  const defRenamed = 'function nudge(a) { return a; }\nexport const x = () => alert(1);\n';
+  assert.deepEqual(unresolvedCalls(defRenamed).map((m) => m.name), ['alert'],
+    'the definition was renamed and the call sites were left dangling');
+  const callRenamed = 'function alert(a) { return a; }\nexport const x = () => nudge(1);\n';
+  assert.deepEqual(unresolvedCalls(callRenamed).map((m) => m.name), ['nudge'],
+    'one call site was renamed and nothing defines it');
+  // And the shapes that must NOT fire.
+  const fine = [
+    'function* gen(a) { yield a; }\nconst y = () => [...gen(1)];',       // a generator declaration
+    'const f = (cb) => cb();',                                            // a parameter
+    'import { sanitize } from "./lib.mjs";\nconst z = () => sanitize(1);', // an import
+    'const o = { run() { return 1; } };\nconst w = o.run();',             // a method
+    'const s = `a ${String(1)} b`;',                                      // inside a template
+    'const r = /alert\\(/.test("x");',                                    // inside a regex literal
+    'const t = "nudge(";',                                                // inside a string
+    '// nudge(1) in a comment',                                           // inside a comment
+    'class K { m() { return 1; } }\nconst k = new K();',
+  ];
+  for (const src of fine) {
+    assert.deepEqual(unresolvedCalls(src), [], `false positive on: ${JSON.stringify(src.slice(0, 60))}`);
   }
 });
