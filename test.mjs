@@ -58,6 +58,12 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   parseJoinInput, buildJoinArgv, remoteRows, relaySwitchDecision, joinBlock, relayPendingLine,
   relayReadyLine, COMMAND_HELP, HOST_MENU_ONLY, guestCommands, HOST_FLAGS, KEY_HELP, WIKI_PAGES,
   menuTree, menuItems, menuGaps, menuRunsBare, MANUAL_FILE,
+  // v0.23: named jams and LAN discovery — the name, the TXT record, the dns-sd parse, the table.
+  DISCOVERY_TYPE, DISCOVERY_DOMAIN, FIND_MS, JAM_NAME_MAX, validJamName, defaultJamName, jamName,
+  DISCOVERY_TXT_KEYS, DISCOVERY_ID_LEN, TXT_VALUE_MAX, discoveryTxt,
+  unescapeDnsLabel, parseTxtStrings, parseTxtPairs, parseDnssdZone, discoveredJams,
+  FIND_COLS, FIND_EMPTY, FIND_GATE, findTable, findJson,
+  JOIN_PASTE_VALUE, joinRows, joinPlanFor,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -3767,4 +3773,352 @@ test('v0.32 W0 secureWrite writes a file only its owner can read', () => {
       assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ================================ v0.23: named jams and LAN discovery ====
+// The fixture is a VERBATIM capture of `/usr/bin/dns-sd -Z _claude-jam._tcp local` taken on
+// macOS 26 on 2026-08-29 against two real registrations of our own — comment block, duplicated
+// per-interface records, `\032` escapes and all. Every parser assertion below is against what
+// the real binary actually printed, not against what its man page suggests it prints.
+// scripts/smoke-discover.mjs runs the same path live, end to end.
+const DNSSD_Z = `Browsing for _claude-jam._tcp.local
+DATE: ---Sat 29 Aug 2026---
+18:13:08.339  ...STARTING...
+
+; To direct clients to browse a different domain, substitute that domain in place of '@'
+lb._dns-sd._udp                                 PTR     @
+
+; In the list of services below, the SRV records will typically reference dot-local Multicast DNS names.
+; When transferring this zone file data to your unicast DNS server, you'll need to replace those dot-local
+; names with the correct fully-qualified (unicast) domain name of the target host offering the service.
+
+_claude-jam._tcp                                PTR     probe\\032two._claude-jam._tcp
+probe\\032two._claude-jam._tcp                   SRV     0 0 7902 Roys-MacBook-Pro-4.local. ; Replace with unicast FQDN of target host
+probe\\032two._claude-jam._tcp                   TXT     "jam=probe two" "host=Someone Else" "id=deadbeef" "access=token" "view=no" "v=0.18.0"
+
+_claude-jam._tcp                                PTR     probe\\032one._claude-jam._tcp
+probe\\032one._claude-jam._tcp                   SRV     0 0 7901 Roys-MacBook-Pro-4.local. ; Replace with unicast FQDN of target host
+probe\\032one._claude-jam._tcp                   TXT     "jam=probe one" "host=Roy" "id=abcd1234" "access=knock" "view=yes" "v=0.18.0"
+
+_claude-jam._tcp                                PTR     probe\\032two._claude-jam._tcp
+probe\\032two._claude-jam._tcp                   SRV     0 0 7902 Roys-MacBook-Pro-4.local. ; Replace with unicast FQDN of target host
+probe\\032two._claude-jam._tcp                   TXT     "jam=probe two" "host=Someone Else" "id=deadbeef" "access=token" "view=no" "v=0.18.0"
+
+_claude-jam._tcp                                PTR     probe\\032one._claude-jam._tcp
+probe\\032one._claude-jam._tcp                   SRV     0 0 7901 Roys-MacBook-Pro-4.local. ; Replace with unicast FQDN of target host
+probe\\032one._claude-jam._tcp                   TXT     "jam=probe one" "host=Roy" "id=abcd1234" "access=knock" "view=yes" "v=0.18.0"
+`;
+
+// The second real capture: a name with a dot, double quotes and a non-ASCII character in it, and
+// a TXT value carrying an apostrophe and an `=`. This is what dns-sd printed for
+// `-R 'a.b "c" ✓' … 'host=O'Brien = boss'`.
+const DNSSD_Z_TRICKY = `_claude-jam._tcp                                PTR     a\\.b\\032"c"\\032✓._claude-jam._tcp
+a\\.b\\032"c"\\032✓._claude-jam._tcp             SRV     0 0 7903 Roys-MacBook-Pro-4.local. ; Replace with unicast FQDN of target host
+a\\.b\\032"c"\\032✓._claude-jam._tcp             TXT     "jam=a.b \\"c\\" ✓" "host=O'Brien = boss" "id=00ff11aa" "access=invite" "view=no" "v=0.18.0"
+`;
+
+// ------------------------------------------------------------------ the name ----
+
+test('v0.23 the jam name defaults to the cwd basename, and is never empty', () => {
+  assert.equal(defaultJamName('/Users/roy/Code/Padina/claude-jam'), 'claude-jam');
+  assert.equal(defaultJamName('/Users/roy/Code/reeco debugging'), 'reeco debugging');
+  // A trailing separator is not a nameless directory.
+  assert.equal(defaultJamName('/Users/roy/Code/thing/'), 'thing');
+  assert.equal(defaultJamName('/Users/roy/Code/thing///'), 'thing');
+  // Nothing usable to take a name from still produces a name — never '' and never undefined.
+  assert.equal(defaultJamName('/'), 'claude-jam');
+  assert.equal(defaultJamName(''), 'claude-jam');
+  assert.equal(defaultJamName(null), 'claude-jam');
+  // A basename too long to be one DNS label is not one, so the fallback takes over rather than
+  // shipping a truncated half-name to the network.
+  assert.equal(defaultJamName(`/tmp/${'x'.repeat(64)}`), 'claude-jam');
+  assert.equal(defaultJamName(`/tmp/${'x'.repeat(63)}`), 'x'.repeat(63));
+});
+
+test('v0.23 jamName resolves the ABSENT case only — a given name is handed back as typed', () => {
+  assert.equal(jamName('', '/Users/roy/Code/thing'), 'thing');
+  assert.equal(jamName(null, '/Users/roy/Code/thing'), 'thing');
+  assert.equal(jamName('   ', '/Users/roy/Code/thing'), 'thing');
+  assert.equal(jamName('reeco debugging', '/Users/roy/Code/thing'), 'reeco debugging');
+  assert.equal(jamName('  padded  ', '/Users/roy/Code/thing'), 'padded');
+  // An invalid name is NOT quietly swapped for the default: host.mjs refuses it, the way it
+  // refuses a bad --name, and this function must not hide that.
+  assert.equal(jamName('a\nb', '/Users/roy/Code/thing'), 'a\nb');
+  assert.equal(validJamName(jamName('a\nb', '/x')), false);
+});
+
+test('v0.23 validJamName: one DNS label, no control characters, counted in BYTES', () => {
+  assert.equal(validJamName('claude-jam'), true);
+  assert.equal(validJamName('reeco debugging'), true);
+  assert.equal(validJamName('a.b "c" ✓'), true); // dns-sd escapes these; they are legal in a label
+  assert.equal(validJamName(''), false);
+  assert.equal(validJamName('   '), false);
+  assert.equal(validJamName(null), false);
+  assert.equal(validJamName('a\nb'), false);
+  assert.equal(validJamName('a\tb'), false);
+  assert.equal(validJamName('a\u0000b'), false);
+  assert.equal(validJamName('a\u001bb'), false); // an escape sequence in a jam name is not a name
+  assert.equal(validJamName('x'.repeat(JAM_NAME_MAX)), true);
+  assert.equal(validJamName('x'.repeat(JAM_NAME_MAX + 1)), false);
+  // BYTES, not characters: 32 of these are 64 bytes and so over the limit, while 31 fit.
+  assert.equal('é'.length, 1);
+  assert.equal(validJamName('é'.repeat(31)), true);
+  assert.equal(validJamName('é'.repeat(32)), false);
+});
+
+// ------------------------------------------------------------- the TXT record ----
+
+test('v0.23 discoveryTxt publishes exactly six keys, in order', () => {
+  const txt = discoveryTxt({ jam: 'reeco debugging', host: 'Roy', id: 'abcd1234',
+    access: 'token', view: true, v: '0.18.0' });
+  assert.deepEqual(txt, ['jam=reeco debugging', 'host=Roy', 'id=abcd1234',
+    'access=token', 'view=yes', 'v=0.18.0']);
+  assert.equal(txt.length, DISCOVERY_TXT_KEYS.length);
+  assert.deepEqual(txt.map((s) => s.slice(0, s.indexOf('='))), DISCOVERY_TXT_KEYS);
+});
+
+test('v0.23 THE REDACTION RULE: no token, no secret, no path can reach the TXT record', () => {
+  // The whole session, handed in wholesale — the shape a careless caller would spread in.
+  const txt = discoveryTxt({
+    jam: 'reeco debugging', host: 'Roy', id: 'abcd1234', access: 'token', view: false, v: '0.18.0',
+    // Everything below is a secret or a path, and none of it is one of the six keys.
+    token: 'sup3rsecrettoken', secret: 'hooksecret-abc123', hookSecret: 'hooksecret-abc123',
+    viewKey: 'viewkey-xyz', invite: 'cjam1_eyJ2IjoxfQ', invites: ['cjam1_eyJ2IjoxfQ'],
+    cwd: '/Users/roy/Code/Padina/claude-jam', state: '/tmp/claude-jam-7777',
+    dir: '/tmp/claude-jam-7777', tmux: 'claude-jam', join: 'claude-jam join ws://x --token sup3rsecrettoken',
+  });
+  const blob = txt.join(' ');
+  for (const leak of ['sup3rsecrettoken', 'hooksecret-abc123', 'viewkey-xyz', 'cjam1_',
+    '/Users/roy', '/tmp/claude-jam-7777', 'Padina']) {
+    assert.equal(blob.includes(leak), false, `${leak} reached the TXT record: ${blob}`);
+  }
+  // And it is an allow-list, not a deny-list: the extra keys did not appear under any spelling.
+  assert.deepEqual(txt.map((s) => s.slice(0, s.indexOf('='))), DISCOVERY_TXT_KEYS);
+  assert.equal(txt.length, 6);
+});
+
+test('v0.23 discoveryTxt sanitises its six values rather than trusting them', () => {
+  // A control character must never go into a record every machine on the LAN parses.
+  const txt = discoveryTxt({ jam: 'a\nb\tc', host: 'R\u007foy', id: 'abcd1234efgh', v: '0.18.0' });
+  const t = Object.fromEntries(txt.map((s) => [s.slice(0, s.indexOf('=')), s.slice(s.indexOf('=') + 1)]));
+  assert.equal(t.jam, 'a b c');
+  assert.equal(t.host, 'Roy');
+  // The id is the same 8-char prefix every other surface shows, cut here rather than trusted.
+  assert.equal(t.id, 'abcd1234');
+  assert.equal(t.id.length, DISCOVERY_ID_LEN);
+  // An absent / unknown access mode is published as the safe default, never as a raw string.
+  assert.equal(t.access, 'knock');
+  assert.equal(discoveryTxt({ access: 'nonsense' })[3], 'access=knock');
+  assert.equal(discoveryTxt({ access: 'invite' })[3], 'access=invite');
+  // view is a word, not a truthy value.
+  assert.equal(discoveryTxt({ view: true })[4], 'view=yes');
+  assert.equal(discoveryTxt({ view: false })[4], 'view=no');
+  assert.equal(discoveryTxt({})[4], 'view=no');
+  // Long values are capped, because one TXT string cannot exceed 255 bytes.
+  const long = Object.fromEntries(discoveryTxt({ jam: 'x'.repeat(500) })
+    .map((s) => [s.slice(0, s.indexOf('=')), s.slice(s.indexOf('=') + 1)]));
+  assert.equal(long.jam.length, TXT_VALUE_MAX);
+});
+
+// ------------------------------------------------- parsing what dns-sd streams ----
+
+test('v0.23 unescapeDnsLabel reads DNS presentation format', () => {
+  assert.equal(unescapeDnsLabel('probe\\032one'), 'probe one');
+  assert.equal(unescapeDnsLabel('a\\.b'), 'a.b');
+  assert.equal(unescapeDnsLabel('a\\\\b'), 'a\\b');
+  assert.equal(unescapeDnsLabel('plain'), 'plain');
+  assert.equal(unescapeDnsLabel(''), '');
+  assert.equal(unescapeDnsLabel(null), '');
+  // \DDD is DECIMAL, which is the part that is easy to get wrong: \065 is 'A', not 0x65.
+  assert.equal(unescapeDnsLabel('\\065'), 'A');
+});
+
+test('v0.23 parseTxtStrings handles the quoted form, the escaped quote and the bare form', () => {
+  assert.deepEqual(parseTxtStrings('"jam=probe two" "host=Roy"'), ['jam=probe two', 'host=Roy']);
+  assert.deepEqual(parseTxtStrings('"jam=a \\"b\\" c"'), ['jam=a "b" c']);
+  // No quotes at all: dns-sd prints TXT bare when no value contains a space.
+  assert.deepEqual(parseTxtStrings('jam=x host=Roy'), ['jam=x', 'host=Roy']);
+  assert.deepEqual(parseTxtStrings(''), []);
+  assert.deepEqual(parseTxtStrings('   '), []);
+  assert.deepEqual(parseTxtStrings(null), []);
+});
+
+test('v0.23 parseTxtPairs splits on the FIRST = and drops what is not a pair', () => {
+  assert.deepEqual(parseTxtPairs(['jam=a=b']), { jam: 'a=b' });
+  assert.deepEqual(parseTxtPairs(['jam=']), { jam: '' });
+  assert.deepEqual(parseTxtPairs(['nokey']), {});          // no `=` is not a pair
+  assert.deepEqual(parseTxtPairs(['=novalue']), {});       // and neither is an empty key
+  // First wins, so a second `jam=` cannot overwrite the first one.
+  assert.deepEqual(parseTxtPairs(['jam=first', 'jam=second']), { jam: 'first' });
+  assert.deepEqual(parseTxtPairs([]), {});
+});
+
+test('v0.23 parseDnssdZone reads the REAL dns-sd -Z capture, one record per jam', () => {
+  const recs = parseDnssdZone(DNSSD_Z);
+  // Four blocks in the capture (dns-sd repeats every record per interface); two jams.
+  assert.equal(recs.length, 2);
+  assert.deepEqual(recs.map((r) => r.instance), ['probe two', 'probe one']);
+  assert.deepEqual(recs.map((r) => r.port), [7902, 7901]);
+  assert.deepEqual(recs.map((r) => r.target), ['Roys-MacBook-Pro-4.local', 'Roys-MacBook-Pro-4.local']);
+  assert.deepEqual(recs[1].txt, { jam: 'probe one', host: 'Roy', id: 'abcd1234',
+    access: 'knock', view: 'yes', v: '0.18.0' });
+  // The banner, the DATE line, the `;` comment block and the `lb._dns-sd._udp PTR @` row are
+  // all in the fixture and none of them became a record.
+  assert.equal(recs.some((r) => /dns-sd|STARTING|Browsing/.test(r.instance)), false);
+});
+
+test('v0.23 parseDnssdZone survives the tricky real capture: dots, quotes, unicode, = in a value', () => {
+  const rows = discoveredJams(parseDnssdZone(DNSSD_Z_TRICKY));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].jam, 'a.b "c" ✓');       // the escaped label AND the TXT agree
+  assert.equal(rows[0].host, "O'Brien = boss"); // the `=` inside a value survived the split
+  assert.equal(rows[0].access, 'invite');
+  assert.equal(rows[0].port, 7903);
+});
+
+test('v0.23 parseDnssdZone is total: malformed, partial and foreign lines cost nothing', () => {
+  const good = 'x._claude-jam._tcp SRV 0 0 7777 host.local.\nx._claude-jam._tcp TXT "jam=x"';
+  assert.equal(parseDnssdZone('').length, 0);
+  assert.equal(parseDnssdZone(null).length, 0);
+  assert.equal(parseDnssdZone('   \n\n\t\n').length, 0);
+  // A browse for a type nobody advertises really does print nothing — measured, and here it is.
+  assert.equal(parseDnssdZone('Browsing for _claude-jam._tcp.local\nDATE: ---Sat 29 Aug 2026---\n').length, 0);
+  // A HALF-WRITTEN line, which is the whole risk of parsing a stream: it must yield no row and
+  // must not corrupt the row that came before it.
+  assert.equal(parseDnssdZone(`${good}\ny._claude-jam._tcp SRV 0 0 78`).length, 1);
+  assert.equal(parseDnssdZone(`${good}\ny._claude-jam._tc`).length, 1);
+  assert.equal(parseDnssdZone(`y._claude-jam._tcp SR${'\n'}${good}`).length, 1);
+  // Another service's records are not ours, whatever they look like.
+  assert.equal(parseDnssdZone('printer._ipp._tcp SRV 0 0 631 host.local.').length, 0);
+  assert.equal(parseDnssdZone('x._claude-jam._tcp.evil SRV 0 0 7777 host.local.').length, 0);
+  // A record with no instance label at all is not an instance.
+  assert.equal(parseDnssdZone('._claude-jam._tcp SRV 0 0 7777 host.local.').length, 0);
+  // A nonsense port is not a port, and a jam nobody can connect to is not listed.
+  assert.equal(discoveredJams(parseDnssdZone('x._claude-jam._tcp SRV 0 0 notaport host.local.')).length, 0);
+  assert.equal(discoveredJams(parseDnssdZone('x._claude-jam._tcp SRV 0 0 0 host.local.')).length, 0);
+  assert.equal(discoveredJams(parseDnssdZone('x._claude-jam._tcp SRV 0 0 99999 host.local.')).length, 0);
+  // TXT but no SRV: no port, so no address, so no row — rather than a row you cannot join.
+  assert.equal(parseDnssdZone('x._claude-jam._tcp TXT "jam=x"').length, 1);
+  assert.equal(discoveredJams(parseDnssdZone('x._claude-jam._tcp TXT "jam=x"')).length, 0);
+  // A `;` inside a quoted TXT value is somebody's jam name, not dns-sd's trailing comment.
+  const semi = discoveredJams(parseDnssdZone(
+    'x._claude-jam._tcp SRV 0 0 7777 host.local. ; Replace with unicast FQDN\n'
+    + 'x._claude-jam._tcp TXT "jam=a ; b" "host=Roy" "access=knock"'));
+  assert.equal(semi[0].jam, 'a ; b');
+  assert.equal(semi[0].port, 7777);
+});
+
+test('v0.23 discoveredJams: an unstated access mode is `?`, never a cheerful knock', () => {
+  const rows = discoveredJams(parseDnssdZone('x._claude-jam._tcp SRV 0 0 7777 host.local.'));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].access, '?');
+  assert.equal(rows[0].jam, 'x');   // with no TXT, the instance label IS the name
+  assert.equal(rows[0].host, '—');
+  assert.equal(rows[0].view, false);
+  assert.equal(rows[0].url, 'ws://host.local:7777');
+  // A TXT that names a mode nobody knows is not evidence of a knock either.
+  const odd = discoveredJams(parseDnssdZone(
+    'x._claude-jam._tcp SRV 0 0 7777 host.local.\nx._claude-jam._tcp TXT "access=wideopen"'));
+  assert.equal(odd[0].access, '?');
+});
+
+// ------------------------------------------------------------ the two surfaces ----
+
+test('v0.23 findTable: a row per jam, the join command per row, and the gate every time', () => {
+  const rows = discoveredJams(parseDnssdZone(DNSSD_Z));
+  const table = findTable(rows);
+  const lines = table.split('\n');
+  assert.deepEqual(lines[0].trim().split(/\s+/), FIND_COLS);
+  assert.match(lines[1], /^1 probe two\s+Someone Else\s+token\s+no\s+Roys-MacBook-Pro-4\.local:7902$/);
+  assert.match(lines[2], /^2 probe one\s+Roy\s+knock\s+yes\s+Roys-MacBook-Pro-4\.local:7901$/);
+  // Two jams on one machine are both listed and told apart by their address.
+  assert.equal(rows.length, 2);
+  assert.notEqual(rows[0].address, rows[1].address);
+  assert.notEqual(rows[0].id, rows[1].id);
+  // The listing teaches the join, and a token jam's line says a token is wanted.
+  assert.match(table, /probe one: claude-jam join ws:\/\/Roys-MacBook-Pro-4\.local:7901 --name <you>$/m);
+  assert.match(table, /probe two: .* --name <you> --token <token>$/m);
+  // DISCOVERY IS NOT A KEY, said on every listing.
+  assert.ok(table.endsWith(FIND_GATE));
+  // The empty answer is an explanation, not a blank.
+  assert.equal(findTable([]), FIND_EMPTY);
+  assert.match(FIND_EMPTY, /--no-announce/);
+  // An invite-only jam is told apart in the how-to, because a URL join cannot work for it.
+  const inv = findTable(discoveredJams(parseDnssdZone(DNSSD_Z_TRICKY)));
+  assert.match(inv, /invite-only: ask for a link instead/);
+});
+
+test('v0.23 findJson is the same facts with no layout', () => {
+  const rows = discoveredJams(parseDnssdZone(DNSSD_Z));
+  const j = findJson(rows);
+  assert.equal(j.length, 2);
+  assert.deepEqual(j[1], {
+    jam: 'probe one', host: 'Roy', id: 'abcd1234', access: 'knock', view: true,
+    address: 'Roys-MacBook-Pro-4.local:7901', target: 'Roys-MacBook-Pro-4.local',
+    port: 7901, url: 'ws://Roys-MacBook-Pro-4.local:7901', v: '0.18.0',
+  });
+  // It is JSON, so it must survive a round trip unchanged.
+  assert.deepEqual(JSON.parse(JSON.stringify(j)), j);
+  // No secret has a place in the shape at all — the TXT never carried one, and neither does this.
+  assert.equal(/token|secret|cwd|state|path/.test(Object.keys(j[0]).join(' ')), false);
+  assert.deepEqual(findJson([]), []);
+  // The unknowns are null rather than an empty string that reads like a value.
+  const bare = findJson(discoveredJams(parseDnssdZone('x._claude-jam._tcp SRV 0 0 7777 h.local.')));
+  assert.equal(bare[0].id, null);
+  assert.equal(bare[0].v, null);
+  assert.equal(bare[0].access, '?');
+});
+
+test('v0.23 joinRows: the discovered jams first, "paste a link or URL" LAST', () => {
+  const found = discoveredJams(parseDnssdZone(DNSSD_Z));
+  const rows = joinRows(found);
+  assert.equal(rows.length, found.length + 1);
+  assert.equal(rows.at(-1).value, JOIN_PASTE_VALUE);
+  assert.equal(rows.at(-1).row, null);
+  assert.match(rows.at(-1).label, /paste a link or URL/);
+  assert.deepEqual(rows.slice(0, -1).map((r) => r.value), ['found:0', 'found:1']);
+  assert.equal(rows[0].row, found[0]);
+  // The label carries what tells two jams apart: the host, the access mode and the address.
+  assert.match(rows[0].label, /probe two.*Someone Else.*token.*7902/);
+  assert.match(rows[1].label, /probe one.*Roy.*knock.*view.*7901/);
+  // With nothing found, the paste row is still there — the fallback never disappears.
+  assert.deepEqual(joinRows([]).map((r) => r.value), [JOIN_PASTE_VALUE]);
+});
+
+test('v0.23 joinPlanFor: discovery never bypasses a gate', () => {
+  const [tokenJam, knockJam] = discoveredJams(parseDnssdZone(DNSSD_Z));
+  // A knock jam needs a name and nothing else — and it is still a KNOCK, which the host answers.
+  const knock = joinPlanFor(knockJam, { name: 'Dana' });
+  assert.equal(knock.ok, true);
+  assert.deepEqual(knock.argv, ['join', 'ws://Roys-MacBook-Pro-4.local:7901', '--name', 'Dana']);
+  assert.equal(knock.command.includes('--token'), false);
+  assert.equal(joinPlanFor(knockJam, { name: '' }).ok, false);
+  assert.equal(joinPlanFor(knockJam, { name: '' }).needs, 'name');
+  // A token jam is NOT joinable just because it was found: the token is still required.
+  const noTok = joinPlanFor(tokenJam, { name: 'Dana' });
+  assert.equal(noTok.ok, false);
+  assert.equal(noTok.needs, 'token');
+  assert.match(noTok.error, /probe two wants its shared token/);
+  assert.equal(joinPlanFor(tokenJam, { name: 'Dana', token: 'short' }).ok, false);
+  const withTok = joinPlanFor(tokenJam, { name: 'Dana', token: 'goodtoken123' });
+  assert.equal(withTok.ok, true);
+  assert.deepEqual(withTok.argv.slice(-2), ['--token', 'goodtoken123']);
+  // An invite-only jam cannot be joined by URL at all, and says so instead of being refused later.
+  const inv = discoveredJams(parseDnssdZone(DNSSD_Z_TRICKY))[0];
+  const plan = joinPlanFor(inv, { name: 'Dana', token: 'goodtoken123' });
+  assert.equal(plan.ok, false);
+  assert.equal(plan.needs, 'link');
+  assert.match(plan.error, /invite-only/);
+  // And an UNKNOWN access mode is treated as a knock attempt — the honest thing, since the
+  // daemon is the one that decides, and it will say no if it means no.
+  const unknown = discoveredJams(parseDnssdZone('x._claude-jam._tcp SRV 0 0 7777 h.local.'))[0];
+  assert.equal(joinPlanFor(unknown, { name: 'Dana' }).ok, true);
+});
+
+test('v0.23 the service type and browse window are constants everybody shares', () => {
+  assert.equal(DISCOVERY_TYPE, '_claude-jam._tcp');
+  assert.equal(DISCOVERY_DOMAIN, 'local');
+  assert.equal(FIND_MS, 3000);
+  // The parser defaults to the same type it is told about, so nothing can drift.
+  assert.equal(parseDnssdZone('x._claude-jam._tcp SRV 0 0 7777 h.local.', DISCOVERY_TYPE).length, 1);
 });
