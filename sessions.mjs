@@ -230,9 +230,13 @@ export async function listRows(tmpdir = stateDir()) {
     const marker = tmuxAlive ? sessionMarker(info.tmux, socket) : null;
     const owned = tmuxAlive && verifyOwned(info.tmux, marker, readSessionFile(marker)).ok;
     const portAlive = !!(await daemonHealth(port)) || (!tmuxAlive && await portBusy(port));
+    // v0.33: read off session.json, never off the adopted server — the row must be true even
+    // when that server is gone, and asking it anything would be a call jam has no reason to make.
+    const adopt = info.adopt?.pane ? info.adopt : null;
     rows.push({
       name: tmuxAlive ? info.tmux : null,
-      state: classifyJam({ tmuxAlive, owned, portAlive }),
+      state: classifyJam({ tmuxAlive, owned, portAlive, adopted: !!adopt }),
+      adopt,
       port,
       viewPort: info.viewPort ?? null,
       cwd: info.cwd || null,
@@ -261,6 +265,13 @@ export async function endJam(row, log = console.log) {
   const pre = ownedSession(name, socket);
   if (!pre.ok) return { ok: false, why: pre.why };
   log(`ending jam "${name}" (port ${info.port}, session ${String(info.sessionId).slice(0, 8)})`);
+  // v0.33: said BEFORE anything happens, because the promise of an adopted jam is that ending it
+  // is not the end of what the human was doing. `name`/`socket` above are claude-jam's own
+  // daemon-holding session, which is the only thing killOwned below is ever pointed at.
+  if (info.adopt?.pane) {
+    log(`  this jam ADOPTED pane ${info.adopt.pane} on tmux socket ${info.adopt.socket}`
+      + ` — that pane, its session and claude are not touched`);
+  }
   // The daemon is the one that can tell the clients, so it gets the first word — and it kills
   // its own session, which is the ordinary path.
   const said = await postEnd(info.port, info.secret);

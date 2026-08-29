@@ -2436,7 +2436,7 @@ test('v0.18 the state dir is jam\'s whole namespace, and only exact names are in
   assert.equal(portFromStateDir(dir.slice(dir.lastIndexOf('/') + 1)), 7801);
 });
 
-test('v0.18 classifyJam names all five states, and only the orphan may be deleted', () => {
+test('v0.18 classifyJam names every state, and only the orphan may be deleted', () => {
   assert.equal(classifyJam({ tmuxAlive: true, owned: true, portAlive: true }), 'live');
   assert.equal(classifyJam({ tmuxAlive: true, owned: true, portAlive: false }), 'no-daemon');
   assert.equal(classifyJam({ tmuxAlive: false, owned: false, portAlive: false }), 'orphan');
@@ -2446,10 +2446,11 @@ test('v0.18 classifyJam names all five states, and only the orphan may be delete
   assert.equal(classifyJam({ tmuxAlive: true, owned: false, portAlive: true }), 'foreign');
   assert.equal(classifyJam({ tmuxAlive: true, owned: false, portAlive: false }), 'foreign');
   assert.equal(classifyJam(), 'orphan');
-  assert.deepEqual([...JAM_STATES].sort(), ['foreign', 'live', 'no-daemon', 'no-session', 'orphan']);
+  // v0.33: a sixth state, and it only ever replaces `live` — see the adopt tests below.
+  assert.deepEqual([...JAM_STATES].sort(), ['adopted', 'foreign', 'live', 'no-daemon', 'no-session', 'orphan']);
   for (const state of JAM_STATES) {
     assert.equal(cleanable({ state }), state === 'orphan', state);
-    assert.equal(jamMark(state), state === 'live' ? ' ' : '!', state);
+    assert.equal(jamMark(state), state === 'live' || state === 'adopted' ? ' ' : '!', state);
   }
   assert.equal(cleanable(undefined), false);
 });
@@ -2634,7 +2635,7 @@ test('v0.18-2 --json carries the facts a script needs, including what clean woul
   ];
   const j = sessionsJson(rows, now);
   assert.equal(j.length, 2);
-  assert.deepEqual(j[0], { name: 'jamtest', jamName: 'reeco debugging', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, uptimeMs: 5000, participants: ['Roy'], view: false, tunnel: false, socket: 'default', state_dir: '/tmp/claude-jam-7799', cleanable: false });
+  assert.deepEqual(j[0], { name: 'jamtest', jamName: 'reeco debugging', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, uptimeMs: 5000, participants: ['Roy'], view: false, tunnel: false, socket: 'default', adopted: false, adopt: null, state_dir: '/tmp/claude-jam-7799', cleanable: false });
   assert.equal(j[1].jamName, null, 'a jam with no display name reports null, never an invented one');
   assert.equal(j[1].cleanable, true, 'the orphan is the only thing clean may remove');
   assert.equal(j[1].uptimeMs, null);
@@ -5023,4 +5024,52 @@ test('v0.33 adopt is in /menu, and the completeness check still passes', () => {
   assert.ok(Object.fromEntries(menuItems(menuTree({ host: false })).map((i) => [i.id, i]))['help.adopt']);
   assert.deepEqual(menuGaps({ host: true }), { commands: [], flags: [], extra: [] });
   assert.deepEqual(menuGaps({ host: false }), { commands: [], flags: [], extra: [] });
+});
+
+test('v0.33 `adopted` replaces `live` and nothing else — the actionable fact still wins', () => {
+  const c = (o) => classifyJam({ tmuxAlive: true, owned: true, portAlive: true, ...o });
+  assert.equal(c({}), 'live');
+  assert.equal(c({ adopted: true }), 'adopted');
+  // A dead daemon is a dead daemon whichever kind of jam it was: `no-daemon` is what the human
+  // has to act on, so saying `adopted` there would bury it.
+  assert.equal(c({ adopted: true, portAlive: false }), 'no-daemon');
+  // And an adopted jam whose own tmux session is gone is an orphan STATE DIR, which is the only
+  // thing `claude-jam clean` may ever remove — never the adopted pane, which it cannot see.
+  assert.equal(classifyJam({ tmuxAlive: false, portAlive: false, adopted: true }), 'orphan');
+  assert.equal(classifyJam({ tmuxAlive: false, portAlive: true, adopted: true }), 'no-session');
+  // Foreign is about jam's OWN session failing to verify, and adoption never changes that.
+  assert.equal(classifyJam({ tmuxAlive: true, owned: false, portAlive: true, adopted: true }), 'foreign');
+  assert.equal(cleanable({ state: 'adopted' }), false, '`clean` must never take a running jam');
+  assert.equal(jamMark('adopted'), ' ', 'an adopted jam is healthy, not broken');
+});
+
+test('v0.33 an adopted row is endable, listable, and says what ending it leaves alone', () => {
+  const now = 2_000_000;
+  const rows = [
+    { name: 'claude-jam', state: 'live', port: 7799, cwd: '/p', sessionId: 'sid1',
+      createdAt: now - 5000, participants: [], socket: 'claude-jam-7799', dir: '/t/claude-jam-7799' },
+    { name: 'claude-jam-2', state: 'adopted', port: 7801, cwd: '/q', sessionId: 'sid2',
+      createdAt: now - 9000, participants: ['Dana'], socket: 'claude-jam-7801',
+      adopt: { pane: '%23', socket: 'default', session: 'work' }, dir: '/t/claude-jam-7801' },
+  ];
+  const t = sessionsTable(rows, now);
+  assert.match(t, /adopted/);
+  // The raw TUI of an adopted jam is the pane, on ITS server — jam's own session is a log.
+  assert.ok(t.includes('raw TUI: tmux attach -t %23'), t);
+  assert.ok(t.includes("(adopted pane, not claude-jam's)"), t);
+  assert.ok(t.includes('raw TUI: tmux -L claude-jam-7799 attach -t claude-jam:claude'), t);
+  assert.match(t, /leaves that pane, its tmux session and claude alone/);
+  // It is still one of jam's own rows, so it is pickable by name and by the no-name picker.
+  assert.equal(resolveTarget(rows, 'claude-jam-2').ok, true);
+  assert.deepEqual(resolveTarget(rows).choices.map((r) => r.name), ['claude-jam', 'claude-jam-2']);
+  // --json says both halves apart: `name`/`socket` are jam's own, `adopt` is somebody else's.
+  const j = sessionsJson(rows, now)[1];
+  assert.equal(j.adopted, true);
+  assert.equal(j.name, 'claude-jam-2');
+  assert.equal(j.socket, 'claude-jam-7801');
+  assert.deepEqual(j.adopt, { pane: '%23', socket: 'default', session: 'work' });
+  assert.equal(j.cleanable, false);
+  assert.equal(sessionsJson(rows, now)[0].adopted, false);
+  assert.equal(sessionsJson(rows, now)[0].adopt, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(j)), j);
 });
