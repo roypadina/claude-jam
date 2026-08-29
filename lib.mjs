@@ -1289,7 +1289,10 @@ export function backfillHistory(text, { hostName = 'Host', cap = REPLAY_DEFAULT 
       }
     }
   }
-  const n = Math.floor(Number(cap));
+  // A cap of 0 is "the flag turned it off"; anything that is not a usable number at all (null,
+  // NaN, a string, a negative) is a caller bug and falls back to the default rather than to 0 —
+  // silently replaying nothing would look exactly like the blank room H1 exists to fix.
+  const n = cap == null ? NaN : Math.floor(Number(cap));
   const keep = Number.isFinite(n) && n >= 0 ? n : REPLAY_DEFAULT;
   return { events: events.slice(events.length - Math.min(keep, events.length)), files, total: events.length };
 }
