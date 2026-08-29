@@ -15,6 +15,10 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
   // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
   backfillHistory, REPLAY_DEFAULT, REPLAY_MAX, noteFilePath, filesNewestFirst, filesReport,
+  // v0.28: real scrollback — the pane's own history behind the mirror, and a ring that is
+  // sized by a flag instead of by a constant nobody could reach past.
+  parseReplay, historyLimit, replayCount, historyPageRange, historyCacheKey, historyCacheDecision,
+  SCREEN_HISTORY_MAX, SCREEN_PAGE_MAX, HISTORY_DEFAULT, HISTORY_CAP,
   validDiffPath, gitDiffArgs, capOutput, maskSecrets,
   // v0.17 Batch P: the read-only allowlist, the permission relay, per-client RTT.
   isSafeGuestCommand, parsePermOptions, permOptionsReport, validPermChoice, PERM_TEXT_MAX,
@@ -167,10 +171,18 @@ opts.sessionId ||= randomUUID();
 // v0.17 H1: how many events of the transcript already on disk a joining guest is shown. The
 // whole point is `--resume`, where the daemon starts reading at EOF on purpose — without this a
 // guest joining a two-hour-old conversation gets a blank room. 0 turns it off entirely.
-opts.replay = opts.replay == null ? REPLAY_DEFAULT : Number(opts.replay);
-if (!Number.isInteger(opts.replay) || opts.replay < 0 || opts.replay > REPLAY_MAX) {
-  console.error(`bad --replay: expected 0-${REPLAY_MAX} events, got "${opts.replay}"`);
-  process.exit(2);
+// v0.28: `all` is a legal value now — it means everything the ring can hold, which is the most
+// a joiner could honestly be given. `--history` sizes that ring; the two are separate numbers
+// because "what a joiner is shown" and "what the jam still has" are separate questions, and
+// /history is the second one.
+{
+  const r = parseReplay(opts.replay);
+  if (!r.ok) { console.error(r.error); process.exit(2); }
+  opts.replay = r.n;
+  opts.replayAll = r.all;
+  const h = historyLimit(opts.history);
+  if (!h.ok) { console.error(h.error); process.exit(2); }
+  opts.history = h.n;
 }
 opts.claude ||= resolveClaude(process.env, fs.existsSync); // --claude wins, then JAM_CLAUDE
 // The join command every invite line hands out. Computed once, here, and threaded through to
@@ -383,7 +395,10 @@ async function launch() {
     ...(opts.funnel ? ['--funnel'] : []),
     ...(opts.funnelCli ? ['--funnel-cli', opts.funnelCli] : []),
     ...(opts.heartbeat ? ['--heartbeat', String(opts.heartbeat)] : []),
-    '--replay', String(opts.replay), // v0.17 H1: the daemon is the process that seeds history
+    // v0.17 H1: the daemon is the process that seeds history. v0.28: `all` is resolved to a
+    // number HERE, once, so the daemon is never asked to re-decide what "all" meant.
+    '--replay', String(opts.replay),
+    '--history', String(opts.history),
     '--answers', opts.answers, // v0.31: who may answer a question outright
     // v0.27: the daemon is the process that decides whether the host is asked, so it needs both
     // policies and the quota. Passed already-resolved for the same reason jamName is.
@@ -642,7 +657,8 @@ function joinInfo() {
     inviteOnly,
     remote: relayMode,
     relayPending: relayPending(),
-    replay: opts.replay,
+    replay: opts.replayAll ? `all (${opts.replay})` : opts.replay,
+    history: HISTORY_MAX,
     answers: opts.answers,
     // v0.23: the name, and whether the LAN is being told about it. Both ride the frame that
     // already carries the rest of the Access state, so `/menu` needs no frame of its own.
@@ -765,7 +781,13 @@ const MAX_PENDING = 10;
 const history = [];
 // v0.17 H1: the ring buffer was a flat 300. A bigger --replay would have been seeded and then
 // immediately trimmed back to 300, which is not what the flag says it does.
-const HISTORY_MAX = Math.max(300, opts.replay);
+// v0.28: it is `--history` that sizes it now (2000 by default, 20000 cap), and --replay only
+// decides how much of it a JOINER is handed. The two used to be one number, which is why
+// "I can only see very little" had no answer that did not also flood every new arrival.
+// A --replay bigger than the ring is NOT quietly widened into one: what a joiner gets is
+// min(--replay, what the ring is holding), and a host who asked for more than the ring keeps is
+// told so at boot rather than discovering it from a short replay.
+const HISTORY_MAX = opts.history;
 // v0.17 F2: every path this session has read, written or edited — path -> touch count, most
 // recently touched last (noteFilePath keeps that true). Seeded from the backfill, then fed by
 // the live tail; `/files` is the only reader.
@@ -799,7 +821,9 @@ function newToken() { return randomBytes(12).toString('base64url').slice(0, 16);
 
 function broadcast(ev) {
   const full = { ...ev, id: nextId++, ts: Date.now() };
-  if (ev.t !== 'typing') { history.push(full); if (history.length > HISTORY_MAX) history.shift(); }
+  // v0.28: splice, not shift — `--history 0` means keep nothing, and one shift() per push
+  // leaves exactly one event behind forever. Trimming to the size says what it means.
+  if (ev.t !== 'typing') { history.push(full); if (history.length > HISTORY_MAX) history.splice(0, history.length - HISTORY_MAX); }
   for (const ws of clients.keys()) send(ws, full);
   if (ev.t !== 'typing') console.log(`[${ev.t}]`, ev.from || ev.kind || '', (ev.text || '').slice(0, 120));
   bumpActivity(); // v0.15: anything worth telling everybody is worth a fast mirror
@@ -1355,6 +1379,76 @@ function setMirror(ws, on) {
   console.log(`[mirror] ${clients.get(ws)?.name || '?'} ${on ? 'on' : 'off'} (${mirrors.size} watching)`);
 }
 
+// ------------------------------------------- v0.28: the pane's own scrollback ----
+// The mirror was the CURRENT screen and nothing else, so a guest could not scroll back through
+// the real TUI at all — Roy's "I can only see very little". This is the other half: the claude
+// pane's actual history, colours included, straight out of tmux.
+//
+// Read-only BY CONSTRUCTION — it is a capture, and there is no path from here back into the
+// pane — so a guest gets it exactly as the host does, which is the point of the feature rather
+// than a concession in it. Both ceilings are said out loud in the client (historyEdgeLine):
+// SCREEN_HISTORY_MAX lines back, SCREEN_PAGE_MAX rows in one answer.
+//
+// A held-down PgUp asks for the same range several times before the first answer lands, so each
+// range is cached for SCREEN_CACHE_MS: one keypress is one `capture-pane`, and a burst is still
+// one. A DIFFERENT range is never served from that cache, however fresh it is.
+let screenCache = null; // {key, at, rows}
+
+// What the pane really kept. `history-limit` is tmux's ceiling; `history_size` is how much of it
+// has actually been used, and that is the number "as far back as it goes" has to come from — a
+// jam two minutes old has almost no scrollback, and saying otherwise would be a lie the client
+// then repeats to a guest.
+function paneHistorySize() {
+  const out = (tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{history_size}').stdout || '').trim();
+  const n = Math.floor(Number(out));
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+function onScreenHistory(ws, m) {
+  const range = historyPageRange({ before: m.before, rows: m.rows, historySize: paneHistorySize() });
+  const key = historyCacheKey(range);
+  let rows;
+  if (historyCacheDecision({ key, entry: screenCache, now: Date.now() }) === 'use') {
+    rows = screenCache.rows;
+  } else {
+    // The same `-e` the live frame uses, so a scrolled-back row carries the colours it had.
+    const r = tmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE,
+      '-S', String(range.start), '-E', String(range.end));
+    if (r.status !== 0) {
+      return sendError(ws, `could not read the pane's history: ${(r.stderr || '').trim() || 'capture-pane failed'}`);
+    }
+    rows = (r.stdout || '').replace(/\n$/, '').split('\n').map(sanitizeFrameRow);
+    screenCache = { key, at: Date.now(), rows };
+  }
+  const size = paneDims(rows);
+  send(ws, {
+    t: 'screen-history', id: nextId++, ts: Date.now(),
+    before: range.before, rows, w: size.w, h: size.h,
+    maxBefore: range.maxBefore, atTop: range.atTop, cap: SCREEN_HISTORY_MAX,
+  });
+}
+
+// ------------------------------------------- v0.28: /history, further back on demand ----
+// The welcome hands a joiner min(--replay, ring); this is how they ask for what is behind it.
+// `before` is the oldest event id the client is already holding, so a second `/history` continues
+// from where the first stopped instead of re-sending the same page. `older` is what is STILL
+// behind the answer — the client's divider says it, and that is how "that is everything kept"
+// becomes a fact rather than a guess.
+function onHistory(ws, m) {
+  const n = Math.max(1, Math.min(Math.floor(Number(m.n)) || HISTORY_DEFAULT, HISTORY_CAP));
+  const beforeId = Math.floor(Number(m.before));
+  let end = history.length;
+  if (Number.isFinite(beforeId)) {
+    const i = history.findIndex((e) => e.id >= beforeId);
+    if (i >= 0) end = i;
+  }
+  const start = Math.max(0, end - n);
+  send(ws, {
+    t: 'history', id: nextId++, ts: Date.now(),
+    items: history.slice(start, end), older: start, kept: history.length, historyMax: HISTORY_MAX,
+  });
+}
+
 // ------------------------------------------- v0.31: the prompt, read off the pane ----
 // The whole of v0.31's first item. `capture-pane` is one cheap tmux call; it runs only while
 // somebody is connected (a jam nobody is in polls nothing), and only a CHANGE is broadcast, so an
@@ -1781,7 +1875,14 @@ function admitSocket(ws, name, host, loopback = false, via = 'token') {
     // v0.26: who is here AND how long since each of them last touched a key, so `/who` and the
     // panel are useful from the first second rather than from the first bucket change.
     idle: idleMap(),
-    history: history.slice(),
+    // v0.28: min(--replay, what the ring is holding). `slice(-0)` is the whole array, which is
+    // why a zero is answered with [] rather than with a negative offset.
+    history: replayCount(opts.replay, history.length)
+      ? history.slice(-replayCount(opts.replay, history.length)) : [],
+    // What is BEHIND that slice, so a client can say "N more kept" and /history knows there is
+    // something to ask for. The ring's size rides along for the top-of-history line.
+    kept: history.length,
+    historyMax: HISTORY_MAX,
     // join is the invite line and view the ttyd URL; only the host client gets them —
     // friends never see the token-bearing command or the view key. null (but present) for
     // the host while no token is set / no view is running.
@@ -2158,6 +2259,13 @@ function onSocket(ws, req) {
     } else if (m.t === 'mirror') {
       // View-only sugar: everybody may watch, nobody types through it.
       setMirror(ws, m.on !== false);
+      // v0.28: the pane's own scrollback, and the transcript further back than the replay. Both
+      // are reads of what the mirror and the transcript already show, so both are everybody's —
+      // a guest who cannot scroll back is the complaint this version answers.
+    } else if (m.t === 'screen-history') {
+      onScreenHistory(ws, m);
+    } else if (m.t === 'history') {
+      onHistory(ws, m);
     } else if (m.t === 'slash') {
       onSlash(ws, me, m.text);
     } else if (m.t === 'cmd') {
@@ -3117,14 +3225,25 @@ function seedHistory() {
   // which will read it again once claude finishes writing it.
   const cut = text.lastIndexOf('\n');
   const whole = cut >= 0 ? text.slice(0, cut + 1) : '';
-  const { events, files, total } = backfillHistory(whole, { hostName: opts.name, cap: opts.replay });
+  // v0.28: the ring is what actually holds the seed, so the cap is the SMALLER of the two —
+  // seeding 20000 events into a 2000-event ring would push 18000 of them straight back out and
+  // then report having seeded them.
+  const cap = Math.min(opts.replay, HISTORY_MAX);
+  const { events, files, total } = backfillHistory(whole, { hostName: opts.name, cap });
   const ts = Date.now();
   for (const ev of events) history.push({ ...ev, id: nextId++, ts });
   for (const [p, n] of files) for (let i = 0; i < n; i++) noteFilePath(touched, p);
   jsonlPath = file;
   offset = size - Buffer.byteLength(text.slice(cut + 1), 'utf8');
   console.log(`[replay] ${events.length} of ${total} event(s) seeded from ${file} `
-    + `(--replay ${opts.replay}), ${touched.size} file(s) touched, tailing from byte ${offset}`);
+    + `(--replay ${opts.replayAll ? 'all' : opts.replay}, --history ${HISTORY_MAX}), `
+    + `${touched.size} file(s) touched, tailing from byte ${offset}`);
+  // Said once, at boot, because a host who asked for more than the ring keeps would otherwise
+  // find out from a short replay and read it as a bug.
+  if (opts.replay > HISTORY_MAX) {
+    console.log(`[replay] --replay ${opts.replay} is more than this jam keeps: a joiner gets at `
+      + `most ${HISTORY_MAX} events (raise --history, or /export for the complete record)`);
+  }
 }
 
 // Returns true when it consumed new bytes — drainTail uses that to know it is behind.
