@@ -1630,7 +1630,7 @@ export function commandMatches(input, commands = JAM_COMMANDS, max = COMMAND_HIN
 // ------------------------------- v0.18: jam owns its tmux sessions ----
 // THE SAFETY RULE, which every helper in this section exists to serve: jam may end a tmux
 // session only when ALL of these hold — the caller named it explicitly (or picked it out of
-// jam's own verified list), the session carries an `@jam-owned` option, and that option points
+// jam's own verified list), the session carries an `@claude-jam-owned` option, and that option points
 // at a state dir holding the `session.json` jam wrote FOR THAT NAME. Never a name pattern,
 // never a filtered sweep over `tmux list-sessions`, never `--all` without re-verifying every
 // single one, never `kill-server`. The machine this runs on has other people's tmux sessions
@@ -1639,7 +1639,13 @@ export function commandMatches(input, commands = JAM_COMMANDS, max = COMMAND_HIN
 // So: enumeration happens over jam's OWN namespace (`$TMPDIR/claude-jam-<port>` state dirs),
 // the decisions are all here where they can be tested, and the impure half — tmux, fs, the
 // HTTP call, the prompts — is sessions.mjs and host.mjs. Every refusal path has a test.
-export const OWNED_OPTION = '@jam-owned';
+export const OWNED_OPTION = '@claude-jam-owned';
+// v0.21: what 0.18.0 stamped. A session created by that build is still one of claude-jam's own,
+// so the marker is READ under both names (new one first) and written only under the new one.
+// This is a migration, not a second claim: the value has to resolve to a matching session.json
+// either way, so an old marker buys exactly what a new one buys and nothing more.
+export const OWNED_OPTION_LEGACY = '@jam-owned';
+export const OWNED_OPTIONS = [OWNED_OPTION, OWNED_OPTION_LEGACY];
 export const SESSION_FILE = 'session.json';
 export const STATE_PREFIX = 'claude-jam-';
 export const SESSION_TAG = 'claude-jam'; // what session.json says it is, so a stray JSON is not one
@@ -1705,7 +1711,7 @@ export function parseSessionJson(text) {
 }
 
 // The gate every kill goes through, and the only place that may say yes. Deliberately dumb and
-// total: it is handed the exact name asked for, the raw `@jam-owned` value tmux reported for
+// total: it is handed the exact name asked for, the raw `@claude-jam-owned` value tmux reported for
 // THAT name (null when the option is unset) and the parsed session.json found in the directory
 // that value names (null when there is none). Anything that does not line up is a refusal
 // carrying its own reason — a refusal is never "probably fine".
@@ -1839,7 +1845,7 @@ export function takenPromptText(name, next) {
 
 export function foreignSessionText(name, why = '') {
   return `tmux session "${name}" already exists and is NOT one of jam's — jam will not touch it.\n`
-    + `  ${why || 'no @jam-owned marker'}\n`
+    + `  ${why || 'no @claude-jam-owned marker'}\n`
     + `  run this jam under another name:  jam host --tmux ${name}-jam\n`
     + `  or look at it yourself:           tmux attach -t ${name}`;
 }

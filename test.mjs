@@ -21,7 +21,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   PERM_OPTIONS_MAX, PERM_TEXT_MAX, PERM_ROW_GAP, BELL, BELL_MIN_GAP, bellAllowed, mentionsMe,
   rttText, RTT_STALE_AFTER, commandMatches, COMMAND_HINTS_MAX,
   // v0.18: jam owns its tmux sessions — the marker, the states, the pickers, the prompts.
-  OWNED_OPTION, SESSION_FILE, STATE_PREFIX, SESSION_TAG, SESSION_V, stateDirFor, portFromStateDir,
+  OWNED_OPTION, OWNED_OPTION_LEGACY, OWNED_OPTIONS, SESSION_FILE, STATE_PREFIX, SESSION_TAG, SESSION_V, stateDirFor, portFromStateDir,
   sessionInfo, parseSessionJson, verifyOwned, classifyJam, JAM_STATES, jamMark, cleanable,
   resolveTarget, pickNumber, promptChoice, exitDecision, EXIT_KEYS, exitPromptText, reattachLines,
   TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName, endingNotice, confirmYes,
@@ -2300,17 +2300,17 @@ test('v0.18 the marker verifies only when name, marker and session.json all agre
   }
 });
 
-test('v0.18 REFUSAL: a tmux session with no @jam-owned option is never jam\'s to end', () => {
+test('v0.18 REFUSAL: a tmux session with no @claude-jam-owned option is never jam\'s to end', () => {
   for (const marker of [null, undefined, '', 0, false]) {
     const v = verifyOwned('jam', marker, null);
     assert.equal(v.ok, false, String(marker));
-    assert.match(v.why, /carries no @jam-owned marker/);
+    assert.match(v.why, /carries no @claude-jam-owned marker/);
     assert.match(v.why, /jam will not end it/);
   }
 });
 
 test('v0.18 REFUSAL: a hand-written marker pointing at a dir jam never wrote', () => {
-  // The spoof: `tmux set-option @jam-owned /tmp/somewhere` on somebody's own session. The
+  // The spoof: `tmux set-option @claude-jam-owned /tmp/somewhere` on somebody's own session. The
   // directory has no session.json of jam's, so there is nothing that says jam built this.
   const v = verifyOwned('decoy', '/tmp/not-a-jam-state-dir', null);
   assert.equal(v.ok, false);
@@ -2368,7 +2368,10 @@ test('v0.18 parseSessionJson: anything that is not jam\'s own shape is null', ()
   assert.equal(SESSION_TAG, 'claude-jam');
   assert.equal(SESSION_V, 1);
   assert.equal(SESSION_FILE, 'session.json');
-  assert.equal(OWNED_OPTION, '@jam-owned');
+  assert.equal(OWNED_OPTION, '@claude-jam-owned');
+  // v0.21: still READ, so a jam created by 0.18.0 is recognised and endable.
+  assert.equal(OWNED_OPTION_LEGACY, '@jam-owned');
+  assert.deepEqual(OWNED_OPTIONS, ['@claude-jam-owned', '@jam-owned']);
 });
 
 test('v0.18 the state dir is jam\'s whole namespace, and only exact names are in it', () => {
@@ -2495,7 +2498,7 @@ test('v0.18-5 a taken name offers four ways out, and a foreign one offers none',
   assert.match(p, /already a jam of yours/);
   for (const k of TAKEN_KEYS) assert.match(p, new RegExp(`\\[${k}\\]`));
   assert.match(p, /\[n\]ew session \(jam-2\)/);
-  const f = foreignSessionText('work', 'no @jam-owned marker');
+  const f = foreignSessionText('work', 'no @claude-jam-owned marker');
   assert.match(f, /is NOT one of jam's — jam will not touch it/);
   assert.match(f, /--tmux work-jam/);
   assert.match(f, /tmux attach -t work/);

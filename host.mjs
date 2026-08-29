@@ -429,7 +429,7 @@ function writeSystemPrompt() {
   return file;
 }
 
-// v0.18: the ownership marker, stamped the moment the session exists. `@jam-owned` names the
+// v0.18: the ownership marker, stamped the moment the session exists. `@claude-jam-owned` names the
 // state dir; session.json in that dir names the session back. Neither alone is a claim — the
 // PAIR is, which is what verifyOwned checks before anything is ever killed.
 function claimSession() {

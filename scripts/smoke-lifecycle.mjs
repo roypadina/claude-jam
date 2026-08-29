@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // v0.18 smoke: jam owns its tmux sessions — and, above everything else, owns ONLY its own.
 //   S1  a plain tmux session of ours (no marker) is refused, by name, and survives
-//   S2  a session carrying a HAND-WRITTEN @jam-owned pointing at a directory jam never wrote is
-//       refused — and still refused when a real session.json is copied in beside it
+//   S2  a session carrying a HAND-WRITTEN @claude-jam-owned pointing at a directory jam never
+//       wrote is refused — and still refused when a real session.json is copied in beside it
+//   S2b v0.21: the OLD @jam-owned marker a 0.18.0 jam carries is still honoured, so a session
+//       created before the rename stays listable and endable
 //   S3  the live `jam` session on :7777, if one is running, is proved unkillable READ-ONLY:
 //       no marker, absent from `jam sessions`, refused by name. Nothing about it is touched
 //   1   `jam sessions` lists a live jam and an orphan state dir, and NOT the plain decoy
@@ -27,6 +29,9 @@ import { fileURLToPath } from 'node:url';
 // The gate itself, called directly: `jam end <name>` refuses a decoy at the outer gate (it is
 // not in jam's own list at all), and this is the inner one — the marker check.
 import { ownedSession } from '../sessions.mjs';
+// v0.21: the marker was renamed, and the old name is still read. Both come from the one place
+// that defines them, so this smoke cannot drift from the code it is proving.
+import { OWNED_OPTION, OWNED_OPTION_LEGACY, OWNED_OPTIONS } from '../lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -178,12 +183,12 @@ try {
     killMine(S.plain);
     const born = tmux('new-session', '-d', '-s', S.plain, '-x', '80', '-y', '24', 'sleep 900');
     if (born.status !== 0) throw new Error(`tmux: ${born.stderr}`);
-    const opt = tmux('show-options', '-t', S.plain, '-v', '@jam-owned');
-    console.log(`      @jam-owned on ${S.plain}: ${JSON.stringify((opt.stdout || opt.stderr || '').trim())}`);
+    const opt = tmux('show-options', '-t', S.plain, '-v', OWNED_OPTION);
+    console.log(`      ${OWNED_OPTION} on ${S.plain}: ${JSON.stringify((opt.stdout || opt.stderr || '').trim())}`);
     const v = ownedSession(S.plain, SOCKET);
     console.log(`      ownedSession → ${v.why}`);
     if (v.ok) throw new Error('verifyOwned accepted a session with no marker');
-    if (!/carries no @jam-owned marker/.test(v.why)) throw new Error(`unexpected reason: ${v.why}`);
+    if (!/carries no @claude-jam-owned marker/.test(v.why)) throw new Error(`unexpected reason: ${v.why}`);
     const r = jam('end', S.plain);
     console.log(`      jam end ${S.plain} → exit ${r.code}: ${r.out.trim().split('\n')[0]}`);
     if (r.code === 0) throw new Error('jam end accepted a session it did not create');
@@ -192,12 +197,12 @@ try {
     if (jamJson().some((j) => j.name === S.plain)) throw new Error('a non-jam session appeared in `jam sessions`');
   });
 
-  await step('S2 REFUSAL a hand-written @jam-owned marker buys nothing, even with a session.json copied in', async () => {
+  await step('S2 REFUSAL a hand-written @claude-jam-owned marker buys nothing, even with a session.json copied in', async () => {
     killMine(S.decoy);
     const born = tmux('new-session', '-d', '-s', S.decoy, '-x', '80', '-y', '24', 'sleep 900');
     if (born.status !== 0) throw new Error(`tmux: ${born.stderr}`);
     // The spoof: the option jam looks for, pointing at a directory jam never wrote.
-    tmux('set-option', '-t', S.decoy, '@jam-owned', NOTJAM);
+    tmux('set-option', '-t', S.decoy, OWNED_OPTION, NOTJAM);
     const v1 = ownedSession(S.decoy, SOCKET);
     console.log(`      ownedSession (empty dir)  → ${v1.why}`);
     if (v1.ok || !/there is no session\.json jam wrote/.test(v1.why)) throw new Error(`unexpected: ${JSON.stringify(v1)}`);
@@ -215,11 +220,35 @@ try {
     const copied = jam('end', S.decoy);
     console.log(`      copied one → exit ${copied.code}: ${copied.out.trim().split('\n')[0]}`);
     if (copied.code === 0 || !alive(S.decoy)) throw new Error('a copied session.json ended a session jam never made');
-    if (!/not written together|by hand|no jam-owned/.test(copied.out)) throw new Error(`unexpected reason: ${copied.out}`);
+    if (!/not written together|by hand|no claude-jam-owned/.test(copied.out)) throw new Error(`unexpected reason: ${copied.out}`);
     // …and the real jam it was copied from is untouched by any of it.
     if (!alive(S.jam)) throw new Error('the real jam died somewhere in here');
     if (real.tmux !== S.jam) throw new Error('session.json names the wrong session');
     fs.rmSync(path.join(NOTJAM, 'session.json'), { force: true });
+  });
+
+  // v0.21: the rename is a migration, not a break. A jam that 0.18.0 created carries the old
+  // option name, and it has to stay one of claude-jam's own — the marker is swapped on the real
+  // jam from S2, verified, and swapped back, so nothing after this step sees anything unusual.
+  await step('S2b the OLD @jam-owned marker a 0.18.0 jam carries is still honoured', async () => {
+    const before = ownedSession(S.jam, SOCKET);
+    if (!before.ok) throw new Error(`the jam did not verify to begin with: ${before.why}`);
+    const dir = before.dir;
+    tmux('set-option', '-u', '-t', S.jam, OWNED_OPTION); // as if 0.18.0 had never stamped it
+    tmux('set-option', '-t', S.jam, OWNED_OPTION_LEGACY, dir);
+    const shown = tmux('show-options', '-t', S.jam, '-v', OWNED_OPTION_LEGACY);
+    console.log(`      ${OWNED_OPTION_LEGACY} on ${S.jam}: ${JSON.stringify((shown.stdout || '').trim())}`);
+    const legacy = ownedSession(S.jam, SOCKET);
+    console.log(`      ownedSession → ${legacy.ok ? `VERIFIED via ${OWNED_OPTION_LEGACY} (${legacy.dir})` : legacy.why}`);
+    if (!legacy.ok) throw new Error(`a 0.18.0 marker stopped verifying: ${legacy.why}`);
+    if (legacy.dir !== dir) throw new Error(`the legacy marker resolved to ${legacy.dir}`);
+    // And it is still a listed, endable row — which is the whole point of keeping the old name.
+    const row = jamJson().find((j) => j.name === S.jam);
+    console.log(`      \`claude-jam sessions\` → ${row ? `${row.name}:${row.state}` : 'MISSING'}`);
+    if (!row || row.state !== 'live') throw new Error('a jam with the old marker fell out of the list');
+    tmux('set-option', '-u', '-t', S.jam, OWNED_OPTION_LEGACY);
+    tmux('set-option', '-t', S.jam, OWNED_OPTION, dir);
+    if (!ownedSession(S.jam, SOCKET).ok) throw new Error('putting the new marker back did not verify');
   });
 
   await step('S3 READ-ONLY the live jam on :7777 is unkillable, unlistable, and never touched', async () => {
@@ -229,8 +258,11 @@ try {
       return console.log('      no `jam` session is running on the default socket — nothing to prove against');
     }
     liveJam = true; // and the last step re-checks that it is STILL there
-    const marker = dtmux('show-options', '-t', 'jam', '-v', '@jam-owned');
-    console.log(`      @jam-owned on jam: ${JSON.stringify((marker.stdout || marker.stderr || '').trim())}`);
+    // Both names: a jam built by 0.18.0 carries the legacy one, and v0.21 still reads it.
+    for (const opt of OWNED_OPTIONS) {
+      const marker = dtmux('show-options', '-t', 'jam', '-v', opt);
+      console.log(`      ${opt} on jam: ${JSON.stringify((marker.stdout || marker.stderr || '').trim())}`);
+    }
     // The real $TMPDIR, on purpose and read-only: this is the one place the smoke looks outside
     // its own namespace, because "would `jam sessions` offer somebody else's session?" is the
     // question. Nothing here ends, kills or deletes anything.
