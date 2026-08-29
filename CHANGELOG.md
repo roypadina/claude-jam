@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Invite links — one command joins
+
+- **`claude-jam invite <Name>`** mints `cjam1_…`, and **`claude-jam join <link>`** is the guest's
+  whole command: no name to type, no token to paste, no approval to wait for. The link carries the
+  addresses, the name the host bound to it and a per-invite secret. They arrive as
+  `* Dana joined (invite)`.
+- **`claude-jam invites`** lists them (id, name, state, uses, expiry — never the link again) and
+  **`claude-jam invite revoke <Name|id>`** takes one back. The same three from inside the client as
+  `/invite`, `/invites`, `/invite revoke` (host-only), so a link can be minted mid-session.
+  `--uses N` and `--expires 30m|24h|7d` on either surface; the default is multi-use for 24 hours,
+  so a guest whose laptop slept can reconnect.
+- **A link is a credential and is treated as one.** The daemon stores only a hash of each secret,
+  in its 0700 state dir, and reloads them on restart — a restarted daemon does not lock out the
+  people it already invited, and a copy of the state dir cannot hand anybody a working link.
+- **Nothing fails silently.** A link that is tampered with, from a newer format, expired, revoked,
+  used up, or whose name is already connected is refused *with its own reason* and then falls
+  through to an ordinary knock, so the host can still wave the person in.
+- A link carries the tunnel address first and the LAN address second; the client tries them in
+  order with a 3-second timeout each.
+- **`/kick <name> [revoke]`** (host) removes somebody who is already in — the one thing `/deny`
+  never could. Their socket closes 4406, they drop out of the roster, everybody is told, and if
+  they came in on a link the host is offered its revocation in the same breath.
+- **`claude-jam --help`, `-h`, `help`** print usage and exit 0. `node host.mjs --help` used to
+  swallow the next argument and start a real jam.
+
 ### jam owns its tmux sessions
 
 - **`jam sessions`** (`jam ls`) lists the jams jam itself started — name, port, state, uptime,
