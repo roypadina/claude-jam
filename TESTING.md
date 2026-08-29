@@ -66,8 +66,37 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   Prove: decide in the campaign whether Linux discovery is supported or documented as absent.
 - 2026-08-29 · Invite links have never been used by a real remote guest on another machine —
   only by scripted clients here. Prove: the friend test, and the campaign's multi-guest pass.
-- 2026-08-29 · The 2-hour remote-session claim is unproven: the keepalive, relay auto-restart and
-  reconnect tiers exist but no long run has happened. Prove: the soak above.
+- ~~2026-08-29 · The 2-hour remote-session claim is unproven: the keepalive, relay auto-restart
+  and reconnect tiers exist but no long run has happened. Prove: the soak above.~~
+  **DISCHARGED — campaign, 2026-08-30. The claim holds, on both transports.** Two runs of
+  **130 minutes**, concurrent, one over LAN loopback and one over a live `--tunnel` (a real
+  `trycloudflare.com` hostname, so every frame crossed the public internet), a guest client
+  attached in mirror mode throughout, one sample every 30 s.
+
+  |  | LAN | `--tunnel` |
+  | --- | --- | --- |
+  | duration | 130.1 min | 130.2 min |
+  | reconnects | **0** | **1** (at t=0 only — see below) |
+  | samples disconnected | 0 of 260 | 0 of 260 |
+  | heartbeat terminations | 0 | 0 |
+  | relay respawns | — | **0** |
+  | frames delivered | 3878 | 3877 |
+  | cadence per 30 s | 14.9 (ceiling is 15) | 14.9 |
+  | ping RTT | mean 0.9 ms | mean 86.6 ms |
+  | daemon RSS start → end | 77.9 → 88.7 MB | 77.9 → 88.8 MB |
+  | alive at the end | yes | yes |
+
+  The tunnel's single reconnect was at t=0: the daemon publishes the join line ~2.5 s before
+  Cloudflare's edge will route to it, so the first connect gets one `1006` and the second
+  succeeds. After that it held for 2 h 10 m with no relay respawn and no heartbeat termination.
+  Cadence over the relay is indistinguishable from loopback — 3877 frames against 3878.
+
+  RSS is a working set, not a leak: flat, a GC dip, one step up while four smoke sweeps and two
+  live claude sessions shared the machine, then **flat for the last four deciles**. A 40-minute
+  run on the POST-fix tree ended *lower* than it started (77.9 → 76.9 MB), which also confirms
+  the two security fixes cost nothing measurable.
+
+  Harness and raw samples: `~/ClaudWork/2026-08-30-jam-campaign/` (`soak.mjs`, `soak-*/`).
 - 2026-08-29 · `--funnel` (Tailscale) live path unverified — Funnel is not enabled on this
   tailnet and the installed Tailscale is the sandboxed App Store build. Prove: after Roy enables
   Funnel and installs the standalone build, or record it as unsupported here.
