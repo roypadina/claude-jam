@@ -25,7 +25,7 @@ import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
 import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
-import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
@@ -276,7 +276,10 @@ function render(ev) {
       if (ev.state === 'pending') return sys('waiting for host approval…');
       if (ev.state === 'denied') return leave(1, '! the host denied your request');
       if (ev.state === 'expired') return leave(1, '! nobody approved your request in time');
-      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}`, strip: true });
+      // strip:false since v0.16 — the approval bar is the live surface for a request, and
+      // repeating it in the 3-row strip only spends a row the mirror could have used. The
+      // transcript still keeps the line, with the /accept syntax on it.
+      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
     }
     // v0.14: a guest wants to run one of claude's commands. Host clients only — and the
     // wording is the answer, so the host never has to remember the syntax.
@@ -285,7 +288,6 @@ function render(ev) {
         glyph: '⌘',
         glyphColor: C.accent,
         text: `${ev.name} wants to run ${ev.cmd} — /allow-cmd ${ev.name} · /allow-cmd ${ev.name} always · /deny-cmd ${ev.name}`,
-        strip: true,
       });
     // v0.12: a guest wants the transcript. Host clients only, and the line is the answer.
     case 'exportreq':
@@ -293,7 +295,6 @@ function render(ev) {
         glyph: '⇩',
         glyphColor: C.accent,
         text: `${ev.name} requests the session transcript — /allow-export ${ev.name} · /allow-export ${ev.name} always · /deny-export ${ev.name}`,
-        strip: true,
       });
     // v0.13: a guest wants to send a file in. Host clients only.
     case 'filereq':
@@ -301,7 +302,6 @@ function render(ev) {
         glyph: '⇪',
         glyphColor: C.accent,
         text: `${ev.name} wants to send ${ev.file} (${humanBytes(ev.size)}) — /accept-file ${ev.name} · /accept-file ${ev.name} always · /deny-file ${ev.name}`,
-        strip: true,
       });
     // v0.13: the host offered a file to everyone; `/get` pulls it.
     case 'offer': {
@@ -462,7 +462,9 @@ function runAttach(session) {
     // outright ("sessions should be nested with care, unset $TMUX to force").
     const env = { ...process.env };
     delete env.TMUX;
-    const child = spawn(TMUX, ['attach', '-t', session], { stdio: 'inherit', env });
+    // The claude window by name, not the session's current one — a bare `attach` lands on
+    // window 0, the daemon's log, which is not what F3 is for.
+    const child = spawn(TMUX, ['attach', '-t', claudeTarget(session)], { stdio: 'inherit', env });
     let over = false;
     const finish = (problem) => {
       if (over) return;
@@ -482,8 +484,8 @@ function runAttach(session) {
       if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'mirror', on: store.mirror }));
       done();
     };
-    child.on('error', (e) => finish(`could not attach to tmux ${session}: ${e.message}`));
-    child.on('exit', (code) => finish(code ? `tmux attach -t ${session} exited ${code}` : null));
+    child.on('error', (e) => finish(`could not attach to tmux ${claudeTarget(session)}: ${e.message}`));
+    child.on('exit', (code) => finish(code ? `tmux attach -t ${claudeTarget(session)} exited ${code}` : null));
   });
 }
 
@@ -527,8 +529,10 @@ function toggleMirror(on) {
 // Identity of one request, for "which bar did I dismiss".
 const reqKey = (it) => (it ? `${it.kind}:${it.name}:${it.expires}` : '');
 const barHidden = () => !!store.hiddenKey && store.hiddenKey === reqKey(store.pending[0]);
-// Single keys are live only while the host has a bar on screen and has not started typing.
-const barArmed = () => store.armed && !barHidden();
+// Single keys are live only while the host has a bar on screen and the input line is empty and
+// nothing has been typed since the bar appeared. All three, so the bar never offers a key that
+// would not fire: clearing the line back to empty does not re-arm on its own — Esc does.
+const barArmed = () => store.armed && !barHidden() && store.input === '';
 
 // One key = the command the host would have typed, run through submit(). That is the whole
 // point: the bar is not a second approval mechanism, it is a keyboard shortcut for the
