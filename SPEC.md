@@ -1479,3 +1479,35 @@ one guest at a time). Roy wants a session-level choice.
   same menu section, and the docs say plainly why the two defaults differ.
 - Docs: README, MANUAL (claude should be able to answer "why didn't it ask me this time"), wiki
   Files-and-Export + Security-Model, CHANGELOG; both toggles appear in `/menu` (v0.24 test).
+
+## v0.28 — real scrollback (Roy: "I can only see very little")
+
+Three distinct gaps make the client feel amnesiac next to a normal Claude Code session:
+(a) the mirror repaints the same terminal region, churning the native scrollback the transcript
+wrote, so flipping views loses history; (b) the mirror shows only the CURRENT screen — the
+host's pane scrollback is never sent, so a guest cannot scroll back through the real TUI at all;
+(c) returning from an F3 attach re-feeds only the last 40 transcript lines.
+
+1. **Mirror renders in the alternate screen buffer.** Entering mirror view emits `smcup`
+   (`\x1b[?1049h`), leaving emits `rmcup` — exactly how `less`/`vim`/tmux behave. The transcript
+   view then owns the normal buffer, its lines stay in the terminal's real scrollback, and
+   flipping F2 ⇄ mirror is lossless in both directions. Same treatment for the F3 attach path
+   (tmux already does it) so a return no longer needs a re-feed at all; the 40-line re-feed and
+   its README ceiling go away.
+2. **Scrollable mirror = the host's real pane history.** In mirror view, `PgUp`/`PgDn`
+   (and `Shift+↑/↓`, and wheel events when the terminal sends them) enter a scroll mode: the
+   client asks `{t:'screen-history', before:<row-offset>, rows:<n>}` and the daemon answers from
+   `tmux capture-pane -e -p -S -<n> -E -<m>` on the claude pane — the actual scrollback, colors
+   included, capped at the last 2000 lines and served in ≤200-row pages (cached per offset for
+   2 s so PgUp spam costs one capture). The status row shows `⧉ mirror · scrolled back N lines
+   — End/G returns to live`; live frames pause while scrolled (never silently dropped: the row
+   says how many arrived) and resume on End/`G`/Esc.
+3. **Transcript history is no longer a 300-event stump.** `--replay N` accepts `all`; the ring
+   buffer becomes a bounded deque sized by `--history` (default 2000 events, cap 20000) and a
+   joining client receives `min(--replay, history)`. New `/history [n|all]` re-prints further
+   back on demand (paged, dim divider per page). `/export` remains the exact, complete record.
+4. **Say what the limits are, where they bite.** The client prints, once, on first scroll to the
+   top: `— that is as far back as this jam kept (N events · host pane 2000 lines) · /export for
+   the full transcript`. No silent truncation anywhere.
+5. Docs: README, MANUAL (claude must answer "how do I scroll back"), wiki Joining-a-Jam +
+   Troubleshooting, CHANGELOG; the keys join the `/menu` keyboard reference (v0.24 test).
