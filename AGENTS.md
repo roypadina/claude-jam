@@ -49,7 +49,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `platform.mjs` | the platform seam. The **only** module allowed to spawn a platform binary (`osascript`, `pngpaste`, `afplay`, `pbcopy`, `open`, …) or to decide where `$TMPDIR`/`~/.config` are. |
 | `popup.mjs` | the one-key `tmux display-popup` approval. |
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
-| `test.mjs` | the unit suite. `scripts/` holds the fourteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
+| `test.mjs` | the unit suite. `scripts/` holds the fifteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
 
 **tmux, claude, git, curl, cloudflared, tailscale and ttyd are not platform binaries** — they are
 the tool's dependencies, spelled the same everywhere, and they stay where they are used.
@@ -62,7 +62,7 @@ the tool's dependencies, spelled the same everywhere, and they stay where they a
 node --test test.mjs      # the whole unit suite; must be green before every commit
 ```
 
-306 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
+325 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
 framework. Add tests to `test.mjs` next to the ones for the same version heading.
 
 Two of them are lints rather than assertions about behaviour, and both exist because the thing
@@ -79,11 +79,11 @@ binaries** and stay where they are used — see §1.
 
 If you add a module to the repo root, both lints pick it up automatically. That is deliberate.
 
-### The fourteen smokes, and the order
+### The fifteen smokes, and the order
 
 They are end-to-end and they are the only thing that proves the tmux/injection/WS half works.
 The full recipe — driver session, ports, arguments — is in `SPEC.md` under **"Running the
-thirteen end-to-end smokes"**; run it from there rather than from memory.
+end-to-end smokes"**; run it from there rather than from memory.
 
 Six need a daemon of yours, and the order between them matters:
 
@@ -117,13 +117,22 @@ Then, in any order, the ones that bring their own everything:
     started, its teardown FAILS the run if anything is left advertising, and it needs
     `/usr/bin/dns-sd` (it skips cleanly when there is none).
 
+15. `smoke-nudge.mjs` — no arguments, no real claude. Own `$TMPDIR` **and own cwd** (so
+    `jam-uploads/` is the smoke's), port 7881, sessions `jamnudge*`. ~15 s, costs nothing. It
+    proves the v0.25 sounds **through the platform seam**: each client gets a directory in front
+    of its `PATH` holding a stub `afplay` and `osascript` that append to a log of that client's
+    own, so "a knock and an auto-join are two different calls" and "only the addressed client was
+    interrupted" are facts on disk. Also the nudge round trip and its refusals, idle in `/who`,
+    the three notification tiers (including a real `/menu` keypress in a tmux pane), and the whole
+    v0.27 upload policy including the caps that must not move and the quota fallback.
+
     Note for anyone writing a smoke that starts more than one jam: `tmuxSocketFor()` gives each
     jam a tmux server named for its **port**, so a session and its socket are a pair. Killing
     `=name` on the wrong socket silently does nothing and leaves the daemon running — which, in
     this smoke's case, leaves an advertisement on somebody's network. Ask for the socket by
     session name.
 
-Prefer 8–14 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
+Prefer 8–15 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
 real tokens, so run them once, at the end, and use `--model haiku`.
 
 ---

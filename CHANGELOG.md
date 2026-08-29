@@ -1,5 +1,104 @@
 # Changelog
 
+## Unreleased
+
+### v0.25 — audible join events
+
+Two distinguishable sounds, so the host knows **without looking** whether somebody needs
+approving.
+
+- **Knock** — somebody is waiting for you: `Submarine.aiff`, a slow low tone, plus the terminal
+  bell and a macOS notification `⚑ <Name> wants to join`. It repeats **once** after 30 s if
+  nobody has answered, and then stops for good. Never a loop.
+- **Auto-join** — a token or an invite link, so they are already in: `Glass.aiff`, one short
+  chime, `<Name> joined`, no repeat.
+- **Leave** — no sound at all. The roster line is enough.
+- Host clients only: a guest has nobody to approve, so a guest hears no arrivals.
+- **Three independent toggles**, per client, in the new `/menu → Notifications`: **sound**,
+  **desktop notification**, **terminal bell**. `--no-sound` on `claude-jam host` or
+  `claude-jam join` starts silent, `/sound on|off` flips the sound from the keyboard and a bare
+  `/sound` reports all three. `--no-sound` silences the **sound only** — the line and the
+  notification still arrive, which is the whole reason there are three switches. They are
+  honoured everywhere, including the v0.17 `waiting` bell.
+- Everything audible goes through `platform.mjs`, which is still the only module allowed to spawn
+  a platform binary. It stats each sound **once** and remembers the answer (including a
+  remembered *no*). Linux tries `paplay`, then `aplay`, with per-player candidate files; that
+  branch is marked UNVERIFIED in the source because there is no Linux machine here to check it
+  against. Windows is a `TODO(W1)` next to the others.
+
+### v0.26 — nudges: any human can get another's attention
+
+- **`/ping <Name|all> [message]`** (alias **`/nudge`**), from **anyone** — host and guest alike.
+  It is deliberately *not* on the approval ladder: getting a colleague to look at the screen is
+  not a privilege the host grants.
+- The person addressed gets a highlighted `👋 Roy is asking for you: <message>` — not a chat
+  line — plus their own bell, sound (`Hero.aiff`) and notification. **Everybody else sees a dim
+  `* Roy nudged Yossi`**, so a nudge is never secret.
+- The daemon validates the target is really in the roster, rate-limits **one per sender per
+  target per 30 s** (per sender to everyone per 60 s) with a refusal that says how long is left,
+  and **never queues**: `Yossi is not connected` instead.
+- **`/ping <Name> !`** repeats the nudge **once** after a minute, and only if that person has
+  still not become active.
+- **Idle awareness.** Each client reports one number — whole seconds since *its own* human last
+  typed or submitted. There is no key, no text and no window title anywhere in that path.
+  `/who` now reads `Roy (active), Dana (idle 4m), Yossi (away 20m+), Kobi (you)`, the roster
+  frame carries the map, `/menu → Notifications` counts the buckets, and the confirmation after a
+  nudge says which state the target was in. A client too old to report shows `idle unknown`
+  rather than being called active. The push happens only when the bucket changes, and on a path
+  that does not write history.
+- **Phone tier, opt-in and recipient-only.** If your own `~/.config/claude-jam/config.json` has
+  `{ "ntfy": { "server": "https://ntfy.sh", "topic": "…" } }`, **your own client** POSTs a nudge
+  addressed to you to that topic. The topic is a bearer secret: it stays on your machine, it is
+  never sent to the host, never put in an invite link, never in the protocol and never in a log,
+  and the `/menu` row says "configured" rather than *what*. A failed POST is one dim line.
+
+### v0.27 — upload policy: auto-allow files from already-admitted guests
+
+- **`--uploads ask|auto|off`** (default `ask`, unchanged), switchable at runtime from
+  `/menu → Access → Uploads`.
+  - `ask` — today's behaviour: every transfer hits the approval ladder.
+  - `auto` — anyone already admitted (knock-approved, token, or invite link) may send files and
+    pasted images with no prompt. The transfer is still announced to everybody and still logged;
+    it just is not a question.
+  - `off` — every upload refused with a clear reason, **including the host's own `/paste`**, and
+    a standing `always` grant does not override it.
+- **Nothing that actually protects anything moves with the policy**: sanitized basename with
+  traversal refused, the 20 MB per-file cap, one transfer in flight per client, writes only under
+  `<cwd>/jam-uploads/`, nothing executed or auto-opened, and an announced-vs-actual byte mismatch
+  still dropping the upload. All of them are checked *before* the policy is consulted, and
+  `scripts/smoke-nudge.mjs` proves each one still refuses while the policy is `auto`.
+- **A session quota, which `auto` makes necessary**: 40 files or 200 MB, whichever comes first,
+  after which the policy falls back to `ask` with one line — `upload quota reached — asking
+  again`. `--upload-quota <n>[MB|files]` changes it and the menu row resets it, so an `auto` jam
+  cannot quietly fill a disk.
+- **Export keeps its own toggle and its own default.** `--export ask|auto|off` and
+  `/menu → Access → Export the transcript`, still `ask` in a jam whose uploads are `auto`, and no
+  quota. The docs say plainly why: a file is one file, a transcript is the whole conversation.
+
+### Fixed
+
+- **`claude-jam join` with no argument exited 0 on a non-tty.** It falls through to the usage
+  text, which is right — but a missing argument is a usage error, so it now exits **2**. A bare
+  `claude-jam` is a question and still exits 0, and the interactive behaviour (open the Join
+  screen, which lists the jams on this network) is unchanged.
+- The `👋` glyph is double-width, so the nudge line needed a leading space or the emoji and the
+  name ran together in the gutter.
+- Both clients now report their idle state when the welcome arrives instead of at the next
+  30-second tick, so `/who` is useful from the first second.
+
+### Internal
+
+- `accessFrame()` — the three places that pushed a `{t:'token'}` literal (a token rotation, a
+  relay/view/announce change, a policy toggle) now share one builder. That is how `announce` came
+  to be missing from one of them.
+- `sendAll()` — a broadcast that does **not** write history, for the two live things that must
+  not evict the transcript from the replay ring: nudges and the idle-driven roster refresh.
+- **325 unit tests** (was 306) and a **fifteenth smoke**, `scripts/smoke-nudge.mjs`: ~15 s, no
+  real claude, no network, no tokens. It asserts the sounds **through the platform seam** — each
+  client gets a directory in front of its `PATH` holding a stub `afplay` and `osascript` that
+  append to a log of that client's own — so "a knock and an auto-join are two different calls"
+  and "only the addressed client was interrupted" are facts on disk rather than inferences.
+
 ## 0.19.0
 
 ### v0.23 — named jams, and finding one on your network
