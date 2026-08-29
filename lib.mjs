@@ -2890,6 +2890,9 @@ export function remoteRows({ cloudflared = false, funnel = null } = {}) {
     { value: 'funnel',
       label: 'funnel — Tailscale Funnel (same URL across restarts)',
       disabled: !f.ok,
+      // The tailnet name comes along when it is known: a runtime switch to funnel has no
+      // launch-time precheck of its own to read it from.
+      dns: f.dns || null,
       reason: f.ok ? '' : String(f.error || 'Tailscale Funnel is not available') },
   ];
 }
@@ -3034,6 +3037,19 @@ export const KEY_HELP = [
 export const WIKI_PAGES = ['Install', 'Hosting', 'Joining-a-Jam', 'Remote-Access',
   'Files-and-Export', 'Security-Model', 'Troubleshooting'];
 
+// The manual `/menu → Help & guides` renders inline. It is the SAME file claude is given
+// (v0.8), which is the point: a human and the agent read one source, so an answer from one
+// cannot contradict the other.
+export const MANUAL_FILE = 'MANUAL.md';
+
+// `/menu` runs a command with one key when the command means something on its own, and puts it
+// on the input line when it needs an argument. Derived from the parser rather than from a list
+// somebody has to remember: if `parseClientLine('/kick')` is a usage error, `/kick` needs typing.
+export function menuRunsBare(cmd) {
+  const a = parseClientLine(String(cmd ?? '').trim());
+  return a.kind !== 'error' && a.kind !== 'say';
+}
+
 const cmdItem = (c) => ({ id: `cmd${c}`, label: c, desc: COMMAND_HELP[c] || '', covers: [c], run: c });
 
 // The whole control panel as data.  `state` is what the client knows right now, so every
@@ -3124,8 +3140,10 @@ export function menuTree({ host = true, state = {} } = {}) {
     items: [
       { id: 'help.manual', label: 'The manual (MANUAL.md)', covers: [],
         desc: 'the same text claude is given, rendered here — one source for the human and the agent' },
+      // The keys only: the whole table is four wrapped rows in a Select, and the row exists to
+      // be pressed. Every key still appears here, which is what the completeness test reads.
       { id: 'help.keys', label: 'Keyboard reference', covers: [],
-        desc: KEY_HELP.map((k) => `${k.key} — ${k.desc}`).join(' · ') },
+        desc: `${KEY_HELP.map((k) => k.key).join(' · ')} — press for what each one does` },
       { id: 'help.onboard', label: 'Onboarding block', desc: COMMAND_HELP['/help'], covers: ['/help'], run: '/help' },
       { id: 'help.wiki', label: 'Wiki pages', covers: [],
         desc: WIKI_PAGES.join(' · ') },

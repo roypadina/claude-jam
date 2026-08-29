@@ -8,6 +8,9 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   // v0.18: the host ended the jam — one line, exit 0, and no reconnect at a daemon that is
   // deliberately gone. /end is the other half, and it asks before it sends.
   endingNotice, confirmYes,
+  // v0.24: the control panel (printed as a list here — this renderer has no live region), the
+  // relay switch, and the dated invite block that says which of the lines in the log is current.
+  menuTree, joinBlock, relayPendingLine, REMOTE_MODES,
   // v0.22B/C: invite links (the address list a link carries, what a minted one prints) and the
   // offer that follows a kick.
   INVITE_CONNECT_MS, inviteMintedLines, kickOffer,
@@ -171,8 +174,16 @@ function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.d
 const sys = (text) => emit({ glyph: '*', text, textColor: C.dim });
 
 // The host's invite lines, wherever they are shown (welcome, /join, a /token reply).
+// v0.24b: ONE dated block rather than a fourth near-identical copy — the heading carries the
+// time, and a dim line says the earlier ones are stale.
+let printedJoin = false;
 function logJoin() {
-  for (const l of inviteLines(session || {})) emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
+  for (const l of joinBlock(session || {}, { now: Date.now(), hadEarlier: printedJoin })) {
+    emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
+  }
+  printedJoin = true;
+  const pend = session?.relayPending ? relayPendingLine(session.remote) : null;
+  if (pend) emit({ glyph: '*', text: pend, textColor: C.dim, wrap: false });
 }
 
 // v0.10c: the onboarding block, on connect and on `/help`. Same text as the ink client, minus
@@ -269,8 +280,36 @@ function render(ev) {
     }
     case 'token': {
       // Tunnel pair included (v0.14): a rotation changes the credential inside all four.
-      if (session) Object.assign(session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin, tunnelView: ev.tunnelView });
+      if (session) {
+        Object.assign(session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin,
+          tunnelView: ev.tunnelView, token: ev.token,
+          ...(ev.remote === undefined ? {} : { remote: ev.remote }),
+          ...(ev.inviteOnly === undefined ? {} : { inviteOnly: ev.inviteOnly }),
+          ...(ev.relayPending === undefined ? {} : { relayPending: ev.relayPending }) });
+      }
       return logJoin();
+    }
+    // v0.24b: a relay came up (or moved), with the whole join command on it.
+    case 'relay': return emit({ glyph: '⇗', glyphColor: C.accent, text: ev.text, textColor: C.accent, wrap: false });
+    // v0.24C: the standing `always` grants a guest holds — invisible until now.
+    case 'grants': {
+      const items = Array.isArray(ev.items) ? ev.items : [];
+      return sys(items.length
+        ? `standing approvals: ${items.map((g) => `${g.name} (${g.kind})`).join(', ')} — /menu withdraws one`
+        : 'nobody holds a standing approval');
+    }
+    case 'remote': {
+      if (ev.state === 'rows') {
+        for (const r of ev.rows || []) sys(`  ${r.value === ev.mode ? '*' : ' '} ${r.label}${r.disabled ? ` — unavailable: ${String(r.reason).split('\n')[0]}` : ''}`);
+        return;
+      }
+      if (ev.state !== 'done') return;
+      if (session) session.remote = ev.mode;
+      const n = (ev.reissued || []).length;
+      if (ev.action === 'noop') return sys(`remote was already ${ev.mode} — nothing changed`);
+      return sys(`remote is ${ev.mode} — nobody was disconnected`
+        + (n ? `, ${n} invite link(s) re-issued` : '')
+        + (ev.reissuePending ? '; the links are re-issued as soon as the hostname lands' : ''));
     }
     // v0.22B: a minted link (only ever to the host who asked) or why an invite was refused —
     // which is followed by an ordinary knock, so it is information, not the end of the road.
@@ -527,6 +566,29 @@ rl.on('line', (raw) => {
     case 'kick':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'kick', name: act.name, revoke: act.revoke });
+      break;
+    // v0.24: this renderer has no live region to draw a panel in, so `/menu` prints the same
+    // tree as a list — the commands, their one-line descriptions, and the state next to each.
+    case 'menu': {
+      const tree = menuTree({ host: IS_HOST, state: {
+        roster, pending: [], grants: [], token: session?.token, inviteOnly: session?.inviteOnly,
+        view: session?.view, remote: session?.remote, tunnelJoin: session?.tunnelJoin,
+        replay: session?.replay } });
+      sys(`${tree.title} — type the command on the left`);
+      for (const sec of tree.sections) {
+        sys(`  ${sec.title}: ${sec.desc}`);
+        for (const it of sec.items) {
+          sys(`    ${(it.run || it.label).padEnd(22)}${it.value ? `[${it.value}] ` : ''}${it.desc || ''}`);
+        }
+      }
+      if (IS_HOST) sendMsg({ t: 'grants' });
+      break;
+    }
+    // v0.24.1: off | tunnel | funnel while the jam runs.
+    case 'remote':
+      if (!IS_HOST) err('host only');
+      else if (act.mode == null) { sendMsg({ t: 'remote' }); sys(`remote: ${session?.remote || 'off'} — /remote ${REMOTE_MODES.join(' | ')}`); }
+      else { sys(`switching remote to ${act.mode}…`); sendMsg({ t: 'remote', mode: act.mode }); }
       break;
     case 'quit': process.exit(0);
     case 'error': err(act.text); break;

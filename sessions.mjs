@@ -27,6 +27,8 @@ import { OWNED_OPTION, SESSION_FILE, portFromStateDir, parseSessionJson, verifyO
   // v0.22B: the invite CLI is this file too — it needs exactly what `jam end` needs (find the
   // jam, POST to it on loopback with the secret out of its 0700 state dir).
   parseInviteCommand, invitesReport, inviteMintedLines, inviteRecord,
+  // v0.24.1: `claude-jam remote <off|tunnel|funnel>` — the same daemon path /menu drives.
+  REMOTE_MODES, remoteMode,
   // v0.20: jam's tmux lives on a socket of its own, so every call here is per-socket. A row
   // whose session.json names none is a pre-v0.20 jam on the default server.
   tmuxSocketArgs, TMUX_DEFAULT_SOCKET } from './lib.mjs';
@@ -155,6 +157,23 @@ export async function postInvite(port, secret, body, ms = 5000) {
   } catch (e) { return { ok: false, why: e.message }; }
 }
 
+// v0.24.1: `claude-jam remote <off|tunnel|funnel>` asking the daemon to switch relays. Same gate
+// as POST /end and POST /invite — loopback plus the hook secret out of the 0700 state dir — and
+// the same setRemote() the client's `/remote` frame goes through.
+export async function postRemote(port, secret, body, ms = 45000) {
+  if (!secret) return { ok: false, why: 'no hook secret in session.json' };
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/remote`, {
+      method: 'POST',
+      headers: { 'x-jam-secret': secret, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(ms),
+    });
+    const j = await r.json().catch(() => null);
+    return j?.ok ? { ok: true, ...j } : { ok: false, why: j?.error || `HTTP ${r.status}` };
+  } catch (e) { return { ok: false, why: e.message }; }
+}
+
 // ------------------------------------------------------------------ the rows ----
 function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
@@ -256,7 +275,9 @@ function usage() {
     + '       jam clean [--yes]          remove orphan state dirs and nothing else\n'
     + '       jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]   mint one link\n'
     + '       jam invites [--json] [--jam NAME]                           list them\n'
-    + '       jam invite revoke <Name|id> [--jam NAME]                    take one back');
+    + '       jam invite revoke <Name|id> [--jam NAME]                    take one back\n'
+    + '       claude-jam remote <off|tunnel|funnel> [--jam NAME] [--reissue]\n'
+    + '                                  put a running jam on a public relay, or take it off');
   return 2;
 }
 
@@ -379,12 +400,66 @@ async function cmdInvite(argv, forced = null) {
   return 0;
 }
 
+// v0.24.1: the relay switch from a shell. One argument — the mode — plus the same `--jam <name>`
+// picker every other command here uses, and `--reissue` for the links that embed the old address.
+async function cmdRemote(argv) {
+  const jamAt = argv.indexOf('--jam');
+  const jamName = jamAt >= 0 ? argv[jamAt + 1] : null;
+  const reissue = argv.includes('--reissue');
+  const words = argv.filter((a, i) => (jamAt < 0 || (i !== jamAt && i !== jamAt + 1)) && a !== '--reissue');
+  const asked = words.find((a) => !a.startsWith('-')) ?? null;
+  if (asked != null && !REMOTE_MODES.includes(asked) && asked !== 'none') {
+    console.error(`usage: claude-jam remote <${REMOTE_MODES.join('|')}> [--jam NAME] [--reissue]`);
+    return 2;
+  }
+
+  const rows = await listRows();
+  let target = resolveTarget(rows, jamName);
+  if (!target.ok && target.choices?.length && jamName == null) {
+    console.log(sessionsTable(rows, Date.now()));
+    const pick = pickNumber(await askLine(`which jam? [1-${target.choices.length}] `), target.choices);
+    if (!pick) { console.log('nothing changed'); return 1; }
+    target = { ok: true, row: pick };
+  }
+  if (!target.ok) { console.error(target.why); return 1; }
+  const { info } = target.row;
+
+  // No mode at all is a question, not a mistake: say what is running and what could be.
+  if (asked == null) {
+    const r = await postRemote(info.port, info.secret, {});
+    if (!r.ok) { console.error(`refused: ${r.why}`); return 1; }
+    console.log(`remote: ${r.mode}`);
+    for (const row of r.rows || []) {
+      console.log(`  ${row.value === r.mode ? '*' : ' '} ${row.label}${row.disabled ? `\n      unavailable: ${row.reason}` : ''}`);
+    }
+    return 0;
+  }
+
+  const want = remoteMode(asked);
+  console.log(`switching remote to ${want}…`);
+  const r = await postRemote(info.port, info.secret, { mode: want, reissue });
+  if (!r.ok) { console.error(`refused: ${r.why}`); return 1; }
+  console.log(r.action === 'noop' ? `remote was already ${r.mode} — nothing changed`
+    : `remote is ${r.mode} (${r.action}); already-connected guests were not dropped`);
+  if (reissue && r.reissuePending) {
+    console.log('the invite links are re-issued as soon as the relay reports its hostname — '
+      + 'minting them now would carry the old address. `claude-jam invites` shows the result.');
+  } else if (reissue) {
+    console.log(`re-issued ${(r.reissued || []).length} invite link(s)`);
+    for (const i of r.reissued || []) console.log(`  ${i.name}: ${i.was} → ${i.id}\n    ${i.link}`);
+  } else if (want !== 'off') {
+    console.log('links minted before this change still carry the old address — '
+      + '`claude-jam remote ' + want + ' --reissue` mints fresh ones');
+  }
+  return 0;
+}
+
 // Only when this file IS the command being run — host.mjs imports it as a module.
 if (path.resolve(process.argv[1] || '') === path.resolve(new URL(import.meta.url).pathname)) {
   const [cmd, ...rest] = process.argv.slice(2);
   const run = {
     list: cmdSessions, sessions: cmdSessions, end: cmdEnd, clean: cmdClean,
-    invite: (a) => cmdInvite(a), invites: (a) => cmdInvite(a, 'list'),
+    invite: (a) => cmdInvite(a), invites: (a) => cmdInvite(a, 'list'), remote: cmdRemote,
   }[cmd];
   process.exit(run ? await run(rest) : usage());
 }
