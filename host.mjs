@@ -9,7 +9,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand,
+  // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
+  respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -34,6 +36,8 @@ function parseArgs(argv) {
     else if (a === '--split' || a === '--no-split' || a === '--no-cmux') o.retiredLayout = a;
     else if (a === '--no-token-in-context') o.noTokenInContext = true;
     else if (a === '--tunnel') o.tunnel = true;
+    // v0.17 T4: the other public relay — Tailscale Funnel, whose hostname survives a restart.
+    else if (a === '--funnel') o.funnel = true;
     else if (a.startsWith('--')) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
     else throw new Error(`unexpected argument: ${a}`);
   }
@@ -71,9 +75,29 @@ opts.configDir = resolveConfigDir(opts.configDir, process.env);
 if (!validName(opts.name)) { console.error(`bad --name: ${opts.name}`); process.exit(2); }
 // v0.11: fail fast, before anything is built — a daemon that started and only then
 // discovered cloudflared is missing would strand the host inside `tmux attach`.
+if (opts.tunnel && opts.funnel) {
+  console.error('--tunnel and --funnel are two public relays for the same port: pick one.\n' +
+    '  --tunnel  cloudflared quick tunnel — nothing to set up, NEW random URL on every restart\n' +
+    '  --funnel  Tailscale Funnel — needs Tailscale + Funnel enabled, STABLE URL across restarts');
+  process.exit(2);
+}
 if (opts.tunnel && spawnSync('cloudflared', ['--version'], { encoding: 'utf8' }).status !== 0) {
   console.error('cloudflared not found on PATH. --tunnel needs it: brew install cloudflared');
   process.exit(2);
+}
+// v0.17 T4: same fail-fast, one step earlier — Funnel has a tailnet-side prerequisite no
+// amount of retrying fixes, so say exactly which of the three things is missing and stop.
+// The daemon re-runs this on its own side (it is a separate process) and skips the spawn if
+// the answer changed underneath us; opts.funnelDns is what makes the stable URL printable.
+const tailscaleBin = resolveTailscale(opts.funnelCli, process.env, fs.existsSync);
+if (opts.funnel) {
+  const st = spawnSync(tailscaleBin, ['status', '--json'], { encoding: 'utf8' });
+  const pre = st.error
+    ? { ok: false, error: `could not run the tailscale CLI at ${tailscaleBin}: ${st.error.message}\n` +
+        '  macOS keeps it inside the app bundle; point --funnel-cli <path> (or JAM_TAILSCALE) at it.' }
+    : funnelPrecheck(st.stdout);
+  if (!pre.ok) { console.error(`--funnel cannot start: ${pre.error}`); process.exit(2); }
+  opts.funnelDns = pre.dns;
 }
 
 // Everything that drives the real TUI — capture-pane, paste-buffer, send-keys — targets the
@@ -121,6 +145,9 @@ function launch() {
     ...(opts.noTokenInContext ? ['--no-token-in-context'] : []),
     ...(opts.noPopup ? ['--no-popup'] : []),
     ...(opts.tunnel ? ['--tunnel'] : []),
+    ...(opts.funnel ? ['--funnel'] : []),
+    ...(opts.funnelCli ? ['--funnel-cli', opts.funnelCli] : []),
+    ...(opts.heartbeat ? ['--heartbeat', String(opts.heartbeat)] : []),
     ...(opts.configDir ? ['--config-dir', opts.configDir] : []), // daemon globs that profile's transcripts too
     ...(opts.resume ? ['--resume', opts.resume] : [])]; // daemon needs this to skip pre-existing JSONL history
 
@@ -158,6 +185,9 @@ function launch() {
   // it has not resolved anything yet by the time this print runs — the daemon window logs the
   // URLs a few seconds later, once cloudflared reports them.
   if (opts.tunnel) console.log('cloudflared tunnel connecting — the join/view URLs land in your client (/join) once it is up');
+  // v0.17 T4: unlike a quick tunnel this hostname is known before the relay is up, and it is
+  // the same one tomorrow — so print it here rather than only in the daemon window.
+  if (opts.funnel) console.log(`tailscale funnel connecting — wss://${funnelHost(opts.funnelDns, FUNNEL_PORTS.ws)} (same URL every run)`);
   printJoin();
   if (opts.noAttach) return;
 
@@ -339,61 +369,120 @@ function restartView() {
   child.kill('SIGTERM');
 }
 
-// ------------------------------------------------------ cloudflared tunnel ----
+// ------------------------------------------------------ public relays ----
 // v0.11: two quick tunnels, spawned from the daemon so their lifecycle matches ttyd's —
-// tracked by the exact pid we spawned, killed on daemon exit, never respawned on their own.
-// Cloudflare terminates TLS at the edge, so the guest join line is wss:// with no port.
+// tracked by the exact pid we spawned, killed on daemon exit. Cloudflare terminates TLS at the
+// edge, so the guest join line is wss:// with no port.
+// v0.17 T1/T4: two relays now, one code path. cloudflared (`--tunnel`, random hostname, dies
+// with the process) and `tailscale funnel` in the FOREGROUND (`--funnel`, the node's own stable
+// MagicDNS hostname) differ only in argv and in which line carries the hostname, so RELAY holds
+// exactly that and everything below — the pid tracking, the URL propagation, and T1's respawn
+// backoff — is shared. Mutually exclusive; both optional.
 const TUNNEL_WAIT_MS = 30000;
 let tunnelProcs = { ws: null, view: null }; // our own children, killed by pid only
-let tunnelHosts = { ws: null, view: null }; // resolved hostnames; null until cloudflared reports one
+let tunnelHosts = { ws: null, view: null }; // resolved hostnames; null until the relay reports one
+const relayAttempts = { ws: 0, view: 0 }; // consecutive deaths, reset the moment a URL resolves
+const relayTimers = { ws: null, view: null }; // pending respawns, cleared on shutdown
+let relayStopping = false; // a SIGTERM of ours is not a death to recover from
 
-function spawnTunnel(label, port) {
-  const child = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${port}`], { stdio: ['ignore', 'ignore', 'pipe'] });
+const RELAYS = {
+  tunnel: {
+    what: 'cloudflared',
+    // cloudflared writes its banner to stderr, `tailscale funnel` to stdout — both streams are
+    // piped and fed into the same buffer, so neither relay needs to care which.
+    args: (port) => ['tunnel', '--url', `http://localhost:${port}`],
+    parse: parseTunnelUrl,
+    // Every respawn is a NEW random hostname: exactly why T3 tells a guest after five failed
+    // reconnects that the join URL may have changed.
+    stable: false,
+  },
+  funnel: {
+    what: 'tailscale funnel',
+    // Foreground (no --bg): the funnel lives exactly as long as this child, which is the same
+    // tracked-pid lifecycle cloudflared has. --yes because a daemon has no terminal to prompt.
+    args: (port, label) => ['funnel', '--yes', `--https=${FUNNEL_PORTS[label]}`, `http://localhost:${port}`],
+    parse: parseFunnelUrl,
+    stable: true,
+  },
+};
+const relay = opts.funnel ? RELAYS.funnel : RELAYS.tunnel;
+const relayBin = () => (opts.funnel ? tailscaleBin : 'cloudflared');
+
+function spawnRelay(label, port) {
+  const child = spawn(relayBin(), relay.args(port, label), { stdio: ['ignore', 'pipe', 'pipe'] });
   tunnelProcs[label] = child;
-  console.log(`tunnel (${label}): connecting to cloudflare… (pid ${child.pid})`);
+  console.log(`tunnel (${label}): ${relay.what} connecting… (pid ${child.pid})`);
   let buf = '';
   const timer = setTimeout(() => {
-    if (!tunnelHosts[label]) console.log(`tunnel (${label}): still no URL after 30s — cloudflared may be stuck or blocked`);
+    if (!tunnelHosts[label]) console.log(`tunnel (${label}): still no URL after 30s — ${relay.what} may be stuck or blocked`);
   }, TUNNEL_WAIT_MS);
   timer.unref?.();
-  child.stderr.on('data', (chunk) => {
-    if (tunnelHosts[label]) return; // already resolved, nothing left to parse for
+  const onOut = (chunk) => {
     buf += chunk;
     if (buf.length > 8192) buf = buf.slice(-8192); // the banner is small; never grow unbounded
-    const host = parseTunnelUrl(buf);
+    if (tunnelHosts[label]) return; // already resolved, nothing left to parse for
+    const host = relay.parse(buf);
     if (!host) return;
     tunnelHosts[label] = host;
+    relayAttempts[label] = 0; // it worked: the next death waits 1s, not 30
     clearTimeout(timer);
     console.log(`tunnel (${label}) up: ${host}`);
     onTunnelChange();
-  });
+  };
+  child.stdout.on('data', onOut);
+  child.stderr.on('data', onOut);
   child.on('exit', (code) => {
     clearTimeout(timer);
     if (tunnelProcs[label] === child) tunnelProcs[label] = null;
     const had = tunnelHosts[label];
     tunnelHosts[label] = null;
-    // No auto-restart in v0 (ceiling, documented in README): a flaky tunnel needs a fresh
-    // `jam host --tunnel`. Only worth a log line if it had ever come up or was still pending.
-    console.log(`tunnel (${label}) exited (cloudflared code ${code}) — its join/view URL is cleared`);
+    console.log(`tunnel (${label}) exited (${relay.what} code ${code}) — its join/view URL is cleared`);
+    // A relay that never got a URL took the reason with it; the tail of what it said is the
+    // only diagnosis anybody gets (a sandboxed Tailscale, a blocked cloudflared).
+    if (!had && buf.trim()) console.log(`tunnel (${label}) said: ${buf.trim().split('\n').slice(-3).join(' | ').slice(0, 400)}`);
     if (had) onTunnelChange();
+    // v0.17 T1: a dead relay is the confirmed failure mode of a two-hour session, so bring it
+    // back — unlimited attempts, 1s doubling to 30s. Our own SIGTERM is not a death.
+    if (relayStopping) return;
+    const delay = respawnDelay(++relayAttempts[label]);
+    console.log(`tunnel (${label}): restarting in ${delay / 1000}s (attempt ${relayAttempts[label]})`);
+    relayTimers[label] = setTimeout(() => { relayTimers[label] = null; spawnRelay(label, port); }, delay);
+    relayTimers[label].unref?.();
   });
+  // 'error' (the binary vanished) is followed by 'exit', which owns the respawn.
   child.on('error', (e) => console.log(`tunnel (${label}) failed to start: ${e.message}`));
 }
 
 function startTunnels() {
-  if (!opts.tunnel) return;
-  spawnTunnel('ws', opts.port);
-  // The view tunnel only makes sense when a view server is actually running — same gate
+  if (!opts.tunnel && !opts.funnel) return;
+  if (opts.funnel) {
+    // The whole point of Funnel over a quick tunnel: this URL is the same after a respawn, a
+    // daemon restart and a reboot. Say it up front — it is bookmarkable before it is even up.
+    console.log(`funnel: wss://${funnelHost(opts.funnelDns, FUNNEL_PORTS.ws)} (stable — same URL across restarts)`);
+  }
+  spawnRelay('ws', opts.port);
+  // The view relay only makes sense when a view server is actually running — same gate
   // startView() itself uses (`--view` given and ttyd found).
-  if (ttyd) spawnTunnel('view', opts.viewPort);
+  if (ttyd) spawnRelay('view', opts.viewPort);
 }
 
 function stopTunnels() {
+  relayStopping = true;
+  for (const label of Object.keys(relayTimers)) {
+    if (relayTimers[label]) { clearTimeout(relayTimers[label]); relayTimers[label] = null; }
+  }
   for (const label of Object.keys(tunnelProcs)) {
     const child = tunnelProcs[label];
     if (!child) continue;
     tunnelProcs[label] = null;
     try { child.kill('SIGTERM'); } catch { /* already gone */ }
+    // Foreground `tailscale funnel` is documented to drop its config when it exits, but a
+    // funnel left open is a port on the public internet — so ask for that exact port to be
+    // turned off too, scoped, never `funnel reset` (which would wipe config we never made).
+    if (opts.funnel) {
+      const r = spawnSync(tailscaleBin, ['funnel', '--yes', `--https=${FUNNEL_PORTS[label]}`, 'off'], { encoding: 'utf8' });
+      if (r.status !== 0) console.log(`funnel (${label}) off failed: ${(r.stderr || r.stdout || '').trim().slice(0, 200)}`);
+    }
   }
 }
 
@@ -670,6 +759,31 @@ function daemon() {
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stopView(); stopTunnels(); stopPopup(); restoreStatusRight(); process.exit(0); });
   process.on('exit', () => { stopView(); stopTunnels(); stopPopup(); restoreStatusRight(); });
   setInterval(tailJsonl, 300).unref?.();
+  startHeartbeat(wss);
+}
+
+// v0.17 T2: the `ws` README's own broken-connection pattern. Two things need it. One, a socket
+// can be dead without being closed — a laptop that slept, a relay that dropped the connection
+// without a FIN — and until now the ONLY cleanup path was ws.on('close'), so such a peer sat in
+// the roster and held its name forever. Two, the mirror deliberately sends nothing while the
+// screen is unchanged (frameDecision), which is exactly the silence Cloudflare's documented
+// 100s WebSocket idle cap is watching for: a ping every 30s keeps the connection warm even
+// through a long quiet turn. Sweeps every socket, admitted or still knocking. terminate() fires
+// 'close', so the existing handler does the roster/mirror/ladder cleanup — nothing is duplicated.
+const HEARTBEAT_GAP = Number(opts.heartbeat) > 0 ? Number(opts.heartbeat) : HEARTBEAT_MS;
+function startHeartbeat(wss) {
+  const timer = setInterval(() => {
+    // The record ws itself carries: `alive` flips false on every tick and back on the pong.
+    const { ping, terminate } = heartbeatSweep([...wss.clients].map((ws) => [ws, { alive: ws.jamAlive !== false }]));
+    for (const ws of terminate) {
+      const who = clients.get(ws)?.name || pending.get(ws)?.name || '?';
+      console.log(`[heartbeat] ${who} missed a ping round — terminating`);
+      ws.terminate();
+    }
+    for (const ws of ping) { ws.jamAlive = false; try { ws.ping(); } catch { /* closing */ } }
+  }, HEARTBEAT_GAP);
+  timer.unref?.();
+  console.log(`heartbeat: ping every ${HEARTBEAT_GAP}ms, terminate on a missed round`);
 }
 
 function onRequest(req, res) {
@@ -832,6 +946,11 @@ function onToken(ws, m) {
 
 function onSocket(ws, req) {
   const ip = String(req.socket.remoteAddress || '');
+  // v0.17 T2: the other half of startHeartbeat's sweep. The browser-standard WebSocket every
+  // jam client uses answers protocol pings automatically and gives the application no say in
+  // it, so there is nothing to write on the client side — this is the whole client contract.
+  ws.jamAlive = true;
+  ws.on('pong', () => { ws.jamAlive = true; });
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return sendError(ws, 'bad JSON'); }
