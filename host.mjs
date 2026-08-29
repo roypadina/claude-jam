@@ -42,6 +42,13 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   remoteRows, relaySwitchDecision, relayReadyLine, relayPendingLine, inviteState,
   // v0.23: the jam has a name, and says so on the LAN.
   jamName, validJamName, JAM_NAME_MAX, discoveryTxt, DISCOVERY_TYPE, DISCOVERY_DOMAIN,
+  // v0.26: nudges — the target, the rate limit, the escalation, and the idle bucket that makes
+  // nudging purposeful instead of guesswork.
+  nudgeTarget, nudgeAllowed, escalateDue, NUDGE_TEXT_MAX, NUDGE_ESCALATE_MS,
+  idleBucket, idleText,
+  // v0.27: the upload policy, its session quota, and the export toggle that stays separate.
+  uploadPolicy, uploadDecision, exportDecision, parseUploadQuota, UPLOAD_QUOTA, UPLOAD_POLICIES,
+  quotaText, QUOTA_LINE,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -92,6 +99,10 @@ function parseArgs(argv) {
     // what makes an invite-only jam meaningfully different from a token: every entry is
     // individually revocable, name-bound and expiring.
     else if (a === '--invite-only') o.inviteOnly = true;
+    // v0.25: start the host's own client silent. Value-less, so it needs naming here; it is
+    // forwarded to the client rather than acted on by the daemon — a sound is a client's
+    // business, and the daemon has no speakers.
+    else if (a === '--no-sound') o.sound = false;
     // v0.14: the host is in the client like everybody else, so the old host-chat layouts
     // (--split pane, cmux split, `chat` window) are gone. The flags stay accepted and do
     // nothing, so an old command line still runs.
@@ -181,6 +192,28 @@ if (!validJamName(opts.jamName)) {
 }
 // Announcing on the LAN is the default, because being findable is the point of naming a jam.
 opts.announce = opts.announce !== false;
+// v0.27: how a transfer gets in, and how the transcript gets out. Both default to `ask`, which
+// is exactly what shipped before this flag existed — and they are TWO flags on purpose, because
+// a transcript is the whole conversation (every file claude read included) and a file is one
+// file. A value that is not one of the three words is a startup error rather than a silent
+// downgrade to `ask`: a host who typed `--uploads on` meant something, and it was not "ask me".
+for (const [flag, key] of [['--uploads', 'uploads'], ['--export', 'export']]) {
+  if (opts[key] != null && !UPLOAD_POLICIES.includes(String(opts[key]))) {
+    console.error(`bad ${flag}: expected ${UPLOAD_POLICIES.join(' | ')}, got "${opts[key]}"`);
+    process.exit(2);
+  }
+}
+opts.uploads = uploadPolicy(opts.uploads);
+opts.export = uploadPolicy(opts.export);
+// The guard `auto` makes necessary: 40 files / 200 MB per session, whichever comes first.
+let uploadQuota = UPLOAD_QUOTA;
+if (opts.uploadQuota != null) {
+  const q = parseUploadQuota(opts.uploadQuota);
+  if (!q.ok) { console.error(`bad --upload-quota: ${q.error}`); process.exit(2); }
+  uploadQuota = q.quota;
+}
+const uploadUsed = { files: 0, bytes: 0 };
+let quotaSaid = false; // the fallback line is worth saying ONCE, not on every later transfer
 // v0.11: fail fast, before anything is built — a daemon that started and only then
 // discovered cloudflared is missing would strand the host inside `tmux attach`.
 if (opts.tunnel && opts.funnel) {
@@ -352,6 +385,10 @@ async function launch() {
     ...(opts.heartbeat ? ['--heartbeat', String(opts.heartbeat)] : []),
     '--replay', String(opts.replay), // v0.17 H1: the daemon is the process that seeds history
     '--answers', opts.answers, // v0.31: who may answer a question outright
+    // v0.27: the daemon is the process that decides whether the host is asked, so it needs both
+    // policies and the quota. Passed already-resolved for the same reason jamName is.
+    '--uploads', opts.uploads, '--export', opts.export,
+    ...(opts.uploadQuota != null ? ['--upload-quota', String(opts.uploadQuota)] : []),
     // v0.23: the daemon is the process that advertises, so it needs both. jamName is passed
     // already-resolved — recomputing the cwd default independently in two processes is exactly
     // how the launcher and the daemon end up disagreeing about what the jam is called.
@@ -516,7 +553,10 @@ async function runHostClient(info) {
   for (;;) {
     const client = spawnSync(process.execPath,
       [path.join(HERE, 'client.mjs'), `ws://127.0.0.1:${info.port}`,
-        '--name', opts.name, ...(token ? ['--token', token] : []), '--host'],
+        '--name', opts.name, ...(token ? ['--token', token] : []), '--host',
+        // v0.25: a sound is the client's business, so --no-sound is forwarded rather than
+        // interpreted here. /menu → Notifications and /sound on|off flip it while it runs.
+        ...(opts.sound === false ? ['--no-sound'] : [])],
       { stdio: 'inherit' });
     if (client.status) process.exitCode = client.status;
     // The daemon may have ended the jam under us (`/end` in the client): then there is nothing
@@ -608,8 +648,27 @@ function joinInfo() {
     // already carries the rest of the Access state, so `/menu` needs no frame of its own.
     jamName: opts.jamName,
     announce: announceState(),
+    // v0.27: the two policies and what the session has spent, on the frame `/menu` already
+    // reads. "Why didn't it ask me this time" has to be answerable by looking.
+    uploads: opts.uploads,
+    exportPolicy: opts.export,
+    uploadQuota,
+    uploadUsed: { ...uploadUsed },
   };
 }
+
+// v0.27: the ONE shape of the `{t:'token'}` frame. Three places push access state (a token
+// rotation, a relay/view/announce change, a policy toggle) and before this they each wrote their
+// own literal — which is how `announce` came to be missing from one of them. One builder, so a
+// field added here reaches `/menu` from every path that can change it.
+function accessFrame() {
+  const { join, view, tunnelJoin, tunnelView, uploads, exportPolicy, uploadUsed: used } = joinInfo();
+  return { t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView,
+    remote: relayMode, inviteOnly, relayPending: relayPending(),
+    jamName: opts.jamName, announce: announceState(),
+    uploads, exportPolicy, uploadQuota, uploadUsed: used };
+}
+const pushAccess = () => sendHosts(accessFrame());
 
 // What the host is told wherever the invite lines would go — the same list, in the same
 // order, that a host client prints on connect and on `/join`.
@@ -747,7 +806,25 @@ function broadcast(ev) {
   return full;
 }
 
+// Like broadcast, but LIVE: nothing here is kept in history. A nudge is an interruption, not a
+// thing to re-read on join, and the idle-driven roster refresh would otherwise push the actual
+// transcript out of the replay buffer one bucket change at a time.
+function sendAll(ev) {
+  const full = { ...ev, id: nextId++, ts: Date.now() };
+  for (const ws of clients.keys()) send(ws, full);
+  return full;
+}
+
 function names() { return [...clients.values()].map((c) => c.name); }
+
+// v0.26: name -> seconds since that person last typed or submitted, as THEY reported it. Coarse
+// seconds and nothing else — there is no key, no text and no window title in here, which is the
+// property the docs promise and the reason the frame carries a number rather than an event.
+function idleMap() {
+  const o = {};
+  for (const c of clients.values()) if (Number.isFinite(c.idle)) o[c.name] = c.idle;
+  return o;
+}
 
 // v0.31: `waiting` is now DERIVED from the pane (see pumpPrompt), and `prompt` is what the pane
 // actually says — so the status row can name the tool, show the question, or say the host is
@@ -759,7 +836,7 @@ function pushStatus() { broadcast(statusFrame()); }
 
 function rosterChanged(extra) {
   writeRoster([...clients.values()].map(({ name, joinedAt }) => ({ name, joinedAt })));
-  broadcast({ t: 'roster', roster: names(), ...extra });
+  broadcast({ t: 'roster', roster: names(), idle: idleMap(), ...extra });
 }
 
 // ------------------------------------------------------------- live view ----
@@ -1071,11 +1148,8 @@ let pendingReissue = false;
 function onTunnelChange({ ready = false, changed = false } = {}) {
   writeTokenFile();
   printJoin();
-  const info = joinInfo();
-  const { join, view, tunnelJoin, tunnelView } = info;
-  sendHosts({ t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView,
-    remote: relayMode, inviteOnly, relayPending: relayPending(),
-    jamName: opts.jamName, announce: announceState() });
+  const { tunnelJoin } = joinInfo();
+  pushAccess();
   // v0.23: the browser view is one of the six things the TXT record states, and this is the one
   // path a view toggle goes through. reannounce() compares before it acts, so a relay flap —
   // which also arrives here — changes nothing.
@@ -1695,6 +1769,9 @@ function admitSocket(ws, name, host, loopback = false, via = 'token') {
   clients.set(ws, me);
   send(ws, {
     t: 'welcome', id: nextId++, ts: Date.now(), you: name, roster: names(),
+    // v0.26: who is here AND how long since each of them last touched a key, so `/who` and the
+    // panel are useful from the first second rather than from the first bucket change.
+    idle: idleMap(),
     history: history.slice(),
     // join is the invite line and view the ttyd URL; only the host client gets them —
     // friends never see the token-bearing command or the view key. null (but present) for
@@ -1768,11 +1845,7 @@ function onToken(ws, m) {
   // first, so it never falls through into a token rotation.
   if (m.op === 'invite-only') {
     inviteOnly = m.value === 'on';
-    const info = joinInfo();
-    sendHosts({ t: 'token', token: currentToken, join: info.join, view: info.view,
-      tunnelJoin: info.tunnelJoin, tunnelView: info.tunnelView,
-      remote: relayMode, inviteOnly, relayPending: relayPending(),
-      jamName: opts.jamName, announce: announceState() });
+    pushAccess();
     reannounce(); // the advertised access mode just became `invite`, or stopped being it
     broadcast({ t: 'sys', text: inviteOnly
       ? 'this jam is invite-only now — a knock is refused, an invite link is the only way in'
@@ -1796,9 +1869,7 @@ function onToken(ws, m) {
   writeTokenFile();
   // Rotation never respawns cloudflared — tunnelHosts is untouched — but the join command
   // embeds the token and the view URL embeds viewKey, so both tunnel strings still change.
-  const { join, view, tunnelJoin, tunnelView } = joinInfo();
-  sendHosts({ t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView,
-    jamName: opts.jamName, announce: announceState() });
+  pushAccess();
   // v0.23: `access=` follows the token. The record NEVER carries the token itself — only which
   // kind of door this is — so a rotation changes one word and no secret moves.
   reannounce();
@@ -1868,6 +1939,67 @@ function onKick(ws, me, m) {
     via: victim.via || 'approval', revoked });
   console.log(`[kick] ${victim.name} (via ${victim.via}) removed by ${me.name}`
     + `${revoked ? `, ${revoked} invite(s) revoked` : ''}`);
+}
+
+// ------------------------------------------------------- v0.26: nudges ----
+// `/ping <Name|all> [message]`, from ANYONE — host and guest alike. This is deliberately not on
+// the approval ladder: getting a colleague's attention is not a privilege the host grants, it is
+// the thing two humans sharing one session need most. What keeps it from being a weapon is the
+// rate limit, the fact that every nudge is visible to the whole room, and that HOW it lands is
+// decided by the recipient's client and not by the sender.
+//
+// Nothing here touches the recipient's phone, or knows whether they have one: the ntfy topic is
+// a secret that lives on their machine, their own client posts it, and it must never appear in a
+// frame this daemon routes or a line this daemon logs.
+const nudgeAt = new Map(); // `${from} ${target}` (lowercased) -> when it was last sent
+
+function onNudge(ws, me, m) {
+  const now = Date.now();
+  const t = nudgeTarget(m.to, names(), me.name);
+  if (!t.ok) return sendError(ws, t.why);
+  const key = `${me.name.toLowerCase()} ${String(t.to).toLowerCase()}`;
+  const rate = nudgeAllowed(nudgeAt.get(key) || 0, now, { all: t.all });
+  if (!rate.ok) return sendError(ws, rate.why);
+  nudgeAt.set(key, now);
+  // The text is sanitized exactly like a message: one line, no forged `[Name]:` attribution,
+  // short. A nudge never reaches claude, but it does reach somebody's notification centre.
+  const s = sanitize(typeof m.text === 'string' ? m.text : '');
+  const text = s.ok ? neutralizePrefixes(s.text.replace(/\s+/g, ' ')).slice(0, NUDGE_TEXT_MAX) : '';
+  const idle = idleMap();
+  // ONE frame to everyone. The addressed client raises the highlighted line, the bell and the
+  // sound; everybody else draws the dim `* Roy nudged Yossi`. A nudge is never secret, and the
+  // client — not this frame — is what decides how loud it is.
+  sendAll({ t: 'nudge', from: me.name, to: t.to, text, names: t.names });
+  const said = t.all ? 'everyone' : `${t.to} (${idle[t.to] == null ? 'idle unknown' : idleText(idle[t.to])})`;
+  send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: `nudged ${said}` });
+  console.log(`[nudge] ${me.name} → ${t.to}${text ? `: ${text}` : ''}`);
+  // The escalation, and the only one there is: repeat ONCE after a minute, and only if they are
+  // still not active. Never a loop, never a third. Cancelled by nothing, because a nudge that
+  // fired at somebody who came back in the meantime simply does not fire (escalateDue says so).
+  if (m.escalate === true && !t.all) {
+    const at = now;
+    const timer = setTimeout(() => {
+      const still = idleMap();
+      if (!clients.size) return;
+      if (!names().some((n) => n === t.to)) return; // they left; a nudge is never queued
+      if (!escalateDue({ at, sent: false, idle: still[t.to] ?? 9999, now: Date.now() })) return;
+      sendAll({ t: 'nudge', from: me.name, to: t.to, text, names: t.names, again: true });
+      console.log(`[nudge] ${me.name} → ${t.to} repeated once (still ${idleText(still[t.to] ?? 0)})`);
+    }, NUDGE_ESCALATE_MS);
+    timer.unref?.();
+  }
+}
+
+// v0.26: each client reports how long since ITS human last typed or submitted. Coarse seconds,
+// pushed only when the BUCKET changes (active → idle → away), so a roster refresh costs one tiny
+// frame an hour per person rather than one every heartbeat — and it goes out on sendAll, never
+// broadcast, or the replay buffer would fill with roster frames and lose the actual work.
+function onIdle(ws, me, m) {
+  const s = Math.max(0, Math.trunc(Number(m.s)));
+  if (!Number.isFinite(s)) return;
+  const was = Number.isFinite(me.idle) ? idleBucket(me.idle) : null;
+  me.idle = s;
+  if (idleBucket(s) !== was) sendAll({ t: 'roster', roster: names(), idle: idleMap() });
 }
 
 // v0.24.1: `/menu → Access → Remote` and `/remote <off|tunnel|funnel>` from a host client. The
@@ -2088,6 +2220,17 @@ function onSocket(ws, req) {
       send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: invitesReport(invites) });
     } else if (m.t === 'kick') {
       onKick(ws, me, m);
+      // v0.26: an addressed "look at your screen". Deliberately NOT host-gated and deliberately
+      // not on the approval ladder — see onNudge. The rate limit is the whole defence.
+    } else if (m.t === 'nudge') {
+      onNudge(ws, me, m);
+    } else if (m.t === 'idle') {
+      onIdle(ws, me, m);
+      // v0.27: the two policy toggles, and resetting the session quota. Same gate as the relay
+      // switch and the browser view: it changes what may be written to the HOST's disk, so it is
+      // the host's, on loopback.
+    } else if (m.t === 'policy') {
+      onPolicy(ws, me, m);
       // v0.24.1: off | tunnel | funnel while the jam runs. Same gate as /end and /invite — host
       // AND loopback — because a relay puts this port on the public internet.
     } else if (m.t === 'remote') {
@@ -2477,8 +2620,13 @@ function streamXfer(ws, header, data) {
 // --- v0.12: the session transcript ---
 // What claude saw, as the file claude wrote. The guest gets a copy of the JSONL, minus our own
 // join-token block (best effort — see stripTokenBlock), and prints its own resume recipe.
+// v0.27: the transcript keeps its OWN toggle and its own default (`ask`), because it is not one
+// file — it is the whole conversation, including the contents of every file claude read. An
+// `--uploads auto` jam says nothing about it.
 function onExport(ws, me) {
-  if (trusted(me) || standing('export', me)) return sendExport({ name: me.name, ws });
+  const d = exportDecision({ policy: opts.export, trusted: trusted(me), standing: standing('export', me) });
+  if (d.allow === 'refuse') return sendError(ws, d.why);
+  if (d.allow === 'auto') return sendExport({ name: me.name, ws });
   askHost('export', ws, me);
 }
 
@@ -2512,6 +2660,10 @@ function fileCaption(v) {
   return s.ok ? neutralizePrefixes(s.text.replace(/\s+/g, ' ')).slice(0, 200) : '';
 }
 
+// THE ORDER IS THE POINT (v0.27). Every check above the policy is one of the things that
+// actually protects the host's disk, and NONE of them move when the policy does: one transfer in
+// flight per client, a sanitized basename with traversal refused, and the 20 MB per-file cap.
+// The policy is consulted last, and all it ever decides is whether the host is ASKED.
 function onUpload(ws, me, m) {
   if (uploads.has(ws)) return sendError(ws, 'one upload at a time — the last one is still arriving');
   const name = safeBaseName(m.name);
@@ -2520,8 +2672,47 @@ function onUpload(ws, me, m) {
   if (!Number.isInteger(size) || size < 0) return sendError(ws, 'the upload announced no size');
   if (size > UPLOAD_MAX) return sendError(ws, `${name} is ${humanBytes(size)}, over the ${humanBytes(UPLOAD_MAX)} upload cap`);
   const rec = { detail: name, size, caption: fileCaption(m.caption) };
-  if (trusted(me) || standing('file', me)) return grantUpload({ name: me.name, ws, ...rec }, standing('file', me));
+  const d = uploadDecision({ policy: opts.uploads, trusted: trusted(me), standing: standing('file', me),
+    used: uploadUsed, quota: uploadQuota });
+  if (d.allow === 'refuse') return sendError(ws, d.why);
+  // The quota is spent: say so ONCE, to everybody, because the change of behaviour is what needs
+  // explaining — the next transfer suddenly asking is otherwise read as a bug.
+  if (d.quota && !quotaSaid) {
+    quotaSaid = true;
+    broadcast({ t: 'sys', text: `${QUOTA_LINE} (${quotaText(uploadUsed, uploadQuota)})` });
+    pushAccess(); // the menu row's value just changed; the token frame is what carries it
+  }
+  if (d.allow === 'auto') return grantUpload({ name: me.name, ws, ...rec }, standing('file', me));
   askHost('file', ws, me, rec);
+}
+
+// v0.27: the two runtime toggles, and resetting the quota. One handler for both because they are
+// one question — what a transfer has to go through — and one frame carries both values back.
+function onPolicy(ws, me, m) {
+  if (!trusted(me)) return sendError(ws, 'the upload and export policies are the host\'s, on loopback only');
+  if (m.kind === 'quota-reset') {
+    uploadUsed.files = 0;
+    uploadUsed.bytes = 0;
+    quotaSaid = false;
+    broadcast({ t: 'sys', text: `the upload quota was reset — ${quotaText(uploadUsed, uploadQuota)}` });
+    return pushAccess();
+  }
+  const key = m.kind === 'export' ? 'export' : m.kind === 'uploads' ? 'uploads' : null;
+  if (!key) return sendError(ws, `unknown policy: ${JSON.stringify(String(m.kind ?? '').slice(0, 20))}`);
+  if (!UPLOAD_POLICIES.includes(String(m.mode))) {
+    return sendError(ws, `usage: ${key} ${UPLOAD_POLICIES.join(' | ')}`);
+  }
+  opts[key] = uploadPolicy(m.mode);
+  // Everyone is told, not just the host: whether your screenshot will be gated, and whether the
+  // whole transcript can walk out of the room, is something every person in it has a stake in.
+  broadcast({ t: 'sys', text: key === 'uploads'
+    ? ({ ask: 'uploads: the host is asked about every file — the 20 MB cap, the jam-uploads/ confinement and the traversal refusal are unchanged either way',
+      auto: `uploads: anyone already admitted may send files with no prompt (${quotaText(uploadUsed, uploadQuota)} before it goes back to asking) — the caps are unchanged`,
+      off: 'uploads: refused for everybody, standing approvals included' })[opts.uploads]
+    : ({ ask: 'export: the host is asked before anybody takes the transcript',
+      auto: 'export: anybody may take the session transcript — which is the WHOLE conversation, including the contents of every file claude read',
+      off: 'export: the transcript is not shared in this jam' })[opts.export] });
+  pushAccess(); // the token frame is what carries the policy to /menu
 }
 
 // Approved: the sender may start the chunks. Nothing is on disk yet.
@@ -2569,8 +2760,14 @@ function writeUpload(who, up, data) {
     if (!name) return sendError(up.ws, `too many files are already called ${up.detail}`);
     fs.writeFileSync(path.join(dir, name), data, { mode: 0o644 });
   } catch (e) { return sendError(up.ws, `could not write ${UPLOAD_DIR}/${up.detail}: ${e.message}`); }
+  // v0.27: the budget is spent where the bytes actually land, never where they were announced —
+  // an announced-vs-actual mismatch drops the upload above this line, and a dropped upload must
+  // not cost the session anything.
+  uploadUsed.files++;
+  uploadUsed.bytes += data.length;
   const rel = `${UPLOAD_DIR}/${name}`;
-  console.log(`[file] ${who} → ${path.join(dir, name)} (${humanBytes(data.length)})`);
+  console.log(`[file] ${who} → ${path.join(dir, name)} (${humanBytes(data.length)})`
+    + ` — session ${quotaText(uploadUsed, uploadQuota)}`);
   // Injected like any message, so claude can Read the file and knows who sent it. The path is
   // text in a prompt — the daemon never runs or opens what it just wrote.
   const text = `sent a file: ${rel}${up.caption ? ` ${up.caption}` : ''}`;
