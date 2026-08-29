@@ -1295,6 +1295,14 @@ export function humanBytes(n) {
 // supposed to send a basename), refuse the dot entries, then reduce what is left to a boring
 // charset. null = refuse the transfer, never "guess a name".
 export const UPLOAD_NAME_MAX = 80;
+// The MS-DOS device names, still reserved by every Windows API in 2026: a file called `nul`
+// silently discards everything written to it, `con` is the console, and `CreateFile` on any of
+// them succeeds while doing something else entirely. The reservation is on the STEM, so `con.txt`
+// and `NUL.log` are devices too, and it is case-insensitive.
+// Superscript forms (`COM¹`) are reserved as well and need no entry here: the charset filter above
+// has already turned the superscript into `_`, which makes the name ordinary.
+const WIN_DEVICE_RE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+
 export function safeBaseName(name) {
   if (typeof name !== 'string') return null; // a number in the name field is a broken client
   const raw = name.trim();
@@ -1308,6 +1316,18 @@ export function safeBaseName(name) {
     const ext = dot > 0 && s.length - dot <= 8 ? s.slice(dot) : '';
     s = s.slice(0, UPLOAD_NAME_MAX - ext.length) + ext;
   }
+  // v0.21.2 (campaign F5): the Windows-shaped names, done AFTER the trim so a truncation cannot
+  // reintroduce one. Trailing dots first, because Windows strips them itself — `nul.` opens the
+  // NUL device, and `report.` and `report` are the same file there — and stripping them here is
+  // what makes the device test below see the name Windows will see. (Trailing spaces need no
+  // rule: the charset filter has already made them `_`.)
+  s = s.replace(/\.+$/, '');
+  if (!s) return null;
+  // Prefixed rather than renamed: `_nul.txt` is still recognisably what somebody sent, it is a
+  // perfectly ordinary file on every platform, and no leading dot means it is still not a
+  // dotfile. Applied everywhere, not only on Windows, so a jam does not hand out names that are
+  // fine on the host and unusable on half the room's machines.
+  if (WIN_DEVICE_RE.test(s)) s = `_${s}`;
   return s;
 }
 

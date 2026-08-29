@@ -1235,6 +1235,37 @@ test('safeBaseName: traversal refused outright, the rest reduced to a boring nam
   assert.equal(long.endsWith('.png'), true);
 });
 
+test('safeBaseName: the Windows device names, which are not files at all (campaign F5)', () => {
+  // Campaign F5. `con`, `nul`, `aux`, `lpt1` and friends passed the filter unchanged: harmless on
+  // macOS and Linux, but on Windows they are DEVICES, so a write to `nul` silently discards and
+  // `con` is the console. The Windows client is on the roadmap; a name handed out here is used
+  // over there.
+  for (const n of ['con', 'PRN', 'aux', 'NUL', 'com1', 'COM9', 'lpt1', 'LPT9']) {
+    assert.equal(safeBaseName(n), `_${n}`, n);
+  }
+  // Reserved with ANY extension — that is the half people forget.
+  assert.equal(safeBaseName('con.txt'), '_con.txt');
+  assert.equal(safeBaseName('NUL.log'), '_NUL.log');
+  assert.equal(safeBaseName('CoM4.tar.gz'), '_CoM4.tar.gz');
+  // And with a trailing dot, which Windows strips itself: `nul.` opens NUL.
+  assert.equal(safeBaseName('nul.'), '_nul');
+  assert.equal(safeBaseName('con...'), '_con');
+  // A trailing dot on an ordinary name goes too — `report.` and `report` are one file on Windows,
+  // so keeping the dot only makes two names for one file.
+  assert.equal(safeBaseName('report.'), 'report');
+  // A trailing SPACE needed no new rule: the charset filter already made it an underscore.
+  assert.equal(safeBaseName('report .txt'), 'report_.txt');
+  // Names that merely START with a device word are ordinary files and must not be touched.
+  for (const n of ['console.log', 'contract.pdf', 'nullable.md', 'com10.txt', 'lpt0.txt',
+    'auxiliary', 'my-con.txt', 'CONIN$.txt']) {
+    assert.equal(safeBaseName(n).startsWith('_'), false, n);
+  }
+  // The rename is idempotent — running the filter twice must not stack underscores.
+  assert.equal(safeBaseName(safeBaseName('con.txt')), '_con.txt');
+  // A name that is nothing but dots was already refused and still is.
+  assert.equal(safeBaseName('...'), null);
+});
+
 test('uniqueName: a collision gets a suffix, never an overwrite', () => {
   assert.equal(uniqueName('photo.png', () => false), 'photo.png');
   assert.equal(uniqueName('photo.png', (n) => n === 'photo.png'), 'photo-1.png');
