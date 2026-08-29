@@ -483,6 +483,10 @@ function render(ev) {
       if (store.session) {
         Object.assign(store.session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin,
           tunnelView: ev.tunnelView, token: ev.token,
+          // v0.23: absent means "this daemon did not say", so it is left alone rather than
+          // overwritten with undefined — the same rule the three below already follow.
+          ...(ev.jamName === undefined ? {} : { jamName: ev.jamName }),
+          ...(ev.announce === undefined ? {} : { announce: ev.announce }),
           ...(ev.remote === undefined ? {} : { remote: ev.remote }),
           ...(ev.inviteOnly === undefined ? {} : { inviteOnly: ev.inviteOnly }),
           ...(ev.relayPending === undefined ? {} : { relayPending: ev.relayPending }) });
@@ -605,7 +609,9 @@ function connect() {
       store.roster = ev.roster;
       store.labelW = labelWidth(ev.roster); // set before the replay, so history aligns
       toTranscript++; // the whole connect block goes on screen, mirror view or not
-      sys(`jam ${ev.session.id} — host ${ev.session.hostName}, cwd ${ev.session.cwd}`);
+      // v0.23: the jam's NAME leads, because that is what a human calls the room they just
+      // walked into; the session id stays, in the same 8-char form every other surface shows.
+      sys(`jam ${ev.session.jamName ? `"${ev.session.jamName}" ` : ''}(${String(ev.session.id).slice(0, 8)}) — host ${ev.session.hostName}, cwd ${ev.session.cwd}`);
       if (IS_HOST) logJoin();
       logOnboarding(); // above the first messages; the replay comes after it
       // A restarted daemon reissues ids from 1, so old ids in `seen` would swallow
@@ -1191,6 +1197,9 @@ function Menu({ s }) {
       roster: s.roster, pending: s.pending, grants: s.grants,
       token: s.session?.token, inviteOnly: s.session?.inviteOnly, view: s.session?.view,
       remote: s.session?.remote, tunnelJoin: s.session?.tunnelJoin, replay: s.session?.replay,
+      // v0.23: the panel names the jam it belongs to, and the announce row shows whether the
+      // LAN is actually being told — not merely whether it was asked for.
+      jamName: s.session?.jamName, announce: s.session?.announce,
     },
   });
   const here = nodeAt(tree, s.menu.path);
@@ -1232,6 +1241,16 @@ function Menu({ s }) {
       case 'invites.reissue': return down('access.remote');
       case 'access.inviteonly': return runCmd(`/token invite-only ${s.session?.inviteOnly ? 'off' : 'on'}`);
       case 'access.view': { close(); sendMsg({ t: 'view', on: !s.session?.view }); return sys(`asking the daemon to turn the browser view ${s.session?.view ? 'off' : 'on'}…`); }
+      // v0.23: the same shape as the view toggle — flip the boolean this client currently holds,
+      // let the daemon do it, and let it answer on the `token` frame that carries the state.
+      case 'access.announce': {
+        const on = !s.session?.announce?.on;
+        close();
+        sendMsg({ t: 'announce', on });
+        return sys(on
+          ? 'asking the daemon to announce this jam on the local network…'
+          : 'asking the daemon to stop announcing this jam on the local network…');
+      }
       case 'access.remote': return down('access.remote');
       default: return item.run ? runCmd(item.run) : say(item.desc || 'nothing to do here');
     }

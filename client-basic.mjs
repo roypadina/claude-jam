@@ -374,7 +374,9 @@ function connect() {
       session = ev.session;
       roster = ev.roster;
       labelW = labelWidth(roster); // set before the replay, so history aligns with what follows
-      sys(`jam ${ev.session.id} — host ${ev.session.hostName}, cwd ${ev.session.cwd}`);
+      // v0.23: the jam's NAME leads, because that is what a human calls the room they just
+      // walked into; the session id stays, in the same 8-char form every other surface shows.
+      sys(`jam ${ev.session.jamName ? `"${ev.session.jamName}" ` : ''}(${String(ev.session.id).slice(0, 8)}) — host ${ev.session.hostName}, cwd ${ev.session.cwd}`);
       if (IS_HOST) logJoin();
       // A restarted daemon reissues ids from 1, so old ids in `seen` would swallow
       // everything it sends. Drop them whenever the boot id changes.
