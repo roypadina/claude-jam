@@ -13,8 +13,14 @@ usage() {
   echo "         ([--no-prompt] [--end-on-exit] [--keep-on-exit] decide it up front)."
   echo "       jam host --attach [--tmux NAME]"
   echo "         reopen your client on a jam that is already running."
+  echo "       jam join <invite-link>"
+  echo "         one command, nothing else: the link carries the address, your name and a"
+  echo "         per-invite secret, so there is no approval to wait for."
   echo "       jam join <ws-url> --name X [--token Y] [--basic]"
   echo "         no token = knock, the host accepts you."
+  echo "       jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]"
+  echo "         mint a link for one person. jam invites lists them, jam invite revoke <Name|id>"
+  echo "         takes one back. A link is a password — send it privately."
   echo "       jam sessions [--json] | jam ls"
   echo "         jam's own tmux sessions and state dirs: port, cwd, uptime, who is here."
   echo "       jam end [name] [--all] | jam kill [name]"
@@ -33,6 +39,9 @@ case "$cmd" in
   sessions|ls) exec node "$DIR/sessions.mjs" list "$@" ;;
   end|kill) exec node "$DIR/sessions.mjs" end "$@" ;;
   clean) exec node "$DIR/sessions.mjs" clean "$@" ;;
+  # v0.22B: invite links, from the command line as well as from `/invite` in the client.
+  invite) exec node "$DIR/sessions.mjs" invite "$@" ;;
+  invites) exec node "$DIR/sessions.mjs" invites "$@" ;;
   # -h/--help/help is a question, not a mistake: the same text, exit 0, and never a jam.
   -h|--help|help) usage 0 ;;
   *) usage 2 ;;
