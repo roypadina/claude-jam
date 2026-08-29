@@ -54,7 +54,11 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   NUDGE_ALL, IDLE_AFTER, AWAY_AFTER, idleBucket, idleText, whoReport,
   CONFIG_FILE, parseJamConfig, ntfyRequest,
   // v0.27: the two policies /menu shows and switches.
-  UPLOAD_POLICIES, uploadPolicy } from './lib.mjs';
+  UPLOAD_POLICIES, uploadPolicy,
+  // v0.28: the mirror scrolls back through the host's real pane history, and the transcript
+  // goes further back than the replay on demand.
+  MIRROR_CHROME, SCREEN_HISTORY_MAX, SCREEN_PAGE_MAX, WHEEL_LINES, scrollStep, scrollStatusText,
+  historyEdgeLine, historyPageDivider } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './xfer.mjs';
 // v0.32 W0: anything that touches this machine's clipboard, desktop or dot-directories goes
 // through the one module that knows what operating system this is.
@@ -102,9 +106,17 @@ let SOCKET = TMUX_DEFAULT_SOCKET;
 // v0.15: how long a locally-echoed line stays under the mirror. The daemon's own broadcast of
 // it normally clears it within a round trip; this is only the floor for a socket that died.
 const ECHO_TTL = 5000;
-// ink's <Static> belongs to one ink instance, so the remount after an attach reprints every
-// entry it is handed. Keep the tail — the rest is already in the terminal's own scrollback.
-const ATTACH_KEEP = 40;
+// v0.28: the mirror lives in the terminal's ALTERNATE screen buffer, exactly as less, vim and
+// tmux do. The transcript then owns the NORMAL buffer, its lines are the terminal's own
+// scrollback, and flipping between the two loses nothing in either direction — which is what
+// retired v0.15's 40-line re-feed after an F3 attach, and the README ceiling that went with it.
+const SMCUP = '\x1b[?1049h';
+const RMCUP = '\x1b[?1049l';
+// How long one of the blocks that MUST be seen (the invite lines, the resume recipe) stays over
+// the mirror. It is in the transcript either way; this is only how long the alternate screen
+// keeps showing it. v0.24b's bug was these being visible for three system lines and then gone.
+const NOTICE_TTL = 45000;
+const NOTICE_ROWS = 12; // the most of one it will take from the frame
 const NO_WRAP_W = 4096; // wider than any terminal: ink leaves the line alone, the terminal
 // soft-wraps it, and an invite command stays one selectable run instead of gaining a newline.
 const STRIP_ROWS = 3; // rows of chat/system lines kept under the mirror (v0.14 chat strip)
@@ -146,7 +158,21 @@ const store = {
   session: null, // welcome's session block; .join only ever set for the host
   // v0.14: the mirror of the real TUI is THE view — everyone, host included, opens on it.
   // F2 (or /mirror) flips to the transcript, which is where the full history lives.
-  mirror: true,
+  // v0.28: it starts FALSE and is turned on once the welcome block has been printed, so the
+  // block a first-time guest needs (who is here, the keys, the invite lines, the replay) is
+  // written to the NORMAL buffer and stays in their terminal's own scrollback. Entering the
+  // mirror before it would have put all of it in an alternate screen that is thrown away.
+  mirror: false,
+  alt: false, // whether the alternate screen buffer is currently up (mirror === alt, after mount)
+  // v0.28: where the mirror is scrolled to. `before === 0` IS live — there is no second flag, so
+  // the state cannot claim to be scrolled and at the bottom at the same time. `paused` counts
+  // live frames that arrived while scrolled: they are held, never dropped in silence.
+  scroll: { before: 0, rows: [], maxBefore: 0, atTop: false, paused: 0, said: false,
+    cap: SCREEN_HISTORY_MAX, w: 0, h: 0 },
+  // v0.28: what the daemon's ring is holding, and the oldest event id this client has printed —
+  // `/history` asks for the page older than that one.
+  kept: 0,
+  oldestId: null,
   passthrough: false, // v0.14 F3 fallback (host only): keys go straight to the claude TUI
   attached: false, // v0.15 F3: ink is unmounted and `tmux attach` owns the terminal
   echo: null, // v0.15: {text, at} — your own submitted line, painted before the frame catches up
@@ -203,6 +229,7 @@ let block = null; // current open message block (nextBlock in lib.mjs)
 let lastTurn = null; // turnKey of the last emitted block, so blocks get a blank line between
 let app = null; // ink instance, once mounted
 let ending = false; // v0.18: the jam is over on purpose, so the close below must not retry
+let openedMirror = false; // v0.28: the mirror opens once, after the first welcome block
 
 // Leaving is unmount-then-print: ink clears its own two rows on unmount, so anything written
 // afterwards is guaranteed to survive on screen instead of being erased by the next redraw.
@@ -211,6 +238,9 @@ let ending = false; // v0.18: the jam is over on purpose, so the close below mus
 function leave(code, text) {
   setImmediate(() => {
     try { app?.unmount(); } catch { /* never mounted, or already gone */ }
+    // v0.28: back to the normal buffer BEFORE the parting line, or it is written into an
+    // alternate screen that is discarded a microsecond later.
+    restoreScreen();
     if (text) process.stdout.write(`${text}\n`);
     process.exit(code);
   });
@@ -249,7 +279,9 @@ inkStdin.unref = () => inkStdin;
     if (store.passthrough) return sendKeys(r.text);
     // v0.16: the approval bar's single keys come out of the stream here, before ink's input
     // machinery can put them in the text field. Everything else falls through untouched.
-    const rest = barKeys(r.text);
+    // v0.28: `G`/`g`/Esc return the mirror to live, ahead of the bar's own single keys and only
+    // while something is scrolled and the input line is empty.
+    const rest = barKeys(scrollKeys(r.text));
     if (rest) inkStdin.write(rest);
   });
   process.stdin.resume();
@@ -282,6 +314,11 @@ function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.d
     strip,
     text: String(text), textColor,
     labelW: store.labelW, cols: process.stdout.columns || 80,
+    at: Date.now(), // v0.28: how long a notice has been over the mirror
+    // v0.28: a block that was forced into the transcript (`toTranscript`) while the mirror owns
+    // the screen. It still goes to the transcript — nothing is lost — AND it is shown over the
+    // frame for NOTICE_TTL, because v0.24b's bug was the host never seeing the tunnel URL.
+    notice: store.mirror && toTranscript > 0,
   };
   // While the mirror is up the transcript is not on screen, so new lines wait in `deferred`
   // (the last few show as an overlay) and are flushed into the transcript, in order, when
@@ -290,9 +327,21 @@ function emit({ turnKey, label = '', color = C.dim, glyph = '', glyphColor = C.d
   // `toTranscript` is the one exception: the connect block (welcome, onboarding, history
   // replay) is printed once, above the mirror, or a first-time guest would open on a bare
   // screen with the instructions hidden behind F2.
-  if (store.mirror && !toTranscript) store.deferred = [...store.deferred, entry];
+  // v0.28: in the mirror view EVERYTHING queues, `toTranscript` included — the transcript view
+  // owns the normal buffer, and a line written into the alternate screen would be thrown away
+  // with it. One queue rather than two, so the order it is flushed in is the order it happened.
+  if (store.mirror) store.deferred = [...store.deferred, entry];
   else store.entries = [...store.entries, entry];
   touch();
+}
+
+// v0.28: the oldest event id this client has printed. `/history` asks for the page BEFORE it,
+// so a second `/history` continues where the first stopped instead of re-sending the same page.
+function noteOldest(items) {
+  for (const it of items || []) {
+    if (it?.id == null) continue;
+    if (store.oldestId == null || it.id < store.oldestId) store.oldestId = it.id;
+  }
 }
 
 const sys = (text) => emit({ glyph: '*', text, textColor: C.dim, strip: true });
@@ -313,6 +362,7 @@ const err = (text) => emit({ glyph: '!', glyphColor: C.err, text, textColor: C.e
 // decision, so the toggles cannot be honoured in one code path and forgotten in another.
 let lastBell = 0;
 let lastRtt = ''; // v0.17 P5: the RTT chip as last rendered, so only a CHANGE costs a redraw
+let lastNotices = 0; // v0.28: notices over the mirror, so one expiring costs one redraw
 function alert(title, body, { event = '', phone = false, force = false } = {}) {
   const plan = notifyPlan({ event, prefs: store.notify, phone });
   // The 3-second gate is about the BELL and the desktop notification (a burst is one nudge). A
@@ -537,6 +587,13 @@ function render(ev) {
     // the previous one and nothing is kept.
     case 'screen': {
       store.frame = { rows: ev.rows || [], w: ev.w, h: ev.h };
+      // v0.28: while the mirror is scrolled back, a live frame is HELD, never painted under the
+      // reader — and counted, so the status row can say how many are waiting. A frame dropped in
+      // silence is the same complaint in a smaller costume.
+      if (store.scroll.before) {
+        store.scroll = { ...store.scroll, paused: store.scroll.paused + 1 };
+        return touch();
+      }
       // v0.15: the mirror has caught up with your own submitted line, so the echo of it has
       // done its job. Matched on the head of the text, the same trick the daemon's injection
       // uses to prove its paste landed; the TTL is the fallback when it never appears.
@@ -697,6 +754,39 @@ function render(ev) {
     }
     // v0.14: something happened to the session everybody should know about — a slash command
     // was run in the TUI, a guest's request was approved.
+    // v0.28: a page of the host pane's REAL history, colours included. It replaces whatever page
+    // was held, and the daemon's own clamp is adopted wholesale — the client asked, the pane
+    // answered, and what came back is the truth about how far it goes.
+    case 'screen-history': {
+      const cap = Number(ev.cap) || SCREEN_HISTORY_MAX;
+      store.scroll = { ...store.scroll,
+        before: Number(ev.before) || 0, rows: ev.rows || [], w: ev.w, h: ev.h,
+        maxBefore: Number(ev.maxBefore) || 0, atTop: !!ev.atTop, cap };
+      // Once, on the first scroll to the very top: what this jam kept, and where the whole
+      // record is. The "once" rule is historyEdgeLine's, so it is a test and not a code reading.
+      const line = historyEdgeLine({ atTop: store.scroll.atTop, shown: store.scroll.said,
+        events: store.kept, paneLines: cap });
+      if (line) { store.scroll.said = true; sys(line); }
+      return touch();
+    }
+    // v0.28: `/history [n|all]` — the page of the transcript older than the oldest event this
+    // client is holding. Printed under a dim divider that says what is still behind it.
+    case 'history': {
+      if (ev.kept != null) store.kept = Number(ev.kept) || 0;
+      const items = (ev.items || []).filter((it) => it.id == null || !seen.has(it.id));
+      for (const it of items) if (it.id != null) seen.add(it.id);
+      if (!items.length) {
+        return sys(ev.older
+          ? 'nothing further back arrived — try /history again'
+          : `that is everything this jam kept (${store.kept} event(s)) · /export for the complete transcript`);
+      }
+      noteOldest(items);
+      const div = historyPageDivider({ shown: items.length, older: Number(ev.older) || 0 });
+      if (div) emit({ text: div, textColor: C.dim, wrap: false, bare: true });
+      for (const it of items) render(it);
+      flushTools(); // a re-printed page has no `status` frame to end its turn
+      return touch();
+    }
     case 'sys': return sys(ev.text);
     case 'error': return err(ev.text);
     default: return;
@@ -751,6 +841,10 @@ function connect() {
       // A restarted daemon reissues ids from 1, so old ids in `seen` would swallow
       // everything it sends. Drop them whenever the boot id changes.
       if (ev.session?.boot !== boot) { boot = ev.session?.boot; seen.clear(); }
+      // v0.28: what the ring is holding behind the slice we were given, so `/history` and the
+      // top-of-history line quote a real number.
+      if (ev.kept != null) store.kept = Number(ev.kept) || 0;
+      noteOldest(ev.history || []);
       let replayed = 0;
       for (const hist of ev.history || []) if (!seen.has(hist.id)) { seen.add(hist.id); replayed++; render(hist); }
       // v0.17 H1/H2: a replay has no turn boundary to collapse on — the `status` frame that
@@ -761,6 +855,14 @@ function connect() {
       if (divider) emit({ text: divider, textColor: C.dim, wrap: false, bare: true });
       sys(`here: ${store.roster.join(', ')}`);
       toTranscript--;
+      // v0.28: and NOW the mirror opens. Everything above went to the normal buffer, so it is in
+      // this terminal's own scrollback for good; the alternate screen the mirror lives in would
+      // have thrown it away. Once only — a reconnect while reading the transcript must not yank
+      // the reader back into the live TUI.
+      if (!openedMirror) { openedMirror = true; toggleMirror(true); }
+      if (store.kept > replayed) {
+        sys(`${store.kept - replayed} earlier event(s) are still kept — /history [n|all] prints them`);
+      }
       sendResize(); // host only: fit the claude window to this terminal
       reportIdle(); // v0.26: say `active` now rather than at the next tick, so /who is useful at once
       return;
@@ -847,7 +949,9 @@ function attachTmux(session) {
   // Frames off first: nothing may paint over tmux's screen, and the daemon must not spend a
   // capture-pane on a client that cannot see it.
   if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'mirror', on: false }));
-  try { app?.unmount(); } catch { /* never mounted */ }
+  // v0.28: the same unmount every view flip uses, so the "entries is what has NOT been written"
+  // invariant holds here too — that is what retired the 40-line re-feed on the way back.
+  unmountFlush();
 }
 
 function runAttach(session) {
@@ -856,6 +960,10 @@ function runAttach(session) {
     try { process.stdin.setRawMode?.(false); } catch { /* not a tty */ }
     // ink's parting frame is still on the primary screen and tmux draws on the alternate
     // one, restoring this on detach — so wipe the visible page (scrollback untouched).
+    // v0.28: and if the mirror had the alternate screen, give it back FIRST. Buffers do not
+    // nest: tmux's own rmcup on detach would drop us into the normal one and leave this client
+    // believing it still had the alternate one.
+    restoreScreen();
     process.stdout.write('\x1b[2J\x1b[H');
     // TMUX unset: a host who launched jam from inside tmux would otherwise be refused
     // outright ("sessions should be nested with care, unset $TMUX to force").
@@ -873,13 +981,11 @@ function runAttach(session) {
       over = true;
       store.attached = false;
       process.stdin.resume();
-      const kept = store.entries.slice(-ATTACH_KEEP);
-      const dropped = store.entries.length - kept.length;
-      store.entries = kept;
-      toTranscript++; // this one line belongs on screen, mirror view or not
+      // v0.28: nothing to re-feed. tmux drew on the alternate screen and gave the normal one
+      // back untouched, so the whole transcript is exactly where it was — which is what the
+      // 40-line ATTACH_KEEP tail, and the README ceiling that named it, existed to paper over.
       if (problem) err(problem);
-      else sys(`back from the TUI${dropped ? ` — ${dropped} earlier line(s) are in your terminal's scrollback` : ''}`);
-      toTranscript--;
+      else sys('back from the TUI');
       // The window is the size the departing tmux client made it: put the host's own back
       // BEFORE the frames start again, so the first one is already the right shape.
       sendResize(true);
@@ -904,23 +1010,143 @@ function togglePassthrough(on) {
   touch();
 }
 
+// -------------------------------------- v0.28: which screen buffer each view owns ----
+// The mirror renders in the terminal's ALTERNATE screen (`\x1b[?1049h`), exactly as less, vim
+// and tmux do; the transcript owns the NORMAL one. That is the whole of Roy's "flipping views
+// churns my scrollback": ink reprints its entire <Static> log — after `\x1b[3J`, which clears
+// the scrollback — whenever its live region grows as tall as the terminal, and a full-screen
+// mirror frame is exactly that tall. In the alternate buffer there is no scrollback to lose and
+// no <Static> at all, so the reprint cannot happen and the transcript is never touched.
+//
+// ONE ink instance per buffer: <Static>'s index only ever moves forward, so the way to have it
+// print into a different buffer is to mount again. Hence the invariant this file now keeps —
+// `store.entries` is what has NOT yet been written to the terminal, ink's final render on
+// unmount writes it, and it is emptied immediately afterwards. Anything arriving while the
+// mirror is up waits in `store.deferred` and is flushed on the way back.
+let pendingScreen = null; // 'alt' | 'normal': a view flip waiting for the unmount
+
+const writeOut = (s2) => { try { process.stdout.write(s2); } catch { /* stdout closed */ } };
+
+// Erase ink's live region, then unmount. clear() makes unmount's own final render a no-op for
+// the dynamic rows (the output is unchanged, so ink writes nothing) while still letting it flush
+// any <Static> item it had not written — which is why emptying `entries` here is safe.
+function unmountFlush() {
+  try { app?.clear(); } catch { /* never mounted */ }
+  try { app?.unmount(); } catch { /* never mounted, or already gone */ }
+  store.entries = [];
+}
+
+function applyScreen(alt) {
+  store.mirror = alt;
+  store.alt = alt;
+  writeOut(alt ? SMCUP : RMCUP);
+  // Coming back to the normal buffer: everything that arrived while the mirror was up is
+  // flushed into the transcript, in order, and the fresh mount prints exactly those rows under
+  // what is already in the terminal's scrollback. Nothing is reprinted and nothing is lost.
+  if (!alt) { store.entries = [...store.entries, ...store.deferred]; store.deferred = []; }
+}
+
+// Deferred by a tick for the same reason leave() is: `/mirror` reaches here from inside a React
+// event handler, and unmounting the reconciler mid-commit wedges it instead of exiting. By the
+// time an immediate runs, React has committed whatever touch() queued, so the final render on
+// unmount is writing the CURRENT transcript and not one line behind it.
+function switchScreen(alt) {
+  if (alt === store.alt) return;
+  pendingScreen = alt ? 'alt' : 'normal';
+  setImmediate(unmountFlush);
+}
+
+// The one place that puts the terminal back the way it was found. Called on the way out, on a
+// signal, and on an uncaught error — a client killed while the mirror is up must never leave a
+// human staring at an alternate screen with no shell in it.
+function restoreScreen() {
+  if (!store.alt) return;
+  store.alt = false;
+  // fs.writeSync, not process.stdout.write: this runs from a `process.on('exit')` handler too,
+  // where an async write would never be flushed.
+  try { fs.writeSync(1, RMCUP); } catch { /* the terminal is already gone */ }
+}
+
 // v0.7/v0.14: flip between the live TUI (the default view) and the transcript. F2 and
 // `/mirror` are the same call; going back to the transcript flushes everything that arrived
 // while the mirror was up, in order, so nothing is lost.
+// v0.28: `store.mirror` is flipped by applyScreen rather than here, so the view and the buffer
+// it lives in can never disagree — a mirror frame painted into the normal buffer would be
+// exactly the scrollback churn this version removes.
 function toggleMirror(on) {
   const next = on ?? !store.mirror;
   if (next === store.mirror) return;
-  store.mirror = next;
   sendMsg({ t: 'mirror', on: next });
-  if (next) {
-    store.frame = null;
-  } else {
-    store.entries = [...store.entries, ...store.deferred];
-    store.deferred = [];
-    sys('transcript — F2 goes back to the live TUI');
-  }
+  if (next) { store.frame = null; setScroll(0); }
+  else sys('transcript — F2 goes back to the live TUI');
+  switchScreen(next);
   touch();
 }
+
+// ------------------------------------ v0.28: scrolling the mirror back ----
+// The mirror used to be the CURRENT screen and nothing else, so a guest could not scroll back
+// through the real TUI at all. PgUp/PgDn (Shift+↑/↓ a line at a time, the wheel if the terminal
+// sends it) ask the daemon for the claude pane's own history; End, G or Esc comes back to live.
+// A guest gets this exactly as the host does — it is a read of a screen they are already
+// watching, and being unable to look back was the complaint.
+
+// Rows the mirror region actually has. The same arithmetic fitFrame uses, so a page is one
+// screenful and PgUp lands where a reader expects it to.
+const mirrorRows = () => Math.max(4, Math.min((process.stdout.rows || 24) - MIRROR_CHROME, SCREEN_PAGE_MAX));
+
+function askHistory() {
+  if (ws?.readyState !== 1) return;
+  ws.send(JSON.stringify({ t: 'screen-history', before: store.scroll.before, rows: mirrorRows() }));
+}
+
+// One place decides what the scroll state is, so "back to live" cannot be half-done: the held
+// page, the paused count and the at-top flag all go together.
+function setScroll(before) {
+  const n = Math.max(0, Math.floor(Number(before)) || 0);
+  if (n === store.scroll.before && (n || !store.scroll.rows.length)) return;
+  if (!n) {
+    store.scroll = { ...store.scroll, before: 0, rows: [], paused: 0, atTop: false };
+    return touch();
+  }
+  store.scroll = { ...store.scroll, before: n };
+  askHistory();
+  touch();
+}
+
+// Every scroll key, in one handler. Nothing happens outside the mirror view (the transcript is
+// the terminal's own scrollback and belongs to the terminal) or while the TUI has the keyboard.
+const SCROLL_BY = {
+  pageup: 'pageup', pagedown: 'pagedown', lineup: 'lineup', linedown: 'linedown',
+  wheelup: 'lineup', wheeldown: 'linedown', scrolltop: 'top', scrolllive: 'live',
+};
+function onScrollKey(name) {
+  if (!store.mirror || store.passthrough || store.menu) return;
+  const step = name === 'wheelup' || name === 'wheeldown' ? WHEEL_LINES : mirrorRows();
+  // Until the daemon has answered once, the ceiling is the protocol's — otherwise the very
+  // first PgUp would clamp against a maxBefore of 0 and do nothing at all.
+  const maxBefore = store.scroll.maxBefore || SCREEN_HISTORY_MAX;
+  setScroll(scrollStep({ key: SCROLL_BY[name], before: store.scroll.before, page: step, maxBefore }));
+}
+
+// `G` and `End` return to live, and so does Esc — but only while the input line is empty, the
+// same rule the v0.16 approval bar's single keys already live under, so typing a capital G in a
+// message is still typing a capital G.
+function scrollKeys(text) {
+  if (!store.scroll.before || store.input !== '' || store.passthrough) return text;
+  let rest = '';
+  let back = false;
+  for (const ch of String(text)) {
+    if (ch === 'G' || ch === 'g' || ch === '\x1b') back = true;
+    else rest += ch;
+  }
+  if (back) setScroll(0);
+  return rest;
+}
+
+// Registered once, outside React: a scroll key means the same thing whatever is being typed,
+// and re-subscribing them on every keystroke (which is what the input-dependent effect below
+// would do) is eight listeners of churn per character.
+for (const k of Object.keys(SCROLL_BY)) keys.on(k, () => onScrollKey(k));
 
 // ----------------------------------------------- v0.16: the approval bar ----
 // Every pending request raises one row above the status row, and while nothing is typed a
@@ -1054,6 +1280,13 @@ function submit(raw) {
     case 'who': sys(whoReport(store.roster, store.idle, { self: NAME })); break;
     case 'help': logOnboarding(); break;
     case 'mirror': toggleMirror(); break;
+    // v0.28: further back than the replay you were given. It is a TRANSCRIPT command, so it
+    // takes you to the transcript — printing history into an alternate screen that the next F2
+    // throws away would be a strange way to answer "show me more".
+    case 'history':
+      toggleMirror(false);
+      sendMsg({ t: 'history', n: act.n, before: store.oldestId ?? undefined });
+      break;
     case 'tools':
       if (act.op) {
         store.toolsExpanded = act.op === 'on';
@@ -1225,17 +1458,33 @@ function Entry({ e }) {
 // ANSI-aware by ink) — no colors of our own, or they would fight the captured ones.
 // `reserve` is rows something else below has taken this render (v0.17 P6's hint row): the frame
 // gives one up rather than pushing the status and input rows off the bottom of the screen.
-function Mirror({ frame, reserve = 0 }) {
+function Mirror({ frame, scroll, reserve = 0 }) {
   const cols = process.stdout.columns || 80;
-  if (!frame) return h(Text, { color: C.dim }, 'waiting for the host\'s screen…');
-  const fit = fitFrame(frame, cols, (process.stdout.rows || 24) - reserve);
+  // v0.28: while scrolled, the page of the host pane's REAL history stands in for the live
+  // frame. Same rows, same renderer, same truncation — it IS the same screen, further back.
+  const back = scroll?.before ? { rows: scroll.rows, w: scroll.w, h: scroll.h } : null;
+  if (!back && !frame) return h(Text, { color: C.dim }, 'waiting for the host\'s screen…');
+  if (back && !back.rows.length) return h(Text, { color: C.dim }, 'reading the host\'s scrollback…');
+  const fit = fitFrame(back || frame, cols, (process.stdout.rows || 24) - reserve);
   const hints = [
-    fit.wider ? `host pane is ${frame.w} cols wide, yours is ${cols}` : '',
-    fit.croppedRows ? `${fit.croppedRows} row(s) above cut off` : '',
+    fit.wider ? `host pane is ${(back || frame).w} cols wide, yours is ${cols}` : '',
+    // While scrolled the page is exactly one screenful, so a crop notice there would be about
+    // the page rather than about the pane and would read as a second, invented limit.
+    !back && fit.croppedRows ? `${fit.croppedRows} row(s) above cut off` : '',
+    back && scroll.atTop ? 'this is the oldest line the host\'s pane still has' : '',
   ].filter(Boolean).join(' · ');
   return h(Box, { flexDirection: 'column' },
     fit.rows.map((r, i) => h(Text, { key: i, wrap: 'truncate' }, r === '' ? ' ' : r)),
     hints ? h(Text, { color: C.dim }, `— mirror: ${hints}`) : null);
+}
+
+// v0.28: a block that MUST be seen while the mirror owns the screen — the invite lines, the
+// resume recipe after an export. It is in the transcript too (see emit); this is the alternate
+// screen's copy of it, and it steps aside after NOTICE_TTL.
+function Notice({ items }) {
+  if (!items.length) return null;
+  return h(Box, { flexDirection: 'column' },
+    items.map((e) => h(Entry, { key: `notice-${e.key}`, e: { ...e, gap: false } })));
 }
 
 // v0.16: one row, right above the status row, worded exactly like the tmux popup it stands in
@@ -1265,7 +1514,7 @@ function QuestionBlock({ text }) {
     }, line)));
 }
 
-function StatusBar({ status, typing, spin, mirror, passthrough, net }) {
+function StatusBar({ status, typing, spin, mirror, passthrough, net, scroll }) {
   const now = Date.now();
   const who = [...typing.entries()].filter(([, at]) => now - at < 4000).map(([n]) => n);
   // v0.17 P5: who is typing, and how this connection is doing — both dim, on the right.
@@ -1276,7 +1525,16 @@ function StatusBar({ status, typing, spin, mirror, passthrough, net }) {
   // Which view you are in is always on screen: the mirror IS the default (v0.14), so the
   // chip's job is to make the F2 alternate discoverable long after the onboarding block
   // has scrolled away.
+  // v0.28: while the mirror is scrolled back, the chip says so, says how far, says how many live
+  // frames are being held for you, and says the key that ends it. Everything else on the row is
+  // about the live screen and would be a lie about the one being read.
+  const scrolled = mirror ? scrollStatusText(scroll || {}) : '';
   const view = mirror ? '⧉ live TUI' : '≡ transcript';
+  if (scrolled) {
+    return h(Box, { minHeight: 1 },
+      h(Box, { flexGrow: 1 }, h(Text, { color: C.accent, wrap: 'truncate' }, scrolled)),
+      right ? h(Text, { color: C.dim }, right) : null);
+  }
   // v0.31: ONE source for this row — the daemon's classification of the pane. A permission still
   // says F3 (and now names the tool); a question says what claude is asking and that /answer
   // takes it; a dialog says the host is needed at the keyboard. Nothing on the pane is an empty
@@ -1352,6 +1610,9 @@ function Menu({ s }) {
       roster: s.roster, pending: s.pending, grants: s.grants,
       token: s.session?.token, inviteOnly: s.session?.inviteOnly, view: s.session?.view,
       remote: s.session?.remote, tunnelJoin: s.session?.tunnelJoin, replay: s.session?.replay,
+      // v0.28: what the ring keeps, next to what a joiner is shown — two different numbers, and
+      // a host needs both to answer "why can I only see this much".
+      history: s.session?.history,
       // v0.23: the panel names the jam it belongs to, and the announce row shows whether the
       // LAN is actually being told — not merely whether it was asked for.
       jamName: s.session?.jamName, announce: s.session?.announce,
@@ -1387,6 +1648,10 @@ function Menu({ s }) {
         ...WIKI_PAGES.map((w) => `  ${w}`)]);
       case 'session.attach': return IS_HOST ? (close(), onF3()) : say('F3 attaches the real TUI, and it is the host\'s key');
       case 'session.replay': return say(`replay: ${s.session?.replay ?? '?'} events of the transcript are shown to a joining guest (--replay at launch)`);
+      case 'session.depth': return say(`this jam keeps ${s.session?.history ?? '?'} events (--history at launch); `
+        + `${s.kept} are held right now — /history [n|all] prints further back, /export is the complete record`);
+      case 'session.scroll': return say('in the live TUI: PgUp/PgDn page through the host\'s real pane history, '
+        + `Shift+↑/↓ move a line, End or G returns to live (${SCREEN_HISTORY_MAX} lines back at most)`);
       case 'people.pending': return say(s.pending.length
         ? [`${s.pending.length} waiting:`, ...s.pending.map((p) => `  ${p.kind} from ${p.name}${p.detail ? ` — ${p.detail}` : ''}`),
           '  answer with a / d on the bar, or the /allow-… command on the line']
@@ -1566,6 +1831,11 @@ function App() {
       const before = s.typing.size;
       for (const [n, at] of s.typing) if (Date.now() - at >= 4000) s.typing.delete(n);
       let redraw = s.typing.size !== before;
+      // v0.28: a notice over the mirror expires on a clock, and a frozen screen sends no frame
+      // to redraw it away. Counting them is one comparison a second.
+      const notices = s.mirror
+        ? s.deferred.filter((e) => e.notice && Date.now() - e.at < NOTICE_TTL).length : 0;
+      if (notices !== lastNotices) { lastNotices = notices; redraw = true; }
       // v0.17 P5: `⚠ stale Ns` has to appear, and count up, with no frame arriving to trigger a
       // render — but a healthy `~120ms` is the same string every tick, so it costs no redraw.
       const rtt = rttText(s.net, Date.now(), s.net?.heartbeat);
@@ -1644,17 +1914,32 @@ function App() {
   // poor way to ask somebody a question.
   const qText = s.passthrough ? '' : questionText(s.status);
   const qRows = qText ? qText.split('\n').length : 0;
+  // v0.28: the blocks that were forced into the transcript while the mirror owns the screen —
+  // the invite lines, the resume recipe. They are in `deferred` like everything else (so the
+  // flip back prints them in order) and they are ALSO shown here, whole, for NOTICE_TTL. v0.24b
+  // fixed exactly this for the three-row strip; the alternate screen must not undo it.
+  const notice = s.mirror
+    ? s.deferred.filter((e) => e.notice && Date.now() - e.at < NOTICE_TTL).slice(-NOTICE_ROWS)
+    : [];
   // v0.24: while the panel is open it owns the whole live region AND the keyboard. An input row
   // underneath would make one keystroke both a menu choice and a message; the mirror underneath
   // would push the panel off the bottom of a short terminal.
+  // v0.28: <Static> belongs to the NORMAL screen buffer only. In the mirror view this ink
+  // instance is drawing on the alternate screen, where a transcript would be thrown away on the
+  // next flip — and where ink's own "live region is as tall as the terminal" path would reprint
+  // the whole log after an `\x1b[3J` that clears the real scrollback. That reprint IS the churn
+  // Roy reported; no <Static> here means it cannot happen.
+  const transcript = s.mirror ? null : h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e }));
   if (s.menu && !s.passthrough) {
-    return h(Box, { flexDirection: 'column' },
-      h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
-      h(Menu, { s }));
+    return h(Box, { flexDirection: 'column' }, transcript, h(Menu, { s }));
   }
   return h(Box, { flexDirection: 'column' },
-    h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
-    s.mirror ? h(Mirror, { frame: s.frame, reserve: (hints.length ? 1 : 0) + qRows }) : null,
+    transcript,
+    notice.length ? h(Notice, { items: notice }) : null,
+    s.mirror
+      ? h(Mirror, { frame: s.frame, scroll: s.scroll,
+        reserve: (hints.length ? 1 : 0) + qRows + notice.length })
+      : null,
     liveTools.length
       // Index keys on purpose: this region is redrawn every render (never <Static>), and two
       // identical tool lines in one turn are perfectly normal.
@@ -1689,7 +1974,7 @@ function App() {
       ? h(ApprovalBar, { items: barHidden() ? [] : s.pending, armed: barArmed(), now: Date.now() })
       : null,
     qText ? h(QuestionBlock, { text: qText }) : null,
-    h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough, net: s.net }),
+    h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough, net: s.net, scroll: s.scroll }),
     s.cont.length && !s.passthrough
       ? h(Box, { flexDirection: 'column' },
         s.cont.map((l, i) => h(Text, { key: `cont-${i}`, color: C.dim }, l === '' ? ' ' : l)))
@@ -1709,6 +1994,22 @@ function App() {
 // the exit below runs. These are for a signal from outside, where ink sees nothing.
 process.on('SIGINT', () => leave(0));
 process.on('SIGTERM', () => leave(0));
+// v0.28: the terminal goes back the way it was found, whatever ends this process. The `exit`
+// hook is the belt — it fires for a plain return, a process.exit and an uncaught throw alike,
+// and fs.writeSync is what makes it land from inside one. The explicit uncaughtException
+// handler is the braces AND the readable half: leave the alternate screen FIRST, or the stack
+// trace prints into a buffer that is about to be thrown away and nobody ever sees the error.
+process.on('exit', restoreScreen);
+process.on('uncaughtException', (e) => {
+  restoreScreen();
+  console.error(e?.stack || String(e));
+  process.exit(1);
+});
+process.on('unhandledRejection', (e) => {
+  restoreScreen();
+  console.error(e?.stack || String(e));
+  process.exit(1);
+});
 // Terminal resized: ink relays out on its own, and the host's claude window follows along.
 process.stdout.on('resize', () => sendResize());
 
@@ -1718,12 +2019,26 @@ connect();
 // v0.15: F3 attaches by unmounting ink, and waitUntilExit() resolves on ANY unmount — so a
 // pending attach means "hand the terminal to tmux, then rebuild the client"; anything else
 // (/quit, Ctrl-C, a rejection) is the real exit.
+// v0.28: a view flip is the second reason to unmount. <Static>'s index only ever moves forward,
+// so printing into a different screen buffer means mounting again — and the buffer is switched
+// here, between the unmount and the mount, where nothing is on screen to be corrupted by it.
 for (;;) {
   await app.waitUntilExit();
-  if (!pendingAttach) break;
-  const session = pendingAttach;
-  pendingAttach = null;
-  await runAttach(session);
-  mount();
+  if (pendingAttach) {
+    const session = pendingAttach;
+    pendingAttach = null;
+    await runAttach(session); // restoreScreen() inside it hands tmux a clean normal buffer
+    if (store.mirror) applyScreen(true); // and the mirror takes the alternate one back
+    mount();
+    continue;
+  }
+  if (pendingScreen) {
+    applyScreen(pendingScreen === 'alt');
+    pendingScreen = null;
+    mount();
+    continue;
+  }
+  break;
 }
+restoreScreen();
 process.exit(0);

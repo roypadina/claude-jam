@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // claude-jam terminal client. No dependencies: global WebSocket + readline.
 import readline from 'node:readline';
-import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames, reconnectMessage, historyDivider,
+import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames, reconnectMessage, historyDivider, historyPageDivider,
   // v0.17 Batch P: the bell, @mentions and the RTT chip work here too (P6's hint list does not —
   // this renderer only ever appends lines, it has no live region to draw one in).
   BELL, bellAllowed, mentionsMe, rttText,
@@ -62,6 +62,16 @@ const C = {
 const fg256 = (n) => `\x1b[38;5;${n}m`; // everybody else's stable per-name color (userColor)
 const SPIN = ['✻', '✼', '✽', '✼']; // claude's own working glyph cycle
 const seen = new Set(); // dedupe replayed history across reconnects
+// v0.28: what the daemon's ring is holding, and the oldest event id printed here — `/history`
+// asks for the page before it, so a second `/history` continues where the first stopped.
+let kept = 0;
+let oldestId = null;
+function noteOldest(items) {
+  for (const it of items || []) {
+    if (it?.id == null) continue;
+    if (oldestId == null || it.id < oldestId) oldestId = it.id;
+  }
+}
 const typing = new Map(); // name -> last typing ms
 // v0.31: `prompt` is the daemon's classification of the claude pane — none | question |
 // permission | dialog. The status line is drawn from it, so it cannot outlive what is on screen.
@@ -406,6 +416,23 @@ function render(ev) {
       emit({ glyph: '·', text: n.text, textColor: C.dim });
       return process.exit(n.code);
     }
+    // v0.28: `/history` — the page of the transcript older than what this client is holding.
+    // The --basic renderer only ever appends, so a re-printed page appends too: a dim divider
+    // saying what is still behind it, then the events, oldest first.
+    case 'history': {
+      if (ev.kept != null) kept = Number(ev.kept) || 0;
+      const items = (ev.items || []).filter((it) => it.id == null || !seen.has(it.id));
+      for (const it of items) if (it.id != null) seen.add(it.id);
+      if (!items.length) {
+        return sys(ev.older ? 'nothing further back arrived — try /history again'
+          : `that is everything this jam kept (${kept} event(s)) · /export for the complete transcript`);
+      }
+      noteOldest(items);
+      const div = historyPageDivider({ shown: items.length, older: Number(ev.older) || 0 });
+      if (div) emit({ text: div, textColor: C.dim, wrap: false, bare: true });
+      for (const it of items) render(it);
+      return;
+    }
     // v0.14: a slash command ran in the TUI, or a guest's request was approved.
     case 'sys': return sys(ev.text);
     case 'error': return emit({ glyph: '!', glyphColor: C.err, text: ev.text, textColor: C.err });
@@ -454,6 +481,8 @@ function connect() {
       if (ev.session?.boot !== boot) { boot = ev.session?.boot; seen.clear(); }
       logOnboarding(); // above the first messages; the replay comes after it
       let replayed = 0;
+      if (ev.kept != null) kept = Number(ev.kept) || 0;
+      noteOldest(ev.history || []);
       for (const h of ev.history || []) if (!seen.has(h.id)) { seen.add(h.id); replayed++; render(h); }
       // v0.17 H2: where the backlog ends and the live session begins.
       const divider = historyDivider(replayed);
@@ -565,6 +594,9 @@ rl.on('line', (raw) => {
     // The mirror needs a live region to redraw a whole screen into; this renderer only ever
     // appends lines. Same for tool collapse — here every ⚙/⎿ line goes straight to the log.
     case 'mirror': sys('the mirror view is ink-client only — run without --basic'); break;
+    // v0.28: /history works here — it is a transcript command, and this client is all
+    // transcript. Scrolling the MIRROR back needs a live region, so that half stays ink-only.
+    case 'history': sendMsg({ t: 'history', n: act.n, before: oldestId ?? undefined }); break;
     case 'tools': sys('tool lines are always inline in --basic; /tools needs the ink client'); break;
     case 'join':
       if (!IS_HOST) err('host only');
