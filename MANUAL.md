@@ -39,7 +39,8 @@ working (`✻ claude is working…`), and whether you are waiting for a permissi
   `jam join ws://<host-ip>:7777 --name <Name>` (plus `--token <t>` when one is set) — or, if the
   host is running from a source checkout instead of the Homebrew install, `node client.mjs` in
   place of `jam join`. The invite line the host hands out already has the right one.
-  They need to reach the host — same Tailscale network typically, or the host's `--tunnel` URL.
+  They need to reach the host — same Tailscale network typically, or the host's `--tunnel` /
+  `--funnel` URL.
 
 ## F3 — the host attaches to your screen
 
@@ -157,19 +158,33 @@ writing as we talk.
 - Browser (opt-in): `jam host --view` (needs `ttyd`) also serves a read-only page at
   `http://jam:<key>@<host-ip>:7778` — this terminal and nothing else, no tmux chrome. Append
   `?fontSize=16` to make it bigger. `--tunnel` gives it a public `https://…trycloudflare.com`
-  address too.
+  address too, `--funnel` a `https://…ts.net:8443` one.
 - `tmux attach -t jam` on the host's machine is the raw TUI, keyboard included.
 
-## Reaching a remote friend (`--tunnel`)
+## Reaching a remote friend (`--tunnel` or `--funnel`)
+
+Two public relays, one job: move the bytes so a friend needs no Tailscale and no port
+forwarding. Pick one — they are mutually exclusive.
 
 `jam host --tunnel` (needs `cloudflared`: `brew install cloudflared`) opens two Cloudflare
-quick tunnels — one for the jam port, one for the browser view when `--view` is on — so a
-friend needs no Tailscale or port forwarding. The tunnel invite/view lines print first
-everywhere invite lines appear (the client's `/join`, the `daemon` window, `token.json`, hence
-your own context). Cloudflare terminates TLS; the join token / knock approval is still the real
-gate. Tunnel hostnames stay fixed for the life of the daemon — `/token` rotation changes only
-the credential inside the URL. A dead tunnel is not restarted: its line disappears until the
-host relaunches with `--tunnel`.
+quick tunnels — one for the jam port, one for the browser view when `--view` is on.
+
+`jam host --funnel` (needs `tailscale`, and Funnel enabled for the tailnet) does the same
+through Tailscale Funnel, on the two public ports Funnel opens: 443 for the client, 8443 for
+the view. Its hostname is the host machine's own name — `wss://<machine>.<tailnet>.ts.net` —
+so it is the **same URL every run**, which a quick tunnel's random words are not. Startup
+checks `tailscale status` and refuses with the exact missing step if Funnel is not available.
+
+Either way the tunnel invite/view lines print first everywhere invite lines appear (the
+client's `/join`, the `daemon` window, `token.json`, hence your own context). TLS is
+terminated at the relay's edge; the join token / knock approval is still the real gate, and
+`/token` rotation changes only the credential inside the URL.
+
+A relay child that dies **is restarted** — 1 s doubling to 30 s, forever — and the new URL
+flows out on its own. With `--tunnel` that URL is a NEW random hostname, so anybody already
+connected on the old one has to be sent the new line (`/join` reprints it); their client says
+as much after five failed reconnects. With `--funnel` the hostname is unchanged, so nobody has
+to be told anything.
 
 ## Client commands (everyone)
 
@@ -190,7 +205,9 @@ Any other `/command` is one of yours — see Slash commands above.
 `--config-dir <dir>` run under another claude profile (e.g. `~/.claude3`) · `--resume <uuid>`
 continue an existing conversation · `--tmux <name>` a second jam · `--view` browser view (needs
 ttyd) · `--no-popup` no tmux knock popup · `--no-token-in-context` don't tell you the token ·
-`--tunnel` two Cloudflare quick tunnels · `--no-attach` set everything up without opening the
+`--tunnel` two Cloudflare quick tunnels · `--funnel` Tailscale Funnel instead, with a stable
+URL (`--funnel-cli <path>` if the CLI is not on PATH — on macOS it lives inside
+Tailscale.app) · `--no-attach` set everything up without opening the
 host's client · `-- <args>` passed to claude (e.g. `-- --model haiku`).
 Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `--no-view`.
 
@@ -217,6 +234,15 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   the single keys are armed only on an empty line, and Esc re-arms them. A guest never has them.
 - F2, Shift+Enter or the live view do nothing → they are running `--basic`, which is
   transcript-only. Drop the flag.
+- A guest keeps seeing "still retrying — the join URL changed" → it probably did. The host's
+  `--tunnel` relay restarted and Cloudflare handed out a fresh random hostname; the host runs
+  `/join` and sends the new line. `--funnel` does not have this problem.
+- `--funnel cannot start: …` → the message names the one thing that is missing. Funnel needs a
+  `funnel` node attribute granted for the tailnet in Access Controls, a connected Tailscale,
+  and a CLI jam can actually reach (`--funnel-cli <path>`). On macOS the App Store build of
+  Tailscale.app cannot change funnel config at all — its CLI replies `The Tailscale GUI failed
+  to start … (Tailscale.CLIError error 3.)`; the standalone build from tailscale.com can.
+  `--tunnel` is always available as the fallback.
 - Their screen looks cropped or half empty → their terminal is smaller than the host's window;
   the dim `— mirror:` line says how much was cut. The host's own client keeps the window sized
   to their terminal, so a guest with a bigger terminal simply sees blank space.

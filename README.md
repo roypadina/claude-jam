@@ -20,6 +20,7 @@ message**. Humans also get a side channel the agent never sees.
 
 - node ≥ 22, tmux, and the `claude` CLI on PATH
 - optional: `ttyd` for the browser view (`--view`), `cloudflared` for `--tunnel`,
+  `tailscale` for `--funnel`,
   `pngpaste` for `/paste` (macOS falls back to `osascript`)
 
 macOS and Linux. No Windows.
@@ -67,7 +68,7 @@ Closing your client kills nothing — the daemon, the TUI and every guest stay w
 and the launcher prints how to rejoin (`tmux kill-session -t jam` is how you actually stop).
 
 Useful flags: `--port`, `--tmux <name>` (a second jam), `--token <value>`, `--view`,
-`--tunnel`, `--resume <session-id>` (continue an existing session), `--config-dir <dir>` (run
+`--tunnel`, `--funnel`, `--resume <session-id>` (continue an existing session), `--config-dir <dir>` (run
 the TUI as another claude profile), `--no-attach`, `--no-token-in-context`, `--no-popup`,
 `-- <extra claude args>`. `jam` with no arguments prints the usage line; `MANUAL.md` explains
 the ones you will actually reach for.
@@ -86,7 +87,7 @@ as `[Dana]: …`; `/c <text>` is human-only chat; **F2** flips to the transcript
 reprints the onboarding block. `--basic` swaps ink for a plain readline client (transcript
 only, no live view, no F2/F3) and is picked automatically when stdin is not a tty.
 
-## Access: token, knock, tunnel
+## Access: token, knock, tunnel, funnel
 
 Three ways to let someone in. All of them end in the same welcome.
 
@@ -95,6 +96,7 @@ Three ways to let someone in. All of them end in the same welcome.
 | **token** | `--token <value>` at startup (8–64 chars of `[A-Za-z0-9_-]`), or `/token set` later. One shared secret; anyone holding it joins immediately | whoever has the string |
 | **knock** | no token at all. The guest connects without one, sees `waiting for host approval…`, the host gets `⚑ Dana wants to join (100.86.8.97)` and answers `/accept Dana` | the host, per person |
 | **tunnel** | `--tunnel` spawns two Cloudflare quick tunnels (needs `cloudflared`) and prints `wss://<words>.trycloudflare.com` join/view URLs — for a friend who is not on your LAN or tailnet | still the token or the knock; the tunnel only moves the bytes |
+| **funnel** | `--funnel` runs Tailscale Funnel instead (needs `tailscale`, and Funnel enabled for the tailnet). Same job, but the URL is your node's own name — `wss://<machine>.<tailnet>.ts.net` and `https://…:8443` for the view — so it is the **same every run**, unlike a quick tunnel's random words. Your guest still installs nothing | as above; mutually exclusive with `--tunnel` |
 
 Rotating a token (`/token new` / `set` / `off`) never disconnects anyone already in — the token
 is checked at join time only. A *wrong* token knocks, so rotating strands nobody. Knocks expire
@@ -161,9 +163,9 @@ and no polling at all with nobody watching — capped at 25 frames a second per 
 unchanged screen still sending nothing. Everything a guest can send is either sanitized (messages,
 chat, captions) or gated (commands, keys, resize, transfers).
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **143 tests**. Seven
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **159 tests**. Eight
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
-in `SPEC.md`.
+in `SPEC.md` (`smoke-transport.mjs` brings its own).
 
 ## Known ceilings (deliberate)
 
@@ -191,7 +193,18 @@ in `SPEC.md`.
   restart.
 - A transfer is held whole in memory at both ends and has no resume; uploads cap at 20 MB, the
   transcript and offers at 50 MB.
-- `--tunnel` does not auto-restart a dead `cloudflared`; restart the host with `--tunnel`.
+- A dead relay child (`cloudflared`, `tailscale funnel`) IS restarted now, 1s doubling to 30s,
+  forever — but a cloudflared respawn hands out a **new random hostname**, so guests on the old
+  URL have to be sent the new join line (`/join`). Their client says so after five failed
+  reconnects. `--funnel`'s hostname is stable, which is the reason it exists.
+- Sockets are pinged every 30 s and a peer that misses a round is dropped, so a half-dead
+  client no longer holds its name in the roster. That is also what keeps a quiet session under
+  Cloudflare's 100 s WebSocket idle cap; nothing here has been proven over a full two hours yet.
+- `--funnel` is **unverified end to end**: it is implemented, tested and its startup check is
+  real, but Funnel is not enabled on the tailnet it was written against (an admin adds a
+  `funnel` node attribute in Access Controls), and the macOS App Store build of Tailscale.app
+  cannot change funnel config at all — its CLI answers `The Tailscale GUI failed to start …
+  (Tailscale.CLIError error 3.)`. Use the standalone build from tailscale.com.
 - The live view, tool collapse, F2/F3 and the newline keys are ink-only — `--basic` is a
   transcript-only client.
 - No rate limiting, no web client, one session per host, no Windows.

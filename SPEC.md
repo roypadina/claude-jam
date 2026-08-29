@@ -724,10 +724,10 @@ The public README keeps a short list. This is all of them.
   while claude is still booting still lands.
 
 
-## Running the seven end-to-end smokes
+## Running the eight end-to-end smokes
 
-Seven end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
-ttyd 1.7.7. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
+Eight end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
+ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
 ```sh
@@ -758,6 +758,12 @@ tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
 node scripts/smoke-knock.mjs ws://127.0.0.1:7799
 tmux kill-session -t jamtest; tmux kill-session -t jamdrive
 rm -rf "$TMPDIR/claude-jam-7799"
+
+# v0.17: the transport smoke takes NO arguments and needs no daemon of yours. It starts and
+# kills its own on 7811/7813 (no tmux session, no claude at all), because it needs a
+# --heartbeat far shorter than a real run and it deliberately kills relay children.
+# ~2 min; needs cloudflared on PATH for its T1 steps.
+node scripts/smoke-transport.mjs
 ```
 
 ## v0.15 — native-speed host TUI control + faster frames (Roy: F3 typing feels remote)
@@ -838,6 +844,61 @@ Ship in the batches below; each item keeps its RESEARCH.md id for traceability.
   `tailscale status` and prints a clear hint if Funnel is not enabled for the tailnet.
   Flags: `--tunnel` (cloudflared, ephemeral URL) and `--funnel` (Tailscale, stable URL);
   mutually exclusive, both optional.
+
+#### Batch T — shipped 2026-08-29
+
+All four, plus `scripts/smoke-transport.mjs` (13 steps) and 16 unit tests — 159 total.
+
+- **One relay path, not two.** cloudflared and `tailscale funnel` differ only in argv and in
+  which line carries the hostname, so `RELAYS` in host.mjs holds exactly that and
+  `spawnRelay()` owns the pid tracking, the URL propagation and T1's backoff for both. Both
+  stdout and stderr are piped and fed into one buffer: cloudflared banners on stderr,
+  `tailscale funnel` on stdout.
+- **T1** `respawnDelay(attempt)` = `min(1000 * 2**(attempt-1), 30000)`, unlimited attempts,
+  counter reset the moment a URL resolves — so a relay that ran an hour waits 1 s, not 30. Our
+  own `stopTunnels()` sets `relayStopping` first, so shutdown is not a death to recover from.
+  A relay that dies without ever resolving now logs the tail of what it said, which is the only
+  diagnosis available for a blocked cloudflared or a sandboxed Tailscale.
+  No new frame: `onTunnelChange()` already fed `writeTokenFile()` + `printJoin()` +
+  `sendHosts({t:'token'})`, which is how `/token` rotation has always worked.
+- **T2** `startHeartbeat()` runs `heartbeatSweep()` over `wss.clients` every 30 s
+  (`--heartbeat <ms>` for tests), pings whoever pongd since the last tick and `terminate()`s
+  whoever did not. `ws.jamAlive` is the flag; `ws.on('pong')` clears it. `terminate()` fires
+  `close`, so the existing handler does the roster/mirror/ladder cleanup — nothing duplicated.
+  Clients needed NO change: the browser-standard `WebSocket` they all use answers protocol
+  pings itself and gives the application no say in it.
+- **T3** a per-client counter, reset on a socket that actually opened, and
+  `reconnectMessage(attempts, nextMs)`. Both clients. The first four failures keep the old
+  wording exactly; the fifth (~15 s of 1-2-4-8 backoff) names the URL change and points at
+  `/join`.
+- **T4** the shape that made this cheap: a funnel host string (`<machine>.<tailnet>.ts.net`,
+  or `…:8443`) is a drop-in for a trycloudflare one, so it fills the same `tunnelHosts` slots
+  and every join line, `token.json` field, welcome block and `/join` reprint works unchanged —
+  including the `tunnel invite:` / `tunnel view:` labels, which are shared on purpose (the
+  `.ts.net` in the URL is what tells them apart).
+  **Two ports, not `--set-path`:** Funnel opens only 443, 8443 and 10000, and a path mount
+  would also have to agree with the daemon's own `/health`, `/admit` and `/hook/*` routes.
+  443 → the client (so the join line carries no port), 8443 → the ttyd view.
+  **Foreground, not `--bg`:** the funnel then lives and dies with a pid we track, which is
+  cloudflared's lifecycle exactly, respawn included. Shutdown additionally runs
+  `funnel --https=<port> off` for the two ports it opened — belt and braces, because a funnel
+  left open is a port on the public internet — and never `funnel reset`, which would drop
+  config this daemon never created.
+  `resolveTailscale()` exists because macOS keeps the CLI inside `Tailscale.app` and puts
+  nothing on PATH; `--funnel-cli` / `JAM_TAILSCALE` override it.
+  **The live path is UNVERIFIED, and the reasons are hard blockers, not oversights:**
+  (1) the tailnet it was written against has no `funnel` node attribute — `Self.CapMap` in
+  `tailscale status --json` lacks `https://tailscale.com/cap/funnel`, which is what
+  `funnelPrecheck()` reads and refuses on; a tailnet admin grants it in Access Controls with
+  `"nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]`.
+  (2) that machine runs the App Store (sandboxed, `_MASReceipt`, bundle id
+  `io.tailscale.ipn.macos`) build of Tailscale 1.102.3, whose CLI answers EVERY serve/funnel
+  mutation — `funnel`, and plain tailnet-only `serve` too — with `The Tailscale GUI failed to
+  start: The operation couldn't be completed. (Tailscale.CLIError error 3.)`, while read-only
+  `status` / `funnel status` work fine. The standalone build from tailscale.com is needed.
+  So the lifecycle is proved in `smoke-transport.mjs` against a stub CLI that answers exactly
+  as the real one documents (argv, foreground banner, `off`), and the precheck refusal is
+  asserted against the REAL CLI. Our half of the contract is verified; Tailscale's is not.
 
 ### Batch H — history and orientation
 - **H1 (B1)** seed the `history` ring buffer at daemon boot by parsing the existing session
