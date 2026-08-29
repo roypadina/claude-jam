@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a guest on the far side of `--tunnel` was the host (security)
+
+`host: true` in a hello was honoured on the strength of the socket's address alone, and the
+daemon's `trusted()` gate — F3 raw keystrokes into the real TUI, `/end`, `/kick`, `/invite`,
+`/remote`, `/announce`, `/grants` and the browser view — is that same address plus the host flag.
+But every relay claude-jam offers proxies to loopback: cloudflared is run as
+`tunnel --url http://localhost:<port>`, so a socket that crossed the public internet reaches the
+daemon from `127.0.0.1`, indistinguishable by address from the client the launcher spawned.
+
+With `--tunnel` up, anybody holding the public URL was therefore the host. Reproduced 2026-08-30
+on cloudflared 2026.8.2, end to end: a stranger sending `{host: true}` and **no token** was
+admitted with no knock and no approval, was handed the join token, the cwd and the tmux session
+name in the `welcome` frame, typed keystrokes that landed in the real pane, and ended the jam for
+everybody with `t: 'end'`.
+
+The address is now only half the question. `localSocket()` in `lib.mjs` asks the other half — was
+there a proxy in front of this connection — from the upgrade headers, which a relay cannot hide:
+a real relayed upgrade carries `x-forwarded-for`, `cf-connecting-ip`, `cf-ray`, `cdn-loop` and
+`x-forwarded-proto`, and a client that really is on this machine carries none of them. The test
+fails **closed**: any one of them present means "not local", whoever put it there. It is applied
+to the WS admission path and to all six loopback-gated HTTP endpoints.
+
+Unchanged: the host's own client (still fully trusted), an ordinary guest over the relay with the
+token (still admitted, still a guest), and a LAN guest (never had this problem — a LAN socket
+arrives on its own address). A relayed client that claims `host: true` now simply knocks.
+
+**Known limit:** this is verified against cloudflared. Tailscale Funnel is still unverified —
+Funnel is not enabled on this tailnet — so whether a Funnel-relayed upgrade carries any of these
+headers is **not known**. The transport-independent fix is a second factor on `host: true` (the
+0700-dir hook secret the HTTP endpoints already require); that is a wire-protocol change and is
+Roy's call. Until it is made, `--funnel` must not be recommended.
+
+
 ## 0.21.0
 
 Two feature batches, and both of them are about a boundary rather than a screen.

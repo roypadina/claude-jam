@@ -139,6 +139,13 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   `--basic` client (the half that spawns), and the key decisions are unit-tested through
   `peerKeyAction`, but nobody has LOOKED at the ink rendering. Prove: a pty run in the campaign,
   in the style of `smoke-scroll`'s real ink guest.
+- 2026-08-30 · **CAMPAIGN** `--funnel`'s trust boundary is UNVERIFIED in a second, new way. The
+  campaign found and fixed a hole where every relayed socket reached the daemon from 127.0.0.1
+  and so was treated as the host (see the campaign section below); the fix reads the upgrade
+  headers a proxy adds, and it is measured against cloudflared only. Whether `tailscale funnel`
+  adds `x-forwarded-for`/`cf-*`-style headers is not known, so `--funnel` may still be exposed.
+  Prove: one Funnel upgrade captured and its headers read — or adopt the transport-independent
+  fix (a second factor on `host: true`).
 - 2026-08-29 · `--funnel` carries a known UPSTREAM risk, not merely an unverified path:
   tailscale/tailscale#18827 (filed 2026-02-27, open) reports WebSockets through `tailscale
   serve`'s HTTP reverse proxy — the same layer Funnel rides — closing every 10–40 s with code
@@ -147,3 +154,24 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   docs. Until then it is a stable-URL convenience with an unproven long-session story, and the
   docs must not imply otherwise.
 
+
+## The 2026-08-30 campaign
+
+The end-game campaign of the section above, run overnight on 2026-08-30. Node 24.15 / tmux 3.7c /
+claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2, from a verified-clean machine state (no live
+tmux server on any socket, no jam daemon anywhere).
+
+### What it found
+
+- **A guest on the far side of `--tunnel` was the host.** The whole `trusted()` gate — F3 raw
+  keys, `/end`, `/kick`, `/invite`, `/remote`, `/announce`, `/grants`, the browser view — plus
+  `host: true` itself rested on the socket's address, and every relay proxies to loopback. A
+  stranger with only the public URL and **no token** was admitted as host, handed the join token,
+  typed into the real pane and ended the jam. Fixed: `localSocket()` in `lib.mjs`, applied to the
+  WS admission path and all six loopback-gated HTTP endpoints, with five unit tests. Verified
+  after the fix: the stranger knocks, a token-holding relay guest is still an ordinary guest, and
+  the host's own loopback client is unchanged.
+
+### Deferrals this campaign closes, and the ones it opens
+
+Struck-through entries above are discharged. New ones are appended above in date order.
