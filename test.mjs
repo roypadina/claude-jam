@@ -33,7 +33,10 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   parseInvitesFile, checkInvite, inviteRefusal, resolveInvites, inviteLeft, inviteState,
   invitesReport, inviteMintedLines, parseDuration, parseInviteCommand, INVITE_USAGE,
   // v0.22C: /kick.
-  KICK_CODE, resolveKick, parseKickCommand, kickOffer } from './lib.mjs';
+  KICK_CODE, resolveKick, parseKickCommand, kickOffer,
+  // v0.20: jam's own tmux server, the F3 that comes back out, and the way home on the status line.
+  TMUX_SOCKET_PREFIX, TMUX_DEFAULT_SOCKET, tmuxSocketFor, tmuxSocketArgs, tmuxAttachLine,
+  F3_BIND_ARGS, STATUS_RIGHT_HOME, statusRightText } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -2519,7 +2522,7 @@ test('v0.18-2 --json carries the facts a script needs, including what clean woul
   ];
   const j = sessionsJson(rows, now);
   assert.equal(j.length, 2);
-  assert.deepEqual(j[0], { name: 'jamtest', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, uptimeMs: 5000, participants: ['Roy'], view: false, tunnel: false, state_dir: '/tmp/claude-jam-7799', cleanable: false });
+  assert.deepEqual(j[0], { name: 'jamtest', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, uptimeMs: 5000, participants: ['Roy'], view: false, tunnel: false, socket: 'default', state_dir: '/tmp/claude-jam-7799', cleanable: false });
   assert.equal(j[1].cleanable, true, 'the orphan is the only thing clean may remove');
   assert.equal(j[1].uptimeMs, null);
   // It has to survive JSON.stringify unchanged — that is the whole point of --json.
@@ -2781,4 +2784,78 @@ test('v0.22C /kick parses its optional one-shot revoke, and offers it otherwise'
   assert.match(kickOffer('Yossi', 'invite'), /revoke their invite link.*\[y\/N\]/);
   assert.match(kickOffer('Yossi', 'knock'), /no link to revoke/);
   assert.match(kickOffer('Yossi', 'token'), /no link to revoke/);
+});
+
+// ============================================================ v0.20: jam's own tmux server ====
+
+test('v0.20 the socket is named per port, and an override has to look like a socket name', () => {
+  assert.equal(tmuxSocketFor(7777), 'claude-jam-7777');
+  assert.equal(tmuxSocketFor(7861), `${TMUX_SOCKET_PREFIX}7861`);
+  assert.equal(tmuxSocketFor(7777, 'default'), 'default', 'the documented escape hatch');
+  assert.equal(tmuxSocketFor(7777, 'mine'), 'mine');
+  // A socket name becomes a filename under tmux's own directory, so nothing that could be a path
+  // or an argument gets through — it falls back to the per-port name rather than being obeyed.
+  for (const bad of ['../../etc/passwd', '/tmp/x', 'a b', 'a;b', '-L', '', '   ', 'x'.repeat(65), null, 42]) {
+    assert.equal(tmuxSocketFor(7777, bad), 'claude-jam-7777', JSON.stringify(bad));
+  }
+});
+
+test('v0.20 every tmux call carries -L, and `-L default` IS the shared server', () => {
+  assert.deepEqual(tmuxSocketArgs('claude-jam-7777'), ['-L', 'claude-jam-7777']);
+  // Verified on tmux 3.7c: `-L default` resolves to the same /tmp/tmux-<uid>/default socket as no
+  // flag at all, so the escape hatch needs no special case in the argv builder.
+  assert.deepEqual(tmuxSocketArgs('default'), ['-L', 'default']);
+  assert.deepEqual(tmuxSocketArgs(null), ['-L', TMUX_DEFAULT_SOCKET]);
+  assert.deepEqual(tmuxSocketArgs(undefined), ['-L', TMUX_DEFAULT_SOCKET]);
+});
+
+test('v0.20 the printed attach line carries the socket — and drops it on the default server', () => {
+  assert.equal(tmuxAttachLine('claude-jam-7777', 'jam'), 'tmux -L claude-jam-7777 attach -t jam');
+  assert.equal(tmuxAttachLine('claude-jam-7777', 'jam', 'jam:claude'),
+    'tmux -L claude-jam-7777 attach -t jam:claude');
+  // On the shared server it is the line people already know.
+  assert.equal(tmuxAttachLine('default', 'jam'), 'tmux attach -t jam');
+  assert.equal(tmuxAttachLine(null, 'jam'), 'tmux attach -t jam');
+  // And it is what `jam sessions` and the "keep it running" message print, so they cannot drift.
+  const lines = reattachLines({ tmux: 'jamtest', port: 7799, socket: 'claude-jam-7799' });
+  assert.match(lines.join('\n'), /raw TUI: tmux -L claude-jam-7799 attach -t jamtest:claude/);
+  assert.match(reattachLines({ tmux: 'jam', port: 7777 }).join('\n'), /raw TUI: tmux attach -t jam:claude/);
+  const table = sessionsTable([{ name: 'jamtest', state: 'live', port: 7799, socket: 'claude-jam-7799', participants: [], dir: '/tmp/claude-jam-7799' }], 0);
+  assert.match(table, /raw TUI: tmux -L claude-jam-7799 attach -t jamtest:claude/);
+});
+
+test('v0.20 F3 is bound in the root table, which is only safe on jam\'s own server', () => {
+  assert.deepEqual(F3_BIND_ARGS, ['bind-key', '-T', 'root', 'F3', 'detach-client']);
+  // -T root is what makes it a bare key rather than a prefixed one. If that ever moves, the
+  // comment about server-global key tables has to move with it.
+  assert.ok(F3_BIND_ARGS.includes('root'));
+});
+
+test('v0.20 the waiting badge still wins over the way home', () => {
+  assert.equal(statusRightText(0), STATUS_RIGHT_HOME);
+  assert.match(STATUS_RIGHT_HOME, /F3 or Ctrl-b d/);
+  assert.equal(statusRightText(1), '⚑ 1 waiting', 'a pending request is the more urgent thing to say');
+  assert.equal(statusRightText(3), '⚑ 3 waiting');
+  // `--tmux-socket default` leaves F3 unbound, so it must not promise F3 — and with nothing
+  // pending it goes back to leaving the status line alone entirely.
+  assert.equal(statusRightText(0, { home: false }), null);
+  assert.equal(statusRightText(2, { home: false }), '⚑ 2 waiting');
+});
+
+test('v0.20 session.json names its socket, and a pre-v0.20 file means the default server', () => {
+  const info = sessionInfo({ tmux: 'jam', port: 7777, viewPort: 7778, cwd: '/p', sessionId: 'sid',
+    createdAt: 1, pid: 2, state: '/tmp/claude-jam-7777', socket: 'claude-jam-7777' });
+  assert.equal(info.socket, 'claude-jam-7777');
+  assert.equal(parseSessionJson(JSON.stringify(info)).socket, 'claude-jam-7777');
+  // A file written before v0.20 has no socket field, and it meant the shared server.
+  const old = { ...info };
+  delete old.socket;
+  assert.equal(parseSessionJson(JSON.stringify(old)).socket, TMUX_DEFAULT_SOCKET);
+  // And a socket that is not a socket name is refused into the default rather than obeyed.
+  for (const bad of ['../x', '/tmp/y', 'a b', 42, null]) {
+    assert.equal(parseSessionJson(JSON.stringify({ ...info, socket: bad })).socket, TMUX_DEFAULT_SOCKET, JSON.stringify(bad));
+  }
+  // sessionInfo defaults to the shared server, so a caller that forgets is not silently wrong
+  // about which server it may kill on.
+  assert.equal(sessionInfo({ tmux: 'jam', port: 7777, state: '/s' }).socket, TMUX_DEFAULT_SOCKET);
 });

@@ -28,6 +28,9 @@ const ROOT = path.dirname(HERE);
 const HOST_MJS = path.join(ROOT, 'host.mjs');
 const CLIENT_MJS = path.join(ROOT, 'client.mjs');
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
+// v0.20: jam runs its own tmux server, so the stand-in `claude` window and both daemons have to
+// agree on which one. One socket of this smoke's own, passed to each daemon as --tmux-socket.
+const SOCKET = 'jamreplaysock';
 const TOKEN = 'replaysmoketoken';
 // Ports and session names of this smoke's own: clear of jam's 7777, the shared smokes' 7799/7801
 // and smoke-transport's 7811-7819.
@@ -39,7 +42,7 @@ const SESSION_ID = '11111111-2222-4333-8444-555555555555';
 const FAKE_KEY = 'AKIAIOSFODNN7EXAMPLE';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const tmux = (...a) => spawnSync(TMUX, a, { encoding: 'utf8' });
+const tmux = (...a) => spawnSync(TMUX, ['-L', SOCKET, ...a], { encoding: 'utf8' });
 const pane = (t) => (tmux('capture-pane', '-p', '-t', t).stdout || '').replace(/\n+$/, '');
 const back = (t) => (tmux('capture-pane', '-p', '-S', '-600', '-t', t).stdout || '').replace(/\n+$/, '');
 const rows = (t) => pane(t).split('\n');
@@ -163,7 +166,7 @@ const bornPane = tmux('new-session', '-d', '-s', PANE_SESSION, '-x', '100', '-y'
 if (bornPane.status !== 0) { console.error(`tmux: ${bornPane.stderr}`); process.exit(1); }
 
 const main = await daemon('main', ['--port', String(P.main), '--resume', SESSION_ID,
-  '--config-dir', cfg, '--cwd', repo, '--tmux', PANE_SESSION]);
+  '--config-dir', cfg, '--cwd', repo, '--tmux', PANE_SESSION, '--tmux-socket', SOCKET]);
 
 let history = [];
 const guest = peer(`ws://127.0.0.1:${P.main}`, 'Guest');
@@ -350,7 +353,7 @@ try {
 {
   const nonRepo = mktmp('norepo');
   const d = await daemon('capped', ['--port', String(P.capped), '--resume', SESSION_ID,
-    '--config-dir', cfg, '--cwd', nonRepo, '--tmux', PANE_SESSION, '--replay', '2']);
+    '--config-dir', cfg, '--cwd', nonRepo, '--tmux', PANE_SESSION, '--tmux-socket', SOCKET, '--replay', '2']);
   const p = peer(`ws://127.0.0.1:${P.capped}`, 'Capped');
 
   await step('H1 --replay 2 keeps the NEWEST two events and nothing else', async () => {

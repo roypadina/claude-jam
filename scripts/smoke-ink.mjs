@@ -21,10 +21,15 @@ if (!url || !token || !hostSession) {
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const CLIENT = path.join(HERE, '..', 'client.mjs');
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
+// v0.20: jam's tmux lives on a socket of its own, named per port. `JAM_SOCKET` overrides it for
+// a host started with `--tmux-socket <name>`.
+const SOCKET = process.env.JAM_SOCKET || `claude-jam-${new URL(url).port || 7777}`;
+const TMUX_ARGS = ['-L', SOCKET];
+
 // Our own session, created and killed by this script — never the host's.
 const PEER_SESSION = 'jaminksmoke';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const tmux = (...a) => spawnSync(TMUX, a, { encoding: 'utf8' });
+const tmux = (...a) => spawnSync(TMUX, [...TMUX_ARGS, ...a], { encoding: 'utf8' });
 const pane = (target) => (tmux('capture-pane', '-p', '-t', target).stdout || '').replace(/\n+$/, '');
 const rows = (target) => pane(target).split('\n');
 // Scrollback: v0.14 prints the connect block above a full-screen mirror, so the welcome and

@@ -33,7 +33,9 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   endingNotice, confirmYes,
   // v0.22B/C: invite links (the address list a link carries, and what a minted one prints) and
   // the offer that follows a kick.
-  INVITE_CONNECT_MS, inviteMintedLines, kickOffer } from './lib.mjs';
+  INVITE_CONNECT_MS, inviteMintedLines, kickOffer,
+  // v0.20: jam's tmux lives on its own socket, so F3's attach has to name it.
+  tmuxSocketArgs, TMUX_DEFAULT_SOCKET, tmuxAttachLine } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
@@ -52,7 +54,8 @@ const URLS = (flag('jam-addresses') || '').split(',').map((s) => s.trim()).filte
 let addr = 0;
 // No --token is normal now: the host may run knock-only, and then you wait to be accepted.
 if (!url || !NAME) {
-  console.error('usage: jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host] [--basic]');
+  console.error('usage: jam join <invite-link>\n'
+    + '       jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host] [--basic]');
   process.exit(2);
 }
 
@@ -70,6 +73,9 @@ const C = {
 const fg256 = (n) => `ansi256(${n})`; // everybody else's stable per-name color (userColor)
 const SPIN = ['✻', '✼', '✽', '✼']; // claude's own working glyph cycle
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux'; // v0.15: F3 attaches with this
+// v0.20: which tmux server it attaches to — the welcome names it (host clients only). A daemon
+// from before v0.20 names none, and then it is the shared server, exactly as it was.
+let SOCKET = TMUX_DEFAULT_SOCKET;
 // v0.15: how long a locally-echoed line stays under the mirror. The daemon's own broadcast of
 // it normally clears it within a round trip; this is only the floor for a socket that died.
 const ECHO_TTL = 5000;
@@ -487,6 +493,7 @@ function connect() {
     try { ev = JSON.parse(m.data); } catch { return; }
     if (ev.t === 'welcome') {
       store.session = ev.session;
+      if (ev.session?.tmuxSocket) SOCKET = ev.session.tmuxSocket;
       store.roster = ev.roster;
       store.labelW = labelWidth(ev.roster); // set before the replay, so history aligns
       toTranscript++; // the whole connect block goes on screen, mirror view or not
@@ -607,7 +614,10 @@ function runAttach(session) {
     delete env.TMUX;
     // The claude window by name, not the session's current one — a bare `attach` lands on
     // window 0, the daemon's log, which is not what F3 is for.
-    const child = spawn(TMUX, ['attach', '-t', claudeTarget(session)], { stdio: 'inherit', env });
+    // v0.20: `-L <socket>` — jam's own tmux server, named in the welcome. A daemon that predates
+    // v0.20 sends none, and then it is the shared server, which is where it used to be.
+    const child = spawn(TMUX, [...tmuxSocketArgs(SOCKET), 'attach', '-t', claudeTarget(session)],
+      { stdio: 'inherit', env });
     let over = false;
     const finish = (problem) => {
       if (over) return;
@@ -627,8 +637,8 @@ function runAttach(session) {
       if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'mirror', on: store.mirror }));
       done();
     };
-    child.on('error', (e) => finish(`could not attach to tmux ${claudeTarget(session)}: ${e.message}`));
-    child.on('exit', (code) => finish(code ? `tmux attach -t ${claudeTarget(session)} exited ${code}` : null));
+    child.on('error', (e) => finish(`could not run ${tmuxAttachLine(SOCKET, session, claudeTarget(session))}: ${e.message}`));
+    child.on('exit', (code) => finish(code ? `${tmuxAttachLine(SOCKET, session, claudeTarget(session))} exited ${code}` : null));
   });
 }
 
@@ -962,7 +972,10 @@ function StatusBar({ status, typing, spin, mirror, passthrough, net }) {
   // names the way back, which is tmux's, not jam's. Guests are told who to wait for instead.
   // v0.17 P2: a guest is no longer only a spectator here — `/answer` shows them the options and
   // offers one to the host — so the row says that instead of "wait for somebody else".
-  const waiting = `⚠ waiting for permission${IS_HOST ? ' — F3 attaches the TUI (Ctrl-b d back)' : ' — /answer shows the options'}`;
+  // v0.20: F3 is bound to detach-client on jam's own tmux server, so the key that goes in is
+  // also the key that comes out. Ctrl-b d still works and stays named for anyone whose host runs
+  // with `--tmux-socket default`, where the bare binding is deliberately skipped.
+  const waiting = `⚠ waiting for permission${IS_HOST ? ' — F3 attaches the TUI (F3 or Ctrl-b d back)' : ' — /answer shows the options'}`;
   return h(Box, { minHeight: 1 },
     h(Box, { flexGrow: 1 },
       passthrough

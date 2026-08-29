@@ -16,6 +16,10 @@ if (!url || !session || !port || !secret) {
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const POPUP = path.join(HERE, '..', 'popup.mjs');
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
+// v0.20: jam's tmux lives on a socket of its own, named per port. `JAM_SOCKET` overrides it for
+// a host started with `--tmux-socket <name>`.
+const SOCKET = process.env.JAM_SOCKET || `claude-jam-${port}`;
+const TMUX_ARGS = ['-L', SOCKET];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // A knocker: hello on open, every frame kept so a step can assert on frames that arrived
@@ -40,10 +44,10 @@ function peer(hello) {
 }
 
 const statusRight = () =>
-  (spawnSync(TMUX, ['show-options', '-t', session, '-v', 'status-right'], { encoding: 'utf8' }).stdout || '').trim();
+  (spawnSync(TMUX, [...TMUX_ARGS, 'show-options', '-t', session, '-v', 'status-right'], { encoding: 'utf8' }).stdout || '').trim();
 // The daemon's own log lives in the `daemon` tmux window, scrollback included.
 const daemonLog = () =>
-  spawnSync(TMUX, ['capture-pane', '-p', '-S', '-400', '-t', `${session}:daemon`], { encoding: 'utf8' }).stdout || '';
+  spawnSync(TMUX, [...TMUX_ARGS, 'capture-pane', '-p', '-S', '-400', '-t', `${session}:daemon`], { encoding: 'utf8' }).stdout || '';
 
 async function until(what, pred, ms = 6000) {
   for (const deadline = Date.now() + ms; Date.now() < deadline;) {

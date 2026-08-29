@@ -26,10 +26,16 @@ import { OWNED_OPTION, SESSION_FILE, portFromStateDir, parseSessionJson, verifyO
   cleanable, resolveTarget, pickNumber, confirmYes, uptimeText, sessionsTable, sessionsJson,
   // v0.22B: the invite CLI is this file too — it needs exactly what `jam end` needs (find the
   // jam, POST to it on loopback with the secret out of its 0700 state dir).
-  parseInviteCommand, invitesReport, inviteMintedLines, inviteRecord } from './lib.mjs';
+  parseInviteCommand, invitesReport, inviteMintedLines, inviteRecord,
+  // v0.20: jam's tmux lives on a socket of its own, so every call here is per-socket. A row
+  // whose session.json names none is a pre-v0.20 jam on the default server.
+  tmuxSocketArgs, TMUX_DEFAULT_SOCKET } from './lib.mjs';
 
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
-export const tmux = (...a) => spawnSync(TMUX, a, { encoding: 'utf8' });
+// v0.20: the socket is part of the target. It is a REQUIRED argument in spirit — every caller
+// knows which jam it is asking about — and defaults to the shared server only so a session.json
+// written before v0.20 keeps resolving.
+export const tmux = (socket, ...a) => spawnSync(TMUX, [...tmuxSocketArgs(socket), ...a], { encoding: 'utf8' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // tmux target-session resolution is exact → prefix → fnmatch, so a bare name can land on a
@@ -37,10 +43,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 3.7c: has-session and kill-session honour the prefix, `show-options -t` does NOT (it answers
 // `no such session: =jam`) — so the marker is read with a plain target, always after
 // hasSession() has proved the exact name exists, and verifyOwned re-checks the name anyway.
-export const hasSession = (name) => !!name && tmux('has-session', '-t', `=${name}`).status === 0;
+export const hasSession = (name, socket = TMUX_DEFAULT_SOCKET) =>
+  !!name && tmux(socket, 'has-session', '-t', `=${name}`).status === 0;
 
-export function sessionMarker(name) {
-  const r = tmux('show-options', '-t', name, '-v', OWNED_OPTION);
+export function sessionMarker(name, socket = TMUX_DEFAULT_SOCKET) {
+  const r = tmux(socket, 'show-options', '-t', name, '-v', OWNED_OPTION);
   if (r.status !== 0) return null;
   const v = (r.stdout || '').replace(/\n$/, '').trim();
   return v || null;
@@ -53,11 +60,12 @@ export function readSessionFile(dir) {
 
 // The one question every destructive path asks: is this tmux session jam's own? Returns
 // verifyOwned's verdict, or a `missing` refusal when there is no such session at all.
-export function ownedSession(name) {
-  if (!hasSession(name)) {
-    return { ok: false, missing: true, why: `there is no tmux session called "${name}"` };
+export function ownedSession(name, socket = TMUX_DEFAULT_SOCKET) {
+  if (!hasSession(name, socket)) {
+    return { ok: false, missing: true, why: `there is no tmux session called "${name}"`
+      + `${socket === TMUX_DEFAULT_SOCKET ? '' : ` on tmux socket ${socket}`}` };
   }
-  const marker = sessionMarker(name);
+  const marker = sessionMarker(name, socket);
   return verifyOwned(name, marker, readSessionFile(marker));
 }
 
@@ -67,11 +75,17 @@ export function ownedSession(name) {
 // `verdict` is for the one caller that has to verify a moment earlier — the daemon killing its
 // OWN session, which cannot re-read a state dir it is about to remove; it passes the verdict it
 // just took, and nothing else may.
-export function killOwned(name, verdict = null) {
-  const v = verdict || ownedSession(name);
+export function killOwned(name, socket = TMUX_DEFAULT_SOCKET, verdict = null) {
+  const v = verdict || ownedSession(name, socket);
   if (!v.ok) return { ok: false, why: v.why };
   if (v.info?.tmux !== name) return { ok: false, why: `verdict is for "${v.info?.tmux}", not "${name}"` };
-  const r = tmux('kill-session', '-t', `=${name}`);
+  // v0.20: and the socket has to be the one the pair named, or this is a different server's
+  // session that happens to share a name.
+  if ((v.info?.socket || TMUX_DEFAULT_SOCKET) !== socket) {
+    return { ok: false, why: `${SESSION_FILE} says "${name}" lives on tmux socket `
+      + `${v.info?.socket}, not ${socket} — refusing` };
+  }
+  const r = tmux(socket, 'kill-session', '-t', `=${name}`);
   if (r.status !== 0) return { ok: false, why: `tmux kill-session failed: ${(r.stderr || r.stdout || '').trim()}` };
   return { ok: true };
 }
@@ -174,8 +188,9 @@ export async function listRows(tmpdir = os.tmpdir()) {
     const dir = path.join(tmpdir, base);
     const info = readSessionFile(dir);
     if (!info) continue; // no session.json of jam's: not jam's to list, and never jam's to touch
-    const tmuxAlive = hasSession(info.tmux);
-    const marker = tmuxAlive ? sessionMarker(info.tmux) : null;
+    const socket = info.socket || TMUX_DEFAULT_SOCKET;
+    const tmuxAlive = hasSession(info.tmux, socket);
+    const marker = tmuxAlive ? sessionMarker(info.tmux, socket) : null;
     const owned = tmuxAlive && verifyOwned(info.tmux, marker, readSessionFile(marker)).ok;
     const portAlive = !!(await daemonHealth(port)) || (!tmuxAlive && await portBusy(port));
     rows.push({
@@ -187,6 +202,7 @@ export async function listRows(tmpdir = os.tmpdir()) {
       sessionId: info.sessionId || null,
       createdAt: info.createdAt || null,
       participants: rosterNames(dir),
+      socket,
       ...relays(dir),
       dir,
       info,
@@ -201,7 +217,8 @@ export async function listRows(tmpdir = os.tmpdir()) {
 export async function endJam(row, log = console.log) {
   const info = row?.info || row;
   const name = info?.tmux;
-  const pre = ownedSession(name);
+  const socket = info?.socket || TMUX_DEFAULT_SOCKET;
+  const pre = ownedSession(name, socket);
   if (!pre.ok) return { ok: false, why: pre.why };
   log(`ending jam "${name}" (port ${info.port}, session ${String(info.sessionId).slice(0, 8)})`);
   // The daemon is the one that can tell the clients, so it gets the first word — and it kills
@@ -210,9 +227,9 @@ export async function endJam(row, log = console.log) {
   log(said.ok
     ? '  daemon told everyone the jam is ending'
     : `  the daemon on :${info.port} did not answer (${said.why}) — finishing from here`);
-  for (const deadline = Date.now() + 4000; Date.now() < deadline && hasSession(name);) await sleep(150);
-  if (hasSession(name)) {
-    const killed = killOwned(name); // re-verified inside, immediately before the kill
+  for (const deadline = Date.now() + 4000; Date.now() < deadline && hasSession(name, socket);) await sleep(150);
+  if (hasSession(name, socket)) {
+    const killed = killOwned(name, socket); // re-verified inside, immediately before the kill
     if (!killed.ok) return { ok: false, why: killed.why };
     log(`  killed tmux session ${name}`);
   } else {

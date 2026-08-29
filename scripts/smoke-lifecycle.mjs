@@ -45,7 +45,13 @@ const S = { jam: 'jamlife', two: 'jamlifelive-2', live: 'jamlifelive', plain: 'j
 for (const [k, v] of Object.entries(S)) if (typeof v !== 'string' || !v.startsWith('jamlife')) throw new Error(`S.${k} is ${v}`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const tmux = (...a) => spawnSync(TMUX, a, { encoding: 'utf8' });
+// v0.20: jam runs its own tmux server. This smoke pins ONE socket of its own for every session it
+// makes — jams, decoys and driver sessions alike — which is also the `--tmux-socket <name>` escape
+// hatch under test. `dtmux` is the only call that reaches the DEFAULT server, and it is read-only:
+// step S3's proof that the live `jam` on :7777 is none of this smoke's business.
+const SOCKET = 'jamlifesock';
+const tmux = (...a) => spawnSync(TMUX, ['-L', SOCKET, ...a], { encoding: 'utf8' });
+const dtmux = (...a) => spawnSync(TMUX, ['-L', 'default', ...a], { encoding: 'utf8' });
 const alive = (name) => tmux('has-session', '-t', `=${name}`).status === 0;
 const pane = (t) => (tmux('capture-pane', '-p', '-t', t).stdout || '').replace(/\n+$/, '');
 const back = (t) => (tmux('capture-pane', '-p', '-S', '-2000', '-t', t).stdout || '').replace(/\n+$/, '');
@@ -107,10 +113,11 @@ const jamJson = () => JSON.parse(jam('sessions', '--json').out);
 
 // The launcher, with no client of its own (the prompts are driven separately, in a tmux session
 // with a real tty). Returns the state it wrote.
-function launch(name, port, extra = []) {
+function launch(name, port, extra = [], popup = false) {
   const r = spawnSync(process.execPath, [HOST_MJS, '--tmux', name, '--port', String(port),
     '--view-port', String(port + 1), '--name', 'Host', '--token', TOKEN, '--cwd', ROOT,
-    '--no-attach', '--no-popup', ...extra], { encoding: 'utf8', env: ENV });
+    '--tmux-socket', SOCKET, '--no-attach', ...(popup ? [] : ['--no-popup']), ...extra],
+  { encoding: 'utf8', env: ENV });
   if (r.status !== 0) throw new Error(`launch ${name} failed: ${r.stdout}${r.stderr}`);
   return JSON.parse(fs.readFileSync(path.join(stateDir(port), 'session.json'), 'utf8'));
 }
@@ -168,7 +175,7 @@ try {
     if (born.status !== 0) throw new Error(`tmux: ${born.stderr}`);
     const opt = tmux('show-options', '-t', S.plain, '-v', '@jam-owned');
     console.log(`      @jam-owned on ${S.plain}: ${JSON.stringify((opt.stdout || opt.stderr || '').trim())}`);
-    const v = ownedSession(S.plain);
+    const v = ownedSession(S.plain, SOCKET);
     console.log(`      ownedSession → ${v.why}`);
     if (v.ok) throw new Error('verifyOwned accepted a session with no marker');
     if (!/carries no @jam-owned marker/.test(v.why)) throw new Error(`unexpected reason: ${v.why}`);
@@ -186,7 +193,7 @@ try {
     if (born.status !== 0) throw new Error(`tmux: ${born.stderr}`);
     // The spoof: the option jam looks for, pointing at a directory jam never wrote.
     tmux('set-option', '-t', S.decoy, '@jam-owned', NOTJAM);
-    const v1 = ownedSession(S.decoy);
+    const v1 = ownedSession(S.decoy, SOCKET);
     console.log(`      ownedSession (empty dir)  → ${v1.why}`);
     if (v1.ok || !/there is no session\.json jam wrote/.test(v1.why)) throw new Error(`unexpected: ${JSON.stringify(v1)}`);
     const bare = jam('end', S.decoy);
@@ -197,7 +204,7 @@ try {
     // --view and --tunnel so the daemon has real children (stand-ins) to kill in step 2.
     const real = launch(S.jam, P.main, ['--view', '--view-ttyd', FAKE_TTYD, '--tunnel']);
     fs.copyFileSync(path.join(stateDir(P.main), 'session.json'), path.join(NOTJAM, 'session.json'));
-    const v2 = ownedSession(S.decoy);
+    const v2 = ownedSession(S.decoy, SOCKET);
     console.log(`      ownedSession (copied one) → ${v2.why}`);
     if (v2.ok || !/not written together/.test(v2.why)) throw new Error(`unexpected: ${JSON.stringify(v2)}`);
     const copied = jam('end', S.decoy);
@@ -211,9 +218,13 @@ try {
   });
 
   await step('S3 READ-ONLY the live jam on :7777 is unkillable, unlistable, and never touched', async () => {
-    if (!alive('jam')) return console.log('      no `jam` session is running right now — nothing to prove against');
+    // The live jam runs on the DEFAULT tmux server (a Homebrew install predating v0.20), which
+    // this smoke reaches exactly once, here, and never writes to.
+    if (dtmux('has-session', '-t', '=jam').status !== 0) {
+      return console.log('      no `jam` session is running on the default socket — nothing to prove against');
+    }
     liveJam = true; // and the last step re-checks that it is STILL there
-    const marker = tmux('show-options', '-t', 'jam', '-v', '@jam-owned');
+    const marker = dtmux('show-options', '-t', 'jam', '-v', '@jam-owned');
     console.log(`      @jam-owned on jam: ${JSON.stringify((marker.stdout || marker.stderr || '').trim())}`);
     // The real $TMPDIR, on purpose and read-only: this is the one place the smoke looks outside
     // its own namespace, because "would `jam sessions` offer somebody else's session?" is the
@@ -225,13 +236,13 @@ try {
     // happen is this smoke ending it. So the hard assertions are the two below.
     if (rows.some((r) => r.name === 'jam')) console.log('      (that one is a v0.18 jam of its own — listed for its owner, still not this smoke\'s to end)');
     // The marker gate, on the live session itself — read-only, like everything in this step.
-    const v = ownedSession('jam');
+    const v = ownedSession('jam', 'default');
     console.log(`      ownedSession('jam') → ${v.ok ? 'VERIFIED (it is a v0.18 jam of its own)' : v.why}`);
     // Named outright, in this smoke's own namespace, it is still refused.
     const r = jam('end', 'jam');
     console.log(`      jam end jam → exit ${r.code}: ${r.out.trim().split('\n')[0]}`);
     if (r.code === 0) throw new Error('jam end accepted the live session');
-    if (!alive('jam')) throw new Error('THE LIVE JAM IS GONE — this is the thing that must never happen');
+    if (dtmux('has-session', '-t', '=jam').status !== 0) throw new Error('THE LIVE JAM IS GONE — this is the thing that must never happen');
     console.log('      still alive, still attached to whatever it was doing');
   });
 
@@ -243,7 +254,7 @@ try {
     const opt = (tmux('show-options', '-t', S.jam, '-v', '@jam-owned').stdout || '').trim();
     console.log(`      @jam-owned → ${opt}`);
     if (opt !== stateDir(P.main)) throw new Error(`marker is ${opt}`);
-    for (const k of ['tmux', 'port', 'viewPort', 'cwd', 'sessionId', 'createdAt', 'pid', 'state']) {
+    for (const k of ['tmux', 'port', 'viewPort', 'cwd', 'sessionId', 'createdAt', 'pid', 'state', 'socket']) {
       if (!(k in main)) throw new Error(`session.json has no ${k}`);
     }
     const table = jam('sessions');
@@ -256,6 +267,54 @@ try {
     if (!/jamlife/.test(table.out) || !/live/.test(table.out)) throw new Error('the table lost the row');
     // The listing must never carry the credential itself.
     if (new RegExp(TOKEN).test(table.out)) throw new Error('the token is in the listing');
+  });
+
+  // ================================================== v0.20: the socket, and F3 both ways ====
+  await step('7 jam\'s tmux calls do not touch the DEFAULT socket, and its own one has the session', async () => {
+    const mine = tmux('list-sessions', '-F', '#{session_name}').stdout || '';
+    console.log(`      tmux -L ${SOCKET} ls → ${mine.trim().split('\n').join(', ')}`);
+    if (!new RegExp(`^${S.jam}$`, 'm').test(mine)) throw new Error(`${S.jam} is not on jam's own socket`);
+    // The assertion this whole section exists for: the default server has never heard of it.
+    const theirs = dtmux('list-sessions', '-F', '#{session_name}').stdout || '';
+    console.log(`      tmux -L default ls → ${theirs.trim().split('\n').join(', ') || '(no server)'}`);
+    for (const name of Object.values(S)) {
+      if (new RegExp(`^${name}$`, 'm').test(theirs)) throw new Error(`${name} appeared on the DEFAULT socket`);
+    }
+    // And the key table jam wrote is jam's own: the default server's root table has no F3 of ours.
+    const bound = tmux('list-keys', '-T', 'root').stdout || '';
+    console.log(`      bind on jam's socket: ${(bound.split('\n').find((l) => /\bF3\b/.test(l)) || '(none)').trim()}`);
+    if (!/F3\s+detach-client/.test(bound)) throw new Error('F3 is not bound to detach-client on jam\'s socket');
+    const dbound = dtmux('list-keys', '-T', 'root').stdout || '';
+    if (/F3\s+detach-client/.test(dbound)) throw new Error('jam bound F3 on the DEFAULT server — that is everybody\'s');
+    // v0.4 bundled the status line with the knock popup, so `--no-popup` (which every launch
+    // above uses) leaves it alone — assert that, then prove the hint on a jam that allows it.
+    const off = (tmux('show-options', '-t', S.jam, '-v', 'status-right').stdout || '').trim();
+    console.log(`      status-right with --no-popup: ${JSON.stringify(off)}`);
+    if (off) throw new Error('--no-popup should leave the status line alone');
+    const withHint = launch(S.live, P.live, [], true);
+    const sr = (tmux('show-options', '-t', S.live, '-v', 'status-right').stdout || '').trim();
+    console.log(`      status-right on ${S.live}: ${JSON.stringify(sr)}`);
+    if (!/F3 or Ctrl-b d/.test(sr)) throw new Error(`the way home is not on the status line: ${sr}`);
+    if (withHint.socket !== SOCKET) throw new Error(`session.json says socket ${withHint.socket}`);
+    const gone = jam('end', S.live);
+    if (gone.code !== 0) throw new Error(`could not end the hint jam: ${gone.out}`);
+  });
+
+  await step('7 F3 detaches on a real pty: attach, press F3, come back out', async () => {
+    // A real tty attached to the real session, exactly what F3 in the host client produces —
+    // and TMUX unset, because the driver is itself a tmux pane.
+    drive(`unset TMUX; ${TMUX} -L ${SOCKET} attach -t ${S.jam}:claude; echo JAM-F3-DETACHED`);
+    await until('the attach to land on the claude window', () => /fake claude/.test(pane(S.drive)), 20000);
+    const attached = (tmux('list-clients', '-t', S.jam, '-F', '#{client_name}').stdout || '').trim();
+    console.log(`      attached client: ${attached || '(none)'}`);
+    if (!attached) throw new Error('nothing is attached, so there is nothing for F3 to detach');
+    key('F3');
+    const out = await until('the detach', () => (/JAM-F3-DETACHED/.test(back(S.drive)) ? back(S.drive) : null), 10000);
+    console.log(`      after F3: ${out.split('\n').filter((l) => /JAM-F3-DETACHED/.test(l)).at(-1).trim()}`);
+    await until('the client to be gone', () => !(tmux('list-clients', '-t', S.jam, '-F', '#{client_name}').stdout || '').trim(), 8000);
+    console.log('      no clients left on the session — F3 went in and F3 came back out');
+    if (!alive(S.jam)) throw new Error('detaching killed the session');
+    killMine(S.drive);
   });
 
   await step('2 jam end: everybody is told, the children die, the state dir goes', async () => {
@@ -349,7 +408,7 @@ try {
 
   // ================================================================== the prompts ====
   await step('4 [c]ancel leaves the taken jam exactly as it was', async () => {
-    drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT}`);
+    drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
     const prompt = await until('the four choices', () => {
       const f = flat(S.drive);
       const m = /tmux session "[^"]+" is already a jam of yours — .*?\[c\]ancel/.exec(f);
@@ -369,7 +428,7 @@ try {
   });
 
   await step('4 [n]ew session builds a second jam under an auto-name and a free port', async () => {
-    drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --no-attach`);
+    drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET} --no-attach`);
     await until('the four choices', () => /\[n\]ew session/.test(flat(S.drive)), 15000);
     line('n');
     await until(`${S.two} to exist`, () => alive(S.two), 30000);
@@ -388,7 +447,7 @@ try {
   });
 
   await step('5 [a]ttach opens the host client, and the exit prompt\'s `k` keeps the jam', async () => {
-    drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT}`);
+    drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
     await until('the four choices', () => /\[a\]ttach as host/.test(flat(S.drive)), 15000);
     line('a');
     await until('the client to open on the mirror', () => /fake claude/.test(pane(S.drive)), 25000);
@@ -409,7 +468,7 @@ try {
   await step('6 /end in the host client: `n` ends nothing, `y` ends it for everybody', async () => {
     const w = watcher(P.live);
     await w.want('the welcome', (f) => f.t === 'welcome');
-    drive(`env ${driveEnv()} node ${HOST_MJS} --attach --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT}`);
+    drive(`env ${driveEnv()} node ${HOST_MJS} --attach --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
     await until('`--attach` to open the client', () => /fake claude/.test(pane(S.drive)), 25000);
     line('/end');
     await until('the confirmation', () => /really end this jam for everyone/.test(back(S.drive)), 10000);
@@ -435,7 +494,7 @@ try {
 
   await step('5 the exit prompt\'s `e` ends the jam, from [e]nd-it-and-start-fresh onwards', async () => {
     const first = launch(S.jam, P.main);
-    drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.jam} --port ${P.main} --name Host --cwd ${ROOT}`);
+    drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.jam} --port ${P.main} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
     await until('the four choices', () => /\[e\]nd it and start fresh/.test(flat(S.drive)), 15000);
     line('e');
     // The old jam ends and a brand-new one is built under the same name — new session id, so
@@ -481,7 +540,7 @@ try {
       console.log(`      ${name}: alive`);
     }
     // The one that matters most: if a live jam was running when this started, it is running now.
-    if (liveJam && !alive('jam')) throw new Error('THE LIVE JAM WENT AWAY DURING THIS RUN');
+    if (liveJam && dtmux('has-session', '-t', '=jam').status !== 0) throw new Error('THE LIVE JAM WENT AWAY DURING THIS RUN');
     if (liveJam) console.log('      jam (the live one): still alive, still never touched');
     // And the namespace proof: a state dir outside this smoke's TMPDIR — orphan-shaped, so the
     // most temping thing `jam clean` could possibly reach — was not touched by anything above.

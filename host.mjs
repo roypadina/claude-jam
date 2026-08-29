@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand,
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand,
   // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
   respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
   // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
@@ -26,14 +26,21 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   INVITE_V, INVITE_SECRET_LEN, INVITE_TTL_MS, inviteWsAddresses, encodeInvite, inviteRecord,
   parseInvitesFile, checkInvite, inviteRefusal, resolveInvites, inviteLeft, invitesReport,
   // v0.22C: /kick — the one thing /deny never could do.
-  KICK_CODE, resolveKick } from './lib.mjs';
+  KICK_CODE, resolveKick,
+  // v0.20: jam's own tmux server, and the F3 that comes back out.
+  tmuxSocketFor, tmuxSocketArgs, tmuxAttachLine, TMUX_DEFAULT_SOCKET, F3_BIND_ARGS, statusRightText } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `jam end` are one code path with one set of gates.
 import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
-const tmux = (...a) => spawnSync(TMUX, a, { encoding: 'utf8' });
+// v0.20: EVERY tmux call jam makes goes through this one helper, and every one of them carries
+// `-L <socket>` — jam's own tmux server. That is what lets jam bind a bare F3 without touching
+// the user's own tmux config, and it means `list-sessions` on this socket cannot even see their
+// sessions. The escape hatch is `--tmux-socket default`, which is tmux's own shared server
+// (`-L default` resolves to the same socket path as no flag at all).
+const tmux = (...a) => spawnSync(TMUX, [...tmuxSocketArgs(SOCKET), ...a], { encoding: 'utf8' });
 
 function parseArgs(argv) {
   const o = { port: 7777, host: '0.0.0.0', tmux: 'jam', extra: [] };
@@ -81,6 +88,11 @@ if (opts.help) {
 opts.name ||= 'Host';
 opts.cwd = path.resolve(opts.cwd || process.cwd());
 opts.state ||= stateDirFor(os.tmpdir(), opts.port);
+// v0.20: the tmux server this jam lives on. Named per port, so two jams never share one, and
+// `--tmux-socket default` puts jam back on the user's own server (F3's bare-key binding is then
+// skipped, because on a shared server it would be theirs too).
+let SOCKET = tmuxSocketFor(opts.port, opts.tmuxSocket);
+const ownSocket = () => SOCKET !== TMUX_DEFAULT_SOCKET;
 // v0.18: two contradictory flags are a startup error, never a guess about which was meant.
 if (exitDecision({ endOnExit: opts.endOnExit, keepOnExit: opts.keepOnExit }) === 'conflict') {
   console.error('--end-on-exit and --keep-on-exit say opposite things: pick one (or neither, and answer the prompt).');
@@ -191,7 +203,7 @@ async function askKey(prompt, keys) {
 // because `tmux list-sessions` is not something this project reads.
 function takenNames(base, max = 12) {
   const out = [];
-  for (const c of [base, ...Array.from({ length: max }, (_, i) => `${base}-${i + 2}`)]) if (hasSession(c)) out.push(c);
+  for (const c of [base, ...Array.from({ length: max }, (_, i) => `${base}-${i + 2}`)]) if (hasSession(c, SOCKET)) out.push(c);
   return out;
 }
 
@@ -204,6 +216,8 @@ async function retarget(name) {
   opts.port = port;
   opts.viewPort = port + 1;
   opts.state = stateDirFor(os.tmpdir(), port);
+  // The socket is named per port, so it moves with it — unless the flag pinned one by hand.
+  SOCKET = tmuxSocketFor(port, opts.tmuxSocket);
   CLAUDE_PANE = claudeTarget(name);
   console.log(`starting a second jam as "${name}" on :${port} (view :${opts.viewPort})`);
 }
@@ -212,8 +226,8 @@ async function retarget(name) {
 // own offers four ways out; anything else is refused untouched — that session belongs to
 // somebody, and jam has exactly one thing to say about it.
 async function resolveTargetSession() {
-  const taken = hasSession(opts.tmux);
-  const owned = taken ? ownedSession(opts.tmux) : null;
+  const taken = hasSession(opts.tmux, SOCKET);
+  const owned = taken ? ownedSession(opts.tmux, SOCKET) : null;
   if (opts.attach) {
     if (!taken) {
       console.error(`there is no tmux session called "${opts.tmux}" to attach to.\n`
@@ -265,6 +279,7 @@ async function launch() {
     '--client-cmd', opts.clientCmd,
     '--session-id', opts.sessionId, '--cwd', opts.cwd,
     '--tmux', opts.tmux, '--state', opts.state,
+    '--tmux-socket', SOCKET, // v0.20: the daemon drives the same server the launcher built on
     '--view-port', String(opts.viewPort),
     ...(opts.view ? ['--view'] : []),
     ...(opts.viewTtyd ? ['--view-ttyd', opts.viewTtyd] : []),
@@ -307,9 +322,19 @@ async function launch() {
   // attaches) gets tmux's `·` padding around the TUI, which reads as a broken screen.
   // Window option on OUR window only — the host's global config is never written.
   tmux('set-option', '-w', '-t', CLAUDE_PANE, 'fill-character', ' ');
+  // v0.20-2: F3 goes IN (the client attaches) so F3 has to come back OUT. Key tables are
+  // server-global, which is exactly why jam has a server of its own — and why the one case where
+  // it does not (`--tmux-socket default`) skips this rather than rebinding the user's F3.
+  if (ownSocket()) {
+    const bind = tmux(...F3_BIND_ARGS);
+    if (bind.status !== 0) console.error(`could not bind F3 to detach-client: ${(bind.stderr || '').trim()}`);
+  } else {
+    console.log('--tmux-socket default: F3 is NOT bound to detach-client (that table is your server\'s) — Ctrl-b d comes back');
+  }
   if (opts.retiredLayout) console.log(`${opts.retiredLayout} is retired in v0.14 — the host uses the same client as everyone (ignored)`);
   console.log(`\nclaude-jam up. session ${opts.sessionId}\n` +
-    `  tmux: ${opts.tmux} (windows: daemon, claude) — detached; \`tmux attach -t ${opts.tmux}\` for the raw TUI`);
+    `  tmux: ${opts.tmux} on socket ${SOCKET} (windows: daemon, claude) — detached;\n` +
+    `        \`${tmuxAttachLine(SOCKET, opts.tmux, CLAUDE_PANE)}\` for the raw TUI`);
   // The tunnel dials out from the daemon process (a separate node process from this one), so
   // it has not resolved anything yet by the time this print runs — the daemon window logs the
   // URLs a few seconds later, once cloudflared reports them.
@@ -334,6 +359,7 @@ function claimSession() {
   const info = sessionInfo({
     tmux: opts.tmux, port: opts.port, viewPort: opts.viewPort, cwd: opts.cwd,
     sessionId: opts.sessionId, createdAt: Date.now(), pid, state: opts.state,
+    socket: SOCKET, // v0.20: which tmux server to look for this session on
     // How `jam end` authenticates its POST /end: loopback plus this, the same gate the knock
     // popup already uses. It lives in the 0700 state dir beside token.json.
     secret: opts.hookSecret,
@@ -384,7 +410,7 @@ async function runHostClient(info) {
     // to keep, and asking about it would be nonsense. The breadcrumb is what makes this
     // race-free — the tmux session is still up for the second between the ending frame that
     // made this client exit and the daemon actually killing it.
-    if (!hasSession(info.tmux) || fs.existsSync(path.join(info.state, ENDING_FILE))) {
+    if (!hasSession(info.tmux, info.socket) || fs.existsSync(path.join(info.state, ENDING_FILE))) {
       console.log('\nthe jam has ended — the tmux session and its state dir are gone.');
       return;
     }
@@ -403,7 +429,7 @@ async function runHostClient(info) {
     }
     // `k`, no answer at all, --keep-on-exit, --no-prompt, or a stdin that is not a terminal.
     console.log(`\nclient closed — the jam is still running.\n`
-      + `${reattachLines({ tmux: info.tmux, port: info.port, clientCmd: opts.clientCmd, name: opts.name, token }).map((l) => `  ${l}`).join('\n')}\n`);
+      + `${reattachLines({ tmux: info.tmux, port: info.port, clientCmd: opts.clientCmd, name: opts.name, token, socket: info.socket || SOCKET }).map((l) => `  ${l}`).join('\n')}\n`);
     return;
   }
 }
@@ -606,7 +632,9 @@ function rosterChanged(extra) {
 // never interpolated into the script.
 // v0.9: `status off` on the viewer's OWN session (never the host's), so the browser shows
 // the Claude Code screen and nothing else — no window list, no `⚑ N waiting` badge.
-const VIEW_SH = 'S="$2-view-$$"; exec "$1" new-session -t "$2" -s "$S" ";" ' +
+// v0.20: `-L $3` — a viewer's grouped session has to be born on the same tmux server as the
+// jam it is grouped with, so the socket is passed in as an argument like everything else.
+const VIEW_SH = 'S="$2-view-$$"; exec "$1" -L "$3" new-session -t "$2" -s "$S" ";" ' +
   'set-option -t "$S" destroy-unattached on ";" set-option -t "$S" status off ";" ' +
   'select-window -t "$S:claude"';
 
@@ -616,7 +644,7 @@ function startView() {
   if (!ttyd || viewProc) return;
   // ttyd >= 1.7 is read-only unless -W is given, so read-only needs no flag of its own.
   const child = spawn(ttyd, ['-p', String(opts.viewPort), '-c', `jam:${viewKey}`,
-    'sh', '-c', VIEW_SH, 'jam-view', TMUX, opts.tmux], { stdio: 'ignore' });
+    'sh', '-c', VIEW_SH, 'jam-view', TMUX, opts.tmux, SOCKET], { stdio: 'ignore' });
   viewProc = child;
   child.on('exit', (code) => {
     if (viewProc === child) viewProc = null;
@@ -914,7 +942,9 @@ function restoreStatusRight() {
 
 function refreshStatusRight() {
   if (opts.noPopup) return;
-  const want = statusRightWaiting(pending.size);
+  // v0.20-3: `⚑ N waiting` still wins; otherwise the session says how to get back to the client.
+  // Only when F3 is actually bound to detach-client — on the user's own server it is not.
+  const want = statusRightText(pending.size, { home: ownSocket() });
   if (want === statusRightShown) return;
   if (!want) return restoreStatusRight();
   statusRightShown = want;
@@ -980,11 +1010,11 @@ function pumpPopups() {
   // The /accept or /allow-cmd line logged with the request itself is still the way in.
   const client = hostClients()[0];
   if (!client) return console.log(`[${kind}] no client attached — no popup for ${rec.name}`);
-  const child = spawn(TMUX, buildPopupArgs({
+  const child = spawn(TMUX, [...tmuxSocketArgs(SOCKET), ...buildPopupArgs({
     session: opts.tmux, client, node: process.execPath, script: path.join(HERE, 'popup.mjs'),
     name: rec.name, ip: rec.ip || '', ttlS: Math.round(KNOCK_TTL / 1000), port: opts.port,
     secret: opts.hookSecret, kind, detail: popupDetail(kind, rec),
-  }), { stdio: ['ignore', 'ignore', 'pipe'] });
+  })], { stdio: ['ignore', 'ignore', 'pipe'] });
   popupProc = child;
   let err = '';
   child.stderr.on('data', (c) => { err += c; });
@@ -1004,6 +1034,9 @@ function pumpPopups() {
 
 function daemon() {
   saveStatusRight();
+  // v0.20-3: the resting value, set once at boot — `⚑ N waiting` takes the line whenever
+  // something is pending and refreshStatusRight puts this back afterwards.
+  refreshStatusRight();
   const http = createServer(onRequest);
   // Frame size is enforced by ws before hello/token, so keep it small instead of the ~100 MB
   // default an unauthenticated peer could throw at us. v0.13 raised it from 64 KB to fit ONE
@@ -1081,7 +1114,7 @@ function finishEnd() {
   // THE gate, taken while the state dir is still intact — the marker and session.json are a
   // PAIR, and verifying is exactly what reading both is for. (Order matters and cost a bug
   // once: removing the dir first left nothing to verify against, so the session survived.)
-  const v = ownedSession(opts.tmux);
+  const v = ownedSession(opts.tmux, SOCKET);
   if (!v.ok) {
     // The state dir stays. It is what makes this jam visible to `jam sessions` (as no-daemon)
     // and endable with `jam end`, instead of a tmux session with no explanation attached.
@@ -1091,7 +1124,7 @@ function finishEnd() {
   // kill-session hangs up this window, which is this process — so the removal has to be booked
   // on the way out as well as attempted here.
   removeState = true;
-  const killed = killOwned(opts.tmux, v);
+  const killed = killOwned(opts.tmux, SOCKET, v);
   console.log(killed.ok ? `[end] killed tmux session ${opts.tmux}` : `[end] ${killed.why}`);
   const gone = removeStateDir(opts.state);
   if (!gone.ok) console.log(`[end] ${gone.why}`);
@@ -1108,7 +1141,7 @@ function startSessionWatch() {
     if (ending) return;
     const mine = readSession();
     if (!mine || mine.tmux !== opts.tmux) return; // not a launcher-built jam: nothing to watch
-    if (hasSession(opts.tmux)) return;
+    if (hasSession(opts.tmux, SOCKET)) return;
     console.log(`[watchdog] tmux session "${opts.tmux}" is gone — nothing left to drive, exiting`);
     ending = true;
     removeState = true; // there is no session left for it to describe
@@ -1255,7 +1288,7 @@ function admitSocket(ws, name, host, loopback = false, via = 'token') {
     // `host` here is already "claimed host AND loopback", i.e. exactly who may attach.
     session: {
       id: opts.sessionId, cwd: opts.cwd, hostName: opts.name, boot: BOOT,
-      ...(host ? { ...joinInfo(), tmux: opts.tmux } : {}),
+      ...(host ? { ...joinInfo(), tmux: opts.tmux, tmuxSocket: SOCKET } : {}),
     },
   });
   rosterChanged({ joined: name, via });
