@@ -821,7 +821,17 @@ test('extractKeys: ordinary keys, plain Enter and Ctrl-C pass straight through',
   assert.deepEqual(extractKeys('hello'), { keys: [], text: 'hello', hold: '' });
   assert.deepEqual(extractKeys('\r'), { keys: [], text: '\r', hold: '' }); // plain Enter submits
   assert.deepEqual(extractKeys('\x03'), { keys: [], text: '\x03', hold: '' }); // ink's Ctrl-C
-  assert.deepEqual(extractKeys('\x1b[A'), { keys: [], text: '\x1b[A', hold: '' }); // arrow up
+  // v0.30-3: `↑`/`↓` are the client's own now — they recall what you submitted. Both spellings,
+  // because a terminal in application cursor mode sends SS3 and one in normal mode sends CSI.
+  assert.deepEqual(extractKeys('\x1b[A'), { keys: ['histprev'], text: '', hold: '' });
+  assert.deepEqual(extractKeys('\x1bOA'), { keys: ['histprev'], text: '', hold: '' });
+  assert.deepEqual(extractKeys('\x1b[B'), { keys: ['histnext'], text: '', hold: '' });
+  assert.deepEqual(extractKeys('\x1bOB'), { keys: ['histnext'], text: '', hold: '' });
+  // Left and right stay ink's, so cursor movement inside the line is untouched.
+  assert.deepEqual(extractKeys('\x1b[C'), { keys: [], text: '\x1b[C', hold: '' });
+  assert.deepEqual(extractKeys('\x1b[D'), { keys: [], text: '\x1b[D', hold: '' });
+  // And while the TUI has the keyboard, an arrow is claude's — it is not in PASSTHROUGH_SEQS.
+  assert.deepEqual(extractKeys('\x1b[A', PASSTHROUGH_SEQS), { keys: [], text: '\x1b[A', hold: '' });
   assert.deepEqual(extractKeys(''), { keys: [], text: '', hold: '' });
 });
 
@@ -960,7 +970,9 @@ test('sendKeyArgs: ASCII (escape sequences included) goes as -H hex, non-ASCII a
 
 test('onboardingLines: the guest block is boxed, <=10 rows, names the reader, points at claude', () => {
   const lines = onboardingLines('Dana', false);
-  assert.ok(lines.length <= 10, `${lines.length} rows`);
+  // v0.30-3 bought the block one more row: `↑`/`↓` recall and the kept-message escape hatch are
+  // exactly what somebody needs the moment a message does not land, so they go where they are read.
+  assert.ok(lines.length <= 11, `${lines.length} rows`);
   assert.match(lines[0], /^── claude-jam ─+$/);
   assert.equal(lines.at(-1), '─'.repeat(ONBOARD_W));
   const body = lines.join('\n');
@@ -974,7 +986,7 @@ test('onboardingLines: the guest block is boxed, <=10 rows, names the reader, po
 
 test('onboardingLines: the host block leads with F2/F3 and slash passthrough', () => {
   const host = onboardingLines('Roy', true);
-  assert.ok(host.length <= 10, `${host.length} rows`);
+  assert.ok(host.length <= 11, `${host.length} rows`);
   const body = host.join('\n');
   assert.match(body, /attributed \[Roy\]/); // v0.14: attribution is symmetric
   assert.match(body, /F2 +→ transcript ⇄ live TUI/);
@@ -985,6 +997,12 @@ test('onboardingLines: the host block leads with F2/F3 and slash passthrough', (
   assert.match(body, /a \/ d +→ answer the ⚑ bar/);
   assert.match(body, /\/model \/compact/);
   assert.match(body, /\/help/);
+  // v0.30-3/v0.31: recall and "a question is not a permission" are in BOTH blocks.
+  for (const b of [body, onboardingLines('Dana', false).join('\n')]) {
+    assert.match(b, /↑ \/ ↓/);
+    assert.match(b, /\/retry/);
+    assert.match(b, /\/answer <n>/);
+  }
 });
 
 test('client: /help reprints the onboarding block', () => {
@@ -2063,11 +2081,15 @@ test('P2 permOptionsReport shows the options and says the host still has to appr
 });
 
 test('P2 the client parses the relay: /answer lists, /answer <n> asks, the host allows or denies', () => {
-  assert.deepEqual(parseClientLine('/answer'), { kind: 'perm', choice: null });
-  assert.deepEqual(parseClientLine('/answer 2'), { kind: 'perm', choice: 2 });
-  assert.deepEqual(parseClientLine('/answer  9 '), { kind: 'perm', choice: 9 });
-  // Everything that is not one digit is a usage error in the CLIENT, before the wire.
-  for (const bad of ['/answer 0', '/answer 10', '/answer yes', '/answer 1 2', '/answer -1', '/answer C-m']) {
+  // v0.31 widened this: `<q> <n>` targets one question of a form and `other <text>` is the host's
+  // free text. The shape is the same — the daemon decides what any of it is allowed to do.
+  assert.deepEqual(parseClientLine('/answer'), { kind: 'perm', q: null, choice: null, text: null });
+  assert.deepEqual(parseClientLine('/answer 2'), { kind: 'perm', q: null, choice: 2, text: null });
+  assert.deepEqual(parseClientLine('/answer  9 '), { kind: 'perm', q: null, choice: 9, text: null });
+  assert.deepEqual(parseClientLine('/answer 1 2'), { kind: 'perm', q: 1, choice: 2, text: null });
+  assert.deepEqual(parseClientLine('/answer other ship it'), { kind: 'perm', q: null, choice: 'other', text: 'ship it' });
+  // Everything else is a usage error in the CLIENT, before the wire.
+  for (const bad of ['/answer 0', '/answer 10', '/answer yes', '/answer -1', '/answer C-m', '/answer other']) {
     const a = parseClientLine(bad);
     assert.equal(a.kind, 'error', bad);
     assert.match(a.text, /usage: \/answer/);
@@ -2079,6 +2101,14 @@ test('P2 the client parses the relay: /answer lists, /answer <n> asks, the host 
   // A one-key bar answer never grants standing approval, on this ladder either.
   assert.equal(parseClientLine('/deny-perm Dana always').always, false);
   for (const cmd of ['/answer', '/allow-perm', '/deny-perm']) assert.ok(JAM_COMMANDS.includes(cmd), cmd);
+});
+
+test('v0.30-2 /outbox and /retry are jam\'s own commands, parsed and listed', () => {
+  assert.deepEqual(parseClientLine('/outbox'), { kind: 'outbox', op: 'list' });
+  assert.deepEqual(parseClientLine('/retry'), { kind: 'outbox', op: 'retry' });
+  // Not commands with arguments: there is exactly one newest kept payload to send again.
+  assert.equal(parseClientLine('/retry now').kind, 'slash', 'anything else belongs to claude');
+  for (const cmd of ['/outbox', '/retry']) assert.ok(JAM_COMMANDS.includes(cmd), cmd);
 });
 
 test('P2 the permission request wears its own glyph in the popup and in the approval bar', () => {
