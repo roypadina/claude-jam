@@ -3362,6 +3362,11 @@ export const HOST_FLAGS = [
   { flag: '--export', arg: 'ask|auto|off', desc: 'the transcript is the whole conversation, so it has its own toggle and stays `ask` by default' },
   { flag: '--replay', arg: 'N|all', desc: 'how much of the transcript on disk a joining guest is shown; `all` is everything the ring kept' },
   { flag: '--history', arg: 'N', desc: `events the jam keeps for replay and /history (default ${HISTORY_DEFAULT}, cap ${HISTORY_CAP})` },
+  // v0.21: `--resume` has been real since v0.12 and is in the launcher's usage text, but it was
+  // never in this table — so `/menu → Help & guides` was a subset of `--help` rather than the
+  // same list. The lint below (`the launcher usage and HOST_FLAGS name the same flags`) is what
+  // keeps the two from drifting apart again.
+  { flag: '--resume', arg: 'ID', desc: 'continue an existing claude conversation (a session id) instead of starting a new one' },
   { flag: '--attach', arg: '', desc: 'reopen your client on a jam that is already running' },
   { flag: '--no-prompt', arg: '', desc: 'do not ask on exit whether to keep the jam running' },
   { flag: '--end-on-exit', arg: '', desc: 'end the jam when your client exits' },

@@ -3756,6 +3756,37 @@ test('v0.21 no user-visible string emits a bare `jam ` command form', () => {
   assert.doesNotMatch(alias, /^\s*echo\b/m);
 });
 
+// ============================== v0.21.0: --help and /menu name the same host flags ==========
+// The third lint, and it exists because the thing it checks cannot be caught by running the
+// program once: `--help` comes from the bash launcher's `echo` lines and `/menu → Help & guides`
+// comes from HOST_FLAGS, so the two can disagree indefinitely and nothing fails. They HAD
+// disagreed on three real flags by the 0.21.0 gate — `--invite-only` and `--funnel` were in the
+// table and not in the usage text, and `--resume` was in the usage text and not in the table
+// (the same `--resume` AGENTS.md already calls out as the most-missed surface).
+test('v0.21.0 the launcher usage and HOST_FLAGS name the same host flags', () => {
+  const launcher = fs.readFileSync(new URL('./claude-jam', import.meta.url), 'utf8');
+  // A flag is "named" only as a whole word: `--tmux-socket` in the text must not stand in for
+  // `--tmux`, which is what a bare `includes()` would let it do.
+  const names = (hay, flag) => new RegExp(`${flag}(?![\\w-])`).test(hay);
+
+  // Forward: everything the menu lists, the launcher says somewhere — in the synopsis, or in
+  // the prose under it, or (for --no-menu) on the no-arguments line.
+  for (const f of HOST_FLAGS) assert.ok(names(launcher, f.flag), `--help never mentions ${f.flag}`);
+
+  // Reverse, and narrower on purpose: the `claude-jam host [...]` synopsis itself. Only the
+  // host flags belong there — `--json`, `--all`, `--yes`, `--pane` and the rest are other
+  // subcommands' and live on their own usage lines.
+  const lines = launcher.split('\n');
+  const from = lines.findIndex((l) => /usage: claude-jam host \[/.test(l));
+  assert.ok(from > 0, 'no `usage: claude-jam host [` line in the launcher');
+  const to = lines.findIndex((l, i) => i >= from && /\[-- <claude args>\]/.test(l));
+  assert.ok(to >= from, 'the host synopsis never reaches `[-- <claude args>]`');
+  const synopsis = lines.slice(from, to + 1).join('\n');
+  for (const flag of synopsis.match(/--[a-z][a-z-]*/g) || []) {
+    assert.ok(HOST_FLAGS.some((f) => f.flag === flag), `${flag} is in --help's synopsis but not in HOST_FLAGS`);
+  }
+});
+
 // ============================== v0.32 W0: one module knows what operating system this is ====
 // The seam only pays for itself if it is the ONLY door. `osascript`, `pngpaste`, `afplay`,
 // `pbcopy` and `open` have no meaning on Windows, so a call to one from a client is a bug that
