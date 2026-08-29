@@ -31,6 +31,21 @@ yet — this is the switch, the opt-in, the roster fields and the four frames.
   anything, every time, with no reason. Whether a coordinated multi-account fan-out counts as
   ordinary individual usage is an **open question** — see the `Peer-Tasks` wiki page.
 
+### v0.29 — peer tasks: the docs and the compliance frame (step 5 of 5)
+
+README, `MANUAL.md` (the text claude itself is given), `--help`, `/menu` and a new wiki page
+**`Peer-Tasks`**. All of them say the same three things, because the feature is only allowed to
+exist if they are true:
+
+- a task runs on the guest's machine, in the guest's own Claude Code, on the guest's quota, and
+  only after that guest approves that specific task;
+- **a guest may decline anything, every time, with no reason** — and there is a one-way
+  `/peer never` for a client session that no host can clear;
+- **the open question, out loud**: every task is one person choosing to spend their own quota,
+  which is ordinary individual usage of each account — but *whether a coordinated multi-account
+  fan-out counts as ordinary individual usage is not settled*. Nobody should discover that later,
+  so it is in the README, in the manual claude reads, and in its own section of the wiki page.
+
 ### v0.29 — peer tasks: the transcript and the audit trail (step 4 of 5)
 
 - **The whole room sees a peer task**, attributed `[Dana → task]`: what was asked (with the tool

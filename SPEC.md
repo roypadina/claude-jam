@@ -1909,6 +1909,47 @@ opt-in (`/peer on`) before they can be dispatched to at all.
 6. Docs per the standing rule, plus a wiki page `Peer-Tasks` covering the compliance frame,
    what a guest is agreeing to, and how to say no.
 
+**SHIPPED 2026-08-29.** All six items. Five things the implementation found that the spec did not
+know, all of them checked against `claude --help` on 2.1.251 rather than assumed:
+
+1. **`--max-turns` DOES NOT EXIST** on 2.1.251. The wire keeps `maxTurns` (it is the cap the guest
+   consents to and the number in the audit line), but it is enforced by COUNTING the
+   `{"type":"assistant"}` events in the stream and killing the child by pid — which is strictly
+   stronger than a flag anyway. `--max-budget-usd` does exist and is a real spend cap; it was NOT
+   adopted, because it cannot be tested without spending and an inert or refusing flag would break
+   every task. Recorded in TESTING.md for the campaign to decide.
+2. **`--restricted` is the flag that gives the spec's "confined to the scratch dir"**, and it does
+   more than that: it also makes claude ignore the guest's user, project and local settings files
+   (which is what stops a machine whose own default is `bypassPermissions` from handing that to
+   work somebody else asked for) and it refuses `bypassPermissions` outright. `--allowedTools`
+   alone would NOT have confined `Read` to the directory. `--tools` is passed as well, so the
+   built-in set really is the whitelist rather than merely the pre-approved part of it.
+3. **The MCP server is registered with `--mcp-config`, not `--settings`.** The spec said
+   `--settings`; a settings file has no `mcpServers` key on 2.1.251 and passing one would have
+   registered nothing, silently. The load-bearing half of that requirement — a GENERATED file jam
+   controls, never the user's global config — is unchanged and is what `--mcp-config` does.
+   Deliberately additive (no `--strict-mcp-config` on the HOST): turning off the host's own MCP
+   servers because they enabled a claude-jam feature would be a regression nobody asked for. The
+   GUEST's spawn is the opposite, and gets `--strict-mcp-config` with no config at all.
+4. **It is a stdio server in a tiny process (`peer-mcp.mjs`), not literally in-process.** Hand-
+   rolling Streamable HTTP (sessions, SSE, protocol-version negotiation) to keep it inside the
+   daemon would have been much more code and much more to get wrong for no gain: the shim is a
+   pipe, and every decision still belongs to the daemon, reached over the same loopback+secret
+   endpoint `hooks.sh` and `claude-jam end` already use. Verified against the real claude 2.1.251
+   with `claude mcp get` under a throwaway `CLAUDE_CONFIG_DIR` — "✔ Connected", no turn spent.
+5. **`/peer never` is per SOCKET, not per name.** "Never this session" means the guest's client
+   session: a name-keyed refusal would outlive a reconnect and a person who changed their mind
+   could never opt back in. The client holds the flag too, so no host can clear it.
+
+Also added beyond the spec, because the spec's list implied them: `deadlineMs` on
+`dispatch_to_peer` (the wall clock is the cap that actually ends things, so it had to be
+askable), `/peer accept tools` as a distinct TYPED gate for `Bash`/`Write`/`Edit` (the spec said
+"opt in per task" — a keypress is not a distinct act), and `/peer reset` for the daily counter the
+spec said a guest could zero.
+
+An ADOPTED jam cannot have the tools at all: `--mcp-config` is read once at claude's startup and
+an adopted claude was started by somebody else. Said out loud at launch rather than discovered.
+
 ## v0.30 — big pastes must not fail, and a message must never be lost (URGENT, observed live)
 
 **SHIPPED 2026-08-29.** All four items, plus the fixture corpus. Three things the implementation

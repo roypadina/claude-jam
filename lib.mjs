@@ -3387,7 +3387,7 @@ export const KEY_HELP = [
 ];
 
 export const WIKI_PAGES = ['Install', 'Hosting', 'Joining-a-Jam', 'Remote-Access',
-  'Files-and-Export', 'Security-Model', 'Troubleshooting'];
+  'Files-and-Export', 'Security-Model', 'Peer-Tasks', 'Troubleshooting'];
 
 // The manual `/menu → Help & guides` renders inline. It is the SAME file claude is given
 // (v0.8), which is the point: a human and the agent read one source, so an answer from one
