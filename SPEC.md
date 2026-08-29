@@ -1085,3 +1085,45 @@ answer permission prompts" — with the exact scope below, and nothing wider.
   close pairs — 39/141 and 81/183 collapse under deuteranopia — are inherent to holding eight
   fixed hues in a space a dichromat sees in two dimensions. Colour here is redundant by
   construction: the `[Name]` label is always printed next to it.
+
+## v0.18 — jam owns its tmux sessions (Roy: control lifecycle from the app)
+
+Today `jam host` creates a tmux session and never offers to clean it up: quitting the client
+leaves daemon + claude + ttyd/tunnel children running, a second `jam host` refuses with a
+message, and the only way out is the user remembering `tmux kill-session -t jam`. Orphan
+`$TMPDIR/claude-jam-<port>` state dirs accumulate too.
+
+**Ownership marker (safety rule, non-negotiable).** On creation the launcher stamps the session
+with `tmux set-option -t <name> @jam-owned <state-dir>` and writes `session.json` into the state
+dir: `{tmux, port, viewPort, cwd, sessionId, createdAt, pid}`. jam may only ever end a session
+whose `@jam-owned` option resolves to a state dir that jam wrote AND whose name it was given
+explicitly. Never a name pattern, never a filtered list, never `kill-server`, never someone
+else's tmux session — Roy runs many parallel tools in tmux.
+
+1. **Exit prompt.** When the host's client exits (`/quit`, Ctrl-C, or the app closing), before
+   the process leaves: `this jam is still running (2 guests connected) — [k]eep it running ·
+   [e]nd it · [c]ancel`. `k` prints how to come back (`jam host --attach` / `jam sessions`);
+   `e` ends the jam (see 3); `c` returns to the client. Non-interactive stdin or `--no-prompt`
+   → keep, print the reattach line. `--end-on-exit` / `--keep-on-exit` skip the prompt.
+2. **`jam sessions`** (alias `jam ls`) — table of jam-owned sessions only: name, port, cwd,
+   uptime, session id (short), participants now (from `roster.json`), view/tunnel URL presence,
+   plus a `!` marker for a state dir whose tmux session is gone (orphan) and for a tmux session
+   whose daemon port is dead. `jam sessions --json` for scripting.
+3. **`jam end [name]`** (alias `jam kill`) — ends one jam: broadcast `{t:'ending'}` so clients
+   print "host ended the jam" and exit 0, give the daemon 1 s to stop its children (ttyd,
+   cloudflared/funnel, popups), then `tmux kill-session -t <name>` (exact, marker-verified),
+   then remove that state dir. No name and exactly one jam exists → that one; several → a
+   numbered picker; `--all` requires an explicit confirmation and still verifies each marker.
+4. **`/end` in the host client** — same path as `jam end`, with an in-client confirm
+   (`really end this jam for everyone? [y/N]`) and the guests' notice first. Host-only.
+5. **Existing-session handling.** `jam host` when its target name is taken by a jam-owned
+   session: offer `[a]ttach as host · [n]ew session (auto-names jam-2) · [e]nd it and start
+   fresh · [c]ancel` instead of today's flat refusal. Name taken by a NON-jam session → refuse
+   with a clear message naming the collision and suggesting `--tmux <other>`; never touch it.
+   `jam host --attach` goes straight to attaching the host client to an existing jam.
+6. **Orphan cleanup.** `jam sessions` lists orphan state dirs; `jam clean` removes only those
+   (state dir exists, its `@jam-owned` session is gone, no live listener on its port), one
+   confirmation listing exactly what will be deleted.
+7. **Daemon-side.** On SIGTERM/exit the daemon already kills its children; add: remove
+   `session.json`, and if the tmux session is gone but the daemon somehow survives, exit.
+   Clients handle `{t:'ending'}` by printing the notice and exiting 0 (no reconnect attempts).
