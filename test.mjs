@@ -5971,3 +5971,58 @@ test('the call-site lint actually fires — both halves of a half-finished renam
     assert.deepEqual(unresolvedCalls(src), [], `false positive on: ${JSON.stringify(src.slice(0, 60))}`);
   }
 });
+
+// ---------------------------------------------------------------------------------------
+// Campaign 2026-08-30: the turn cap, against a REAL stream instead of the documented shape.
+// ---------------------------------------------------------------------------------------
+
+// Verbatim event shapes from the live haiku run of 2026-08-30 (the run TESTING.md asked for:
+// the shipped peerSpawnArgs, a real claude 2.1.251, a prompt that tried to read ~/.ssh). Six
+// `assistant` events, TWO distinct message ids, and the run's own result said num_turns: 3.
+const REAL_STREAM_2026_08_30 = [
+  { type: 'system', subtype: 'init' },
+  { type: 'system', subtype: 'thinking_tokens' },
+  { type: 'assistant', message: { id: 'msg_zwGtkRqv', content: [{ type: 'thinking', thinking: '…' }] } },
+  { type: 'assistant', message: { id: 'msg_zwGtkRqv', content: [{ type: 'text', text: 'Let me read it.' }] } },
+  { type: 'assistant', message: { id: 'msg_zwGtkRqv', content: [{ type: 'tool_use', name: 'Read', input: {} }] } },
+  { type: 'user', message: { content: [{ type: 'tool_result' }] } },
+  { type: 'assistant', message: { id: 'msg_zwGtkRqv', content: [{ type: 'tool_use', name: 'Glob', input: {} }] } },
+  { type: 'system', subtype: 'permission_denied' },
+  { type: 'user', message: { content: [{ type: 'tool_result' }] } },
+  { type: 'assistant', message: { id: 'msg_Yak9st1L', content: [{ type: 'thinking', thinking: '…' }] } },
+  { type: 'assistant', message: { id: 'msg_Yak9st1L', content: [{ type: 'text', text: 'REFUSED' }] } },
+  { type: 'result', subtype: 'success', is_error: false, num_turns: 3, result: 'REFUSED' },
+].map((o) => JSON.stringify(o));
+
+test('a turn is an assistant MESSAGE, not an assistant event — measured, not assumed', () => {
+  const evs = REAL_STREAM_2026_08_30.map(peerStreamEvent).filter(Boolean);
+  const turns = evs.filter((e) => e.kind === 'turn');
+  // The thing TESTING.md was worried about, now a measurement: the events outnumber the turns.
+  assert.equal(turns.length, 6, 'assistant EVENTS in the real stream');
+  const ids = new Set(turns.map((t) => t.id));
+  assert.equal(ids.size, 2, 'distinct assistant message ids — the real number of turns');
+  // Counting events, a 12-turn cap would have stopped this two-turn task partway through.
+  assert.ok(turns.length > ids.size, 'counting events overcounts');
+  // Every assistant event carries the id the cap needs.
+  assert.equal(turns.every((t) => typeof t.id === 'string' && t.id), true);
+  // And the result is still read the same way.
+  const result = evs.find((e) => e.kind === 'result');
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'REFUSED');
+});
+
+test('peerStreamEvent hands back null for an id a build does not send', () => {
+  // The fallback path: no id means the caller counts events, which is what it always did —
+  // wrong in the same direction as before rather than uncapped.
+  const noId = peerStreamEvent(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } }));
+  assert.equal(noId.kind, 'turn');
+  assert.equal(noId.id, null);
+  assert.equal(noId.text, 'hi');
+});
+
+test('the progress line still reads the same events', () => {
+  const evs = REAL_STREAM_2026_08_30.map(peerStreamEvent).filter(Boolean).filter((e) => e.kind === 'turn');
+  assert.equal(peerProgressLine(evs[1]), 'Let me read it.');
+  assert.equal(peerProgressLine(evs[2]), '\u00b7 Read');
+  assert.equal(peerProgressLine(evs[0]), '', 'a thinking-only event says nothing');
+});

@@ -125,17 +125,25 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   `peer-mcp.mjs` are new files) and six of them spend tokens. Prove: full sweep at the next
   release gate.
   **DISCHARGED — 0.21.0 gate, 2026-08-29: all thirteen re-run, all green. The judgement held.**
-- 2026-08-29 · The peer executor has NEVER been a real `claude`. `smoke-peer` drives
-  `scripts/fake-claude.mjs`, so five flags on the spawn argv are unverified against the real
-  binary even though they are documented in its `--help` on 2.1.251: `--restricted`,
-  `--strict-mcp-config`, `--tools`, `--json-schema` and `--no-session-persistence`. In particular
-  nobody has SEEN `--restricted` refuse a read outside the scratch directory. Prove: one live run
-  with `--model claude-haiku-4-5-20251001` and a prompt that tries to read `~/.ssh` — it must come
-  back refused, not empty.
-- 2026-08-29 · The turn cap counts `{"type":"assistant"}` events in the stream. That one such
+- ~~2026-08-29 · The peer executor has NEVER been a real `claude`. … nobody has SEEN
+  `--restricted` refuse a read outside the scratch directory.~~
+  **DISCHARGED — campaign, 2026-08-30.** One live run, the SHIPPED `peerSpawnArgs`, real claude
+  2.1.251, `--model claude-haiku-4-5-20251001`, $0.012. All five flags accepted (exit 0, empty
+  stderr). `--restricted` refused the read in its own words, and the refusal is quoted here
+  because that is the whole point of the deferral:
+  `/Users/roypadina/.ssh is outside /private/var/folders/…/jam-livepeer-PoR9gs; --restricted
+  confines the file tools to the working directory.` Refused, not empty. The stream also carried
+  a `system/permission_denied` event, so the daemon could see it too.
+- ~~2026-08-29 · The turn cap counts `{"type":"assistant"}` events in the stream. That one such
   event is one turn is taken from the documented event shape, not measured against a real stream
-  — a build that emitted two per turn would halve every cap. Prove: the same live haiku run, with
-  the count compared against the `result` frame's own `num_turns`.
+  — a build that emitted two per turn would halve every cap.~~
+  **DISCHARGED — campaign, 2026-08-30, AND THE FEAR WAS RIGHT.** Measured on the live run above:
+  **6 `assistant` events, 2 distinct `message.id`s, `result.num_turns: 3`.** 2.1.251 emits one
+  event per CONTENT BLOCK — thinking, text, tool_use, tool_use / thinking, text — so the cap
+  counted thinking and every tool call as turns of their own. A `--turns 12` task got about four,
+  and the consent block promised twelve. Fixed by counting distinct `message.id`s; the stand-in
+  now emits ids and a `blocks` mode reproducing the measured shape, and `smoke-peer` step 9b
+  fails without the fix (verified by reverting it).
 - 2026-08-29 · `--max-turns` DOES NOT EXIST on claude 2.1.251 (checked in `--help` 2026-08-29),
   so the spec's `--max-turns <n>` could not be passed and jam enforces the turn cap itself by
   counting the stream and killing the child by pid. `--max-budget-usd` exists and is a real spend

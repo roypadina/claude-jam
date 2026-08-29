@@ -19,8 +19,22 @@ const logFile = process.env.FAKE_PEER_LOG;
 const mode = (() => { try { return fs.readFileSync(modeFile, 'utf8').trim(); } catch { return 'ok'; } })();
 
 const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+// Measured on claude 2.1.251, 2026-08-30: a real stream carries a `message.id`, and emits ONE
+// event PER CONTENT BLOCK — six events under two ids for a two-turn task. A stand-in without ids
+// only ever exercised the no-id fallback, so the counter that ships was never driven by the shape
+// it actually meets. One id per `turn()` call: one call is one turn, which is what the smoke means.
+let msgN = 0;
+const nextId = () => `msg_fake${String(++msgN).padStart(4, '0')}`;
 const turn = (text, tools = []) => out({ type: 'assistant',
-  message: { content: [...(text ? [{ type: 'text', text }] : []), ...tools.map((name) => ({ type: 'tool_use', name }))] } });
+  message: { id: nextId(), content: [...(text ? [{ type: 'text', text }] : []), ...tools.map((name) => ({ type: 'tool_use', name }))] } });
+// The real multi-block shape: several events, ONE message id, ONE turn. `blocks` mode below uses
+// it so the smoke can prove the cap counts messages rather than events.
+const splitTurn = (text, tools = []) => {
+  const id = nextId();
+  out({ type: 'assistant', message: { id, content: [{ type: 'thinking', thinking: 'mulling it over' }] } });
+  if (text) out({ type: 'assistant', message: { id, content: [{ type: 'text', text }] } });
+  for (const name of tools) out({ type: 'assistant', message: { id, content: [{ type: 'tool_use', name }] } });
+};
 const result = (text, { ok = true, subtype = 'success' } = {}) =>
   out({ type: 'result', subtype, is_error: !ok, result: text });
 
@@ -55,6 +69,13 @@ process.stdin.on('end', () => {
     // More turns than any cap the smoke sets, as fast as it can: the turn counter has to stop it.
     const t = setInterval(() => turn('another turn'), 5);
     return t;
+  }
+  if (mode === 'blocks') {
+    // Exactly the 2026-08-30 measurement: two turns, six events. A cap of 3 must NOT stop this —
+    // counting events, it would have stopped inside the first turn.
+    splitTurn('let me look', ['Read', 'Glob']);
+    splitTurn('done looking');
+    return result('two turns, six events');
   }
   if (mode === 'schema') {
     turn('answering with json');
