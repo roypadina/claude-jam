@@ -119,10 +119,18 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   matching the watcher, i.e. an injection loop on a live session, and the baseline being taken by
   whichever tick happened to run first. Both are fixed and both have tests. It was a
   run-it-twelve-times step, not a run-it-once step; treat the real-capture version the same way.)
-- 2026-08-29 · The ROSTER re-brief has unit tests (`briefUpdateDecision`, `rosterKey`) but no
-  end-to-end run: proving it needs a fake clock, because the 10-minute rate limit is armed by the
-  adoption briefing seconds earlier. Prove: either a `--brief-min-gap` test hook, or a campaign
-  run long enough to cross the gap with somebody joining.
+- ~~2026-08-29 · The ROSTER re-brief has unit tests (`briefUpdateDecision`, `rosterKey`) but no
+  end-to-end run: proving it needs a fake clock … Prove: either a `--brief-min-gap` test hook, or
+  a campaign run long enough to cross the gap with somebody joining.~~
+  **DISCHARGED — campaign, 2026-08-30.** The hook, as `JAM_BRIEF_MIN_GAP` — an internal `JAM_*`
+  var like `JAM_HOOK_SECRET`, deliberately NOT a flag, so `--help`, `/menu`, `MANUAL.md`, the
+  README and the wiki gain nothing. `smoke-adopt` S13 adopts a pane of its own with the gap at 0,
+  waits for the adoption briefing, has somebody JOIN, and asserts the re-brief lands in the pane
+  naming them, keeps the standing rules, and is logged on the `roster` path rather than the
+  compaction one. Ignoring the hook makes S13 time out, which was checked — so the deferral's own
+  claim (the gap made this unreachable in a smoke) is now measured rather than assumed.
+  S13 runs LAST on purpose: adoption names its own session `claude-jam`, so two adopted jams at
+  once make `claude-jam end <name>` ambiguous — found the hard way while writing it.
 - 2026-08-29 · v0.29 peer tasks: of the other seventeen smokes, four were re-run and thirteen were
   not. RE-RUN and green: `smoke-lifecycle` (real jams through the launcher, and `writeSystemPrompt`
   took a new argument), `smoke-answer` (the daemon's frame dispatch plus a real ink client),
