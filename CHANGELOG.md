@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### v0.29 — peer tasks: the wire (step 1 of 5)
+
+The protocol half of "the host's agent can dispatch to a guest's own Claude Code". Nothing spawns
+yet — this is the switch, the opt-in, the roster fields and the four frames.
+
+- **`claude-jam host --peer-tasks`** — off unless you pass it. Even with it, nothing can be
+  dispatched to anybody until that guest types `/peer on`, and every individual task still waits
+  for that guest's yes.
+- **`/peer on | off | never | reset | status`** — a decision about YOUR machine, made in YOUR
+  client. `never` is a one-way door for the life of that client process, and no host can clear it.
+  `reset` zeroes your own daily task counter.
+- **`/peers`** lists who has opted in, who is busy and how many tasks they have run today;
+  **`/peers log`** is the audit trail (`peer-log.jsonl` in the jam's state dir), readable by both
+  sides.
+- **The roster carries `peers` and `peerTasks`**, so a client can say "off for this jam" rather
+  than "nobody has opted in".
+- **The wire**: `{t:'peertask'}` (host asks) → `{t:'peertask-ack'|'peertask-decline'}` →
+  `{t:'peertask-progress'}` → `{t:'peertask-result'}`. Modelled on the v0.14 approval ladder with
+  the direction INVERTED: everywhere else a guest asks and the host approves, because the host's
+  machine is at stake; here the host asks and the guest approves, because the guest's machine,
+  account and quota are.
+- **A peer who cannot take a task is reported, never queued** — off, unknown, not opted in, busy,
+  offline, or the host's own claude, each with its own reason and the fix.
+- **The compliance frame is part of the feature.** A task runs on the guest's machine, in the
+  guest's own already-authenticated Claude Code, on the guest's quota, and only after that guest
+  approves that specific task. No credential ever crosses the wire. The guest may decline
+  anything, every time, with no reason. Whether a coordinated multi-account fan-out counts as
+  ordinary individual usage is an **open question** — see the `Peer-Tasks` wiki page.
+
 ### v0.33 — adopt a running session (share the jam you are already in)
 
 Sharing used to mean `claude-jam host --resume <id>`, which RESTARTS the conversation in a pane of
