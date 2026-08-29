@@ -9,7 +9,13 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   // v0.17 Batch T: relay respawn, socket heartbeat, reconnect tiering, Tailscale Funnel.
   respawnDelay, RESPAWN_MIN_MS, RESPAWN_MAX_MS, heartbeatSweep, HEARTBEAT_MS,
   reconnectMessage, RECONNECT_TIER, resolveTailscale, TAILSCALE_PATHS, funnelHost,
-  parseFunnelUrl, FUNNEL_URL_RE, funnelPrecheck, FUNNEL_CAP, FUNNEL_PORTS } from './lib.mjs';
+  parseFunnelUrl, FUNNEL_URL_RE, funnelPrecheck, FUNNEL_CAP, FUNNEL_PORTS,
+  // v0.17 Batch H: history backfill + the divider. Batch F: diffs, /files, /diff, masking.
+  backfillHistory, REPLAY_DEFAULT, REPLAY_MAX, historyDivider,
+  toolDiffText, toolFile, toolLiveLine, DIFF_TOOLS, FILE_TOOLS, TOOL_DIFF_LINES, TOOL_DIFF_LINE_MAX,
+  noteFilePath, filesNewestFirst, filesReport, FILES_MAX,
+  validDiffPath, gitDiffArgs, capOutput, OUT_MAX_LINES, OUT_MAX_CHARS, DIFF_PATH_MAX,
+  maskSecrets, SECRET_MASK } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -1500,4 +1506,349 @@ test('T4 funnelPrecheck: a status blob with no BackendState at all is still judg
   // Older/odd CLI output: absence of BackendState must not read as "not Running".
   const ok = funnelPrecheck(JSON.stringify({ Self: { DNSName: 'a.b.ts.net.', CapMap: { [FUNNEL_CAP]: null } } }));
   assert.deepEqual(ok, { ok: true, dns: 'a.b.ts.net' });
+});
+
+// --- v0.17 Batch H: history backfill + the divider --------------------------------
+
+test('H1 backfillHistory: the on-disk transcript becomes the same events broadcast() sends', () => {
+  const jsonl = [
+    user('start the tests'),
+    asst([{ type: 'text', text: 'on it' }]),
+    asst([{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }]),
+    user([{ type: 'tool_result', tool_use_id: 'x', content: '159 passing' }]),
+    asst([{ type: 'text', text: 'all green' }]),
+  ].join('\n');
+  const { events, total } = backfillHistory(jsonl, { hostName: 'Roy' });
+  // These shapes are onTranscript's (host.mjs), which is the point: a replayed event has to be
+  // indistinguishable from the live one, minus id/ts (the daemon stamps those).
+  assert.deepEqual(events, [
+    { t: 'say', from: 'Roy', text: 'start the tests' },
+    { t: 'agent', kind: 'text', text: 'on it' },
+    { t: 'agent', kind: 'tool', text: 'Bash: {"command":"npm test"}' },
+    { t: 'agent', kind: 'tool-result', text: '159 passing' },
+    { t: 'agent', kind: 'text', text: 'all green' },
+  ]);
+  assert.equal(total, 5);
+});
+
+test('H1 backfillHistory: a bridged line keeps its author and loses the [Name]: prefix', () => {
+  // The live broadcast of an injected message is {t:'say', from:'Dana', text:'hello'} — the
+  // prefix only exists inside the pane — so the replay must not put it back in the text.
+  const { events } = backfillHistory(user('[Dana]: rerun the tests'), { hostName: 'Roy' });
+  assert.deepEqual(events, [{ t: 'say', from: 'Dana', text: 'rerun the tests' }]);
+});
+
+test('H1 backfillHistory: --replay N keeps the NEWEST N events, not the first', () => {
+  const lines = [...Array(10).keys()].map((i) => asst([{ type: 'text', text: `line ${i}` }])).join('\n');
+  const { events, total } = backfillHistory(lines, { cap: 3 });
+  assert.equal(total, 10);
+  assert.deepEqual(events.map((e) => e.text), ['line 7', 'line 8', 'line 9']);
+  // Cap 0 = the flag turned off: parsed, counted, nothing kept.
+  assert.deepEqual(backfillHistory(lines, { cap: 0 }).events, []);
+  // A cap bigger than the file is not padded, and a garbage cap falls back to the default.
+  assert.equal(backfillHistory(lines, { cap: 999 }).events.length, 10);
+  for (const bad of [undefined, null, NaN, 'x', -5]) {
+    assert.equal(backfillHistory(lines, { cap: bad }).events.length, 10, JSON.stringify(bad));
+  }
+  assert.equal(REPLAY_DEFAULT, 300);
+  assert.ok(REPLAY_MAX > REPLAY_DEFAULT);
+});
+
+test('H1 backfillHistory: the per-turn tool-result budget is the live one, and it resets per turn', () => {
+  const results = (n) => [...Array(n).keys()].map((i) => user([{ type: 'tool_result', tool_use_id: `t${i}`, content: `out ${i}` }]));
+  const { events } = backfillHistory([...results(8), user('next question'), ...results(2)].join('\n'));
+  const shown = events.filter((e) => e.kind === 'tool-result');
+  // Five shown, one '…', the rest dropped — exactly toolResultAction's ladder.
+  assert.deepEqual(shown.map((e) => e.text), ['out 0', 'out 1', 'out 2', 'out 3', 'out 4', '…', 'out 0', 'out 1']);
+  assert.equal(events.filter((e) => e.t === 'say').length, 1);
+});
+
+test('H1 backfillHistory: broken lines, empty input and control characters cannot break a boot', () => {
+  assert.deepEqual(backfillHistory('').events, []);
+  assert.deepEqual(backfillHistory(undefined).events, []);
+  assert.deepEqual(backfillHistory('not json\n\n{"type":"nope"}\nnull\n[]').events, []);
+  // Agent text lands in everybody's terminal, so the escape sequences go here too.
+  const { events } = backfillHistory(asst([{ type: 'text', text: '\x1b[31mred\x1b[0m\x07 done' }]));
+  assert.deepEqual(events, [{ t: 'agent', kind: 'text', text: 'red done' }]);
+});
+
+test('H1 backfillHistory: the file set comes back newest-first with a per-path count', () => {
+  const jsonl = [
+    asst([{ type: 'tool_use', name: 'Read', input: { file_path: '/p/a.mjs' } }]),
+    asst([{ type: 'tool_use', name: 'Edit', input: { file_path: '/p/b.mjs', old_string: 'x', new_string: 'y' } }]),
+    asst([{ type: 'tool_use', name: 'Read', input: { file_path: '/p/a.mjs' } }]),
+    asst([{ type: 'tool_use', name: 'Bash', input: { command: 'ls /p' } }]),
+    asst([{ type: 'tool_use', name: 'Grep', input: { pattern: 'x', path: '/p' } }]),
+  ].join('\n');
+  const { files } = backfillHistory(jsonl);
+  // a.mjs was touched last, so it leads; Bash and Grep name no file of their own.
+  assert.deepEqual(filesNewestFirst(files), [{ path: '/p/a.mjs', n: 2 }, { path: '/p/b.mjs', n: 1 }]);
+});
+
+test('H2 historyDivider: a line only when there was actually a backlog', () => {
+  const d = historyDivider(12);
+  assert.match(d, /history above/);
+  assert.match(d, /live from here/);
+  assert.match(d, /12 replayed/);
+  assert.match(d, /^─+ /);
+  assert.match(d, / ─+$/);
+  for (const none of [0, -1, undefined, null, NaN, 'x']) {
+    assert.equal(historyDivider(none), null, JSON.stringify(none));
+  }
+});
+
+// --- v0.17 F1: Edit/MultiEdit/Write render as a real diff --------------------------
+
+test('F1 an Edit tool call renders as path + real -/+ lines, not truncated JSON', () => {
+  const [e] = parseJsonlLine(asst([{ type: 'tool_use', name: 'Edit',
+    input: { file_path: '/p/lib.mjs', old_string: 'const a = 1;\nconst b = 2;', new_string: 'const a = 2;\nconst b = 2;' } }]));
+  assert.equal(e.kind, 'tool');
+  assert.equal(e.file, '/p/lib.mjs');
+  assert.deepEqual(e.text.split('\n'), [
+    'Edit: /p/lib.mjs',
+    '- const a = 1;',
+    '- const b = 2;',
+    '+ const a = 2;',
+    '+ const b = 2;',
+  ]);
+  // The collapse machinery keys off the name before the first colon — it still finds it.
+  assert.equal(toolName(e.text), 'Edit');
+});
+
+test('F1 MultiEdit counts its edits, Write is all + lines, everything else keeps the JSON summary', () => {
+  const multi = toolDiffText('MultiEdit', { file_path: '/p/x.mjs',
+    edits: [{ old_string: 'a', new_string: 'b' }, { old_string: 'c', new_string: 'd' }] });
+  assert.deepEqual(multi.split('\n'), ['MultiEdit: /p/x.mjs (2 edits)', '- a', '+ b', '- c', '+ d']);
+  assert.match(toolDiffText('MultiEdit', { file_path: '/p/x.mjs', edits: [{ old_string: 'a', new_string: 'b' }] }), /\(1 edit\)/);
+  assert.deepEqual(toolDiffText('Write', { file_path: '/p/new.mjs', content: 'one\ntwo' }).split('\n'),
+    ['Write: /p/new.mjs', '+ one', '+ two']);
+  // A tool jam knows nothing about is untouched: no diff, and the old summary shape.
+  assert.equal(toolDiffText('Bash', { command: 'ls' }), null);
+  const [bash] = parseJsonlLine(asst([{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }]));
+  assert.equal(bash.text, 'Bash: {"command":"ls"}');
+  assert.equal('file' in bash, false);
+  for (const t of DIFF_TOOLS) assert.ok(FILE_TOOLS.has(t), `${t} should count as a file tool too`);
+});
+
+test('F1 a diff is capped per line and per diff, and says how much it dropped', () => {
+  const long = 'x'.repeat(400);
+  const one = toolDiffText('Edit', { file_path: '/p/a', old_string: long, new_string: 'y' });
+  const oldLine = one.split('\n')[1];
+  assert.ok(oldLine.length <= TOOL_DIFF_LINE_MAX + 2, `${oldLine.length} chars`);
+  assert.ok(oldLine.endsWith('…'));
+  const many = toolDiffText('Write', { file_path: '/p/a', content: [...Array(60).keys()].join('\n') });
+  const lines = many.split('\n');
+  assert.equal(lines.length, TOOL_DIFF_LINES + 2); // header + budget + the "more" note
+  assert.match(lines.at(-1), /… 40 more diff line\(s\)/);
+});
+
+test('F1 a diff-shaped tool with nothing diff-shaped in it falls back to the JSON summary', () => {
+  assert.equal(toolDiffText('Edit', {}), null);
+  assert.equal(toolDiffText('Edit', undefined), null);
+  // A path but no strings is still worth the path.
+  assert.equal(toolDiffText('Edit', { file_path: '/p/a' }), 'Edit: /p/a');
+  // Strings but no path: rendered, with the path unknown rather than dropped.
+  assert.deepEqual(toolDiffText('Edit', { old_string: 'a', new_string: 'b' }).split('\n'), ['Edit: ?', '- a', '+ b']);
+  const [e] = parseJsonlLine(asst([{ type: 'tool_use', name: 'Edit', input: {} }]));
+  assert.equal(e.text, 'Edit: {}');
+});
+
+test('F1 toolLiveLine: the live region gets one row per tool call, whole diff or not', () => {
+  assert.equal(toolLiveLine('Bash: {"command":"ls"}'), 'Bash: {"command":"ls"}');
+  assert.equal(toolLiveLine('Edit: /p/a\n- one\n+ two'), 'Edit: /p/a  (+2 diff line(s))');
+  assert.equal(toolLiveLine(''), '');
+  assert.equal(toolLiveLine(undefined), '');
+  // LIVE_TOOL_ROWS rows really are rows: four one-line calls is four rows, and the status and
+  // input rows below them survive.
+  const rows = [...Array(4).keys()].map(() => toolLiveLine('Edit: /p/a\n- x\n+ y'));
+  assert.equal(rows.join('\n').split('\n').length, LIVE_TOOL_ROWS);
+});
+
+// --- v0.17 F2: /files --------------------------------------------------------------
+
+test('F2 toolFile: only the tools that name one file they read or wrote', () => {
+  assert.equal(toolFile('Read', { file_path: '/p/a' }), '/p/a');
+  assert.equal(toolFile('Edit', { file_path: ' /p/a ' }), '/p/a');
+  assert.equal(toolFile('Write', { file_path: '/p/a' }), '/p/a');
+  assert.equal(toolFile('MultiEdit', { file_path: '/p/a' }), '/p/a');
+  // Grep/Glob's `path` is a directory to search in, not a file this session touched.
+  assert.equal(toolFile('Grep', { path: '/p' }), null);
+  assert.equal(toolFile('Bash', { command: 'cat /p/a' }), null);
+  for (const bad of [{}, { file_path: '' }, { file_path: '   ' }, { file_path: 7 }, undefined]) {
+    assert.equal(toolFile('Read', bad), null, JSON.stringify(bad));
+  }
+});
+
+test('F2 noteFilePath: the last touch moves a path to the front of the order', () => {
+  const m = new Map();
+  for (const f of ['/p/a', '/p/b', '/p/a', '/p/c', '/p/b']) noteFilePath(m, f);
+  noteFilePath(m, null); // nothing to note, and no empty key either
+  noteFilePath(m, undefined);
+  assert.deepEqual(filesNewestFirst(m), [{ path: '/p/b', n: 2 }, { path: '/p/c', n: 1 }, { path: '/p/a', n: 2 }]);
+  assert.deepEqual(filesNewestFirst(new Map()), []);
+  assert.deepEqual(filesNewestFirst(), []);
+});
+
+test('F2 filesReport: newest first, counted, shortened against the project dir', () => {
+  const report = filesReport([{ path: '/p/proj/lib.mjs', n: 3 }, { path: '/etc/hosts', n: 1 }], '/p/proj');
+  assert.deepEqual(report.split('\n'), [
+    '2 file(s) touched this session, newest first:',
+    '  ×3  lib.mjs',
+    '  ×1  /etc/hosts', // outside the project: absolute, so nobody misreads it as a project file
+  ]);
+  // A sibling directory must not be mistaken for "inside the project".
+  assert.match(filesReport([{ path: '/p/project-other/x', n: 1 }], '/p/proj'), /\/p\/project-other\/x/);
+  assert.match(filesReport([]), /no files yet/);
+  const many = [...Array(FILES_MAX + 4).keys()].map((i) => ({ path: `/p/${i}`, n: 1 }));
+  const capped = filesReport(many, '/p');
+  assert.equal(capped.split('\n').length, FILES_MAX + 2); // header + FILES_MAX + the "more" note
+  assert.match(capped.split('\n').at(-1), /… 4 more/);
+});
+
+// --- v0.17 F3: /diff ---------------------------------------------------------------
+
+test('F3 gitDiffArgs: --stat by default, a pathspec after --, argv only', () => {
+  assert.deepEqual(gitDiffArgs('/p/proj'), ['-C', '/p/proj', 'diff', '--stat']);
+  assert.deepEqual(gitDiffArgs('/p/proj', 'lib.mjs'), ['-C', '/p/proj', 'diff', '--', 'lib.mjs']);
+  // `--` is what makes a pathspec a pathspec: with it, git can never read one as an option.
+  assert.ok(gitDiffArgs('/p', 'x').indexOf('--') < gitDiffArgs('/p', 'x').indexOf('x'));
+  // Every element is its own argv slot — nothing is a string a shell would have to split.
+  for (const a of gitDiffArgs('/p/a b/c', 'a b.mjs')) assert.equal(typeof a, 'string');
+  assert.deepEqual(gitDiffArgs('/p/a b/c', 'a b.mjs').at(-1), 'a b.mjs');
+});
+
+test('F3 validDiffPath: no argument is the summary, and a path is a trust boundary', () => {
+  for (const none of [undefined, null, '', '   ']) assert.deepEqual(validDiffPath(none), { ok: true, path: null }, JSON.stringify(none));
+  assert.deepEqual(validDiffPath(' lib.mjs '), { ok: true, path: 'lib.mjs' });
+  assert.deepEqual(validDiffPath('src/a b.mjs'), { ok: true, path: 'src/a b.mjs' });
+  // A leading dash would be a git option, not a path — the one that actually matters.
+  const dash = validDiffPath('--output=/tmp/x');
+  assert.equal(dash.ok, false);
+  assert.match(dash.error, /may not start with "-"/);
+  assert.equal(validDiffPath('-p').ok, false);
+  // Control characters, traversal, absurd length, and a non-string from a hand-rolled client.
+  assert.equal(validDiffPath('a\nb').ok, false);
+  assert.equal(validDiffPath('a\x00b').ok, false);
+  assert.equal(validDiffPath('../../etc/passwd').ok, false);
+  assert.equal(validDiffPath('a/../b').ok, false);
+  assert.equal(validDiffPath('x'.repeat(DIFF_PATH_MAX + 1)).ok, false);
+  assert.equal(validDiffPath(42).ok, false);
+  assert.equal(validDiffPath({}).ok, false);
+  // …but a file whose name merely contains dots is fine.
+  assert.deepEqual(validDiffPath('a..b.mjs'), { ok: true, path: 'a..b.mjs' });
+});
+
+test('F3 client: /diff and /files parse into their own actions', () => {
+  assert.deepEqual(parseClientLine('/files'), { kind: 'files' });
+  assert.deepEqual(parseClientLine('/diff'), { kind: 'diff', path: null });
+  assert.deepEqual(parseClientLine('/diff lib.mjs'), { kind: 'diff', path: 'lib.mjs' });
+  const bad = parseClientLine('/diff --output=/tmp/x');
+  assert.equal(bad.kind, 'error');
+  assert.match(bad.text, /git option/);
+  // Neither is ever typed into the TUI as one of claude's commands.
+  assert.equal(parseClientLine('/filesy').kind, 'slash');
+  assert.equal(parseClientLine('/diffy').kind, 'slash');
+});
+
+test('F3 capOutput: a long diff is cut by lines then by characters, and says so', () => {
+  const short = 'a\nb\nc';
+  assert.equal(capOutput(short), short);
+  const many = [...Array(OUT_MAX_LINES + 5).keys()].map((i) => `line ${i}`).join('\n');
+  const cut = capOutput(many);
+  assert.equal(cut.split('\n').length, OUT_MAX_LINES + 1);
+  assert.match(cut.split('\n').at(-1), /… 5 more line\(s\)/);
+  const wide = capOutput('x'.repeat(OUT_MAX_CHARS + 500));
+  assert.ok(wide.length <= OUT_MAX_CHARS + 80);
+  assert.match(wide, /truncated at 8000 characters/);
+  assert.equal(capOutput(''), '');
+  assert.equal(capOutput(undefined), '');
+});
+
+// --- v0.17 F4: best-effort secret masking -----------------------------------------
+
+test('F4 maskSecrets: the five shapes on the deny-list are masked', () => {
+  const cases = [
+    ['aws_access_key_id = AKIAIOSFODNN7EXAMPLE', /AKIA/],
+    ['ASIAY34FZKBOKMUTVV7A is a session key', /ASIA/],
+    ['Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9', /eyJhbG/],
+    ['OPENAI_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123', /sk-proj/],
+    ['token ghp_abcdefghijklmnopqrstuvwxyz0123', /ghp_/],
+    ['-----BEGIN OPENSSH PRIVATE KEY-----', /PRIVATE KEY/],
+    ['AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', /wJalr/],
+    ['DB_PASSWORD: "hunter2hunter2"', /hunter2/],
+    ['MY_API_KEY = 0123456789abcdef', /0123456789abcdef/],
+  ];
+  for (const [raw, leak] of cases) {
+    const out = maskSecrets(raw);
+    assert.doesNotMatch(out, leak, `still leaking: ${out}`);
+    assert.match(out, /\[masked\]/, raw);
+  }
+  // A whole PEM block collapses to one marker, END line included.
+  const pem = maskSecrets('before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----\nafter');
+  assert.equal(pem, `before\n${SECRET_MASK}\nafter`);
+  // The key name survives so the line still reads — only the value goes.
+  assert.equal(maskSecrets('GITHUB_TOKEN=ghp_0123456789abcdefghij'), 'GITHUB_TOKEN=[masked]');
+});
+
+test('F4 maskSecrets: the false-positive corpus comes through untouched', () => {
+  const keep = [
+    'the token is in the host\'s context, ask them for it',
+    'jam join wss://x.trycloudflare.com --name You --token smoketoken',
+    'PORT=7777',
+    'NODE_ENV=production',
+    '# TODO: add token refresh',
+    'sk-1', // too short to be a key
+    'Bearer', // the word on its own
+    '-----BEGIN CERTIFICATE-----', // a public certificate is not a secret
+    'git diff --stat',
+    'AKIA', // the prefix with no key after it
+    'AKIAIOSFODNN7EXAMPL', // 15 characters, one short
+    'const password = readPassword();',
+    'export function maskSecrets(text) {',
+    '',
+  ];
+  for (const s of keep) assert.equal(maskSecrets(s), s, `false positive: ${s}`);
+  assert.equal(maskSecrets(undefined), '');
+  assert.equal(maskSecrets(null), '');
+  assert.equal(maskSecrets(42), '42');
+  // Idempotent: masking an already-masked line changes nothing further.
+  const once = maskSecrets('KEY_SECRET=abcdefghijklmnop');
+  assert.equal(maskSecrets(once), once);
+});
+
+test('F4 masking is applied where content reaches other people: frame rows, tool calls, results', () => {
+  // A mirror row — the one place a secret reaches every guest without anybody sending it.
+  const row = sanitizeFrameRow('\x1b[32m$ echo AKIAIOSFODNN7EXAMPLE\x1b[0m');
+  assert.doesNotMatch(row, /AKIAIOSFODNN7EXAMPLE/);
+  assert.match(row, /\[masked\]/);
+  assert.ok(row.includes('\x1b['), 'the row lost its colours');
+  // A tool call's arguments…
+  const [call] = parseJsonlLine(asst([{ type: 'tool_use', name: 'Bash',
+    input: { command: 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY aws s3 ls' } }]));
+  assert.doesNotMatch(call.text, /wJalr/);
+  // …an F1 diff, which is the reason F4 shipped in the same batch…
+  const [edit] = parseJsonlLine(asst([{ type: 'tool_use', name: 'Write',
+    input: { file_path: '/p/.env', content: 'API_TOKEN=abcdef0123456789' } }]));
+  assert.deepEqual(edit.text.split('\n'), ['Write: /p/.env', '+ API_TOKEN=[masked]']);
+  // …and a tool result, which is file contents by another name.
+  assert.equal(toolResultText('SLACK_TOKEN=xoxb-0123456789-abcdefghij'), 'SLACK_TOKEN=[masked]');
+  // A backfilled history event is masked by the same path, so a replay cannot leak either.
+  const { events } = backfillHistory(asst([{ type: 'tool_use', name: 'Edit',
+    input: { file_path: '/p/.env', old_string: 'X_SECRET=old0123456789', new_string: 'X_SECRET=new0123456789' } }]));
+  assert.deepEqual(events[0].text.split('\n'), ['Edit: /p/.env', '- X_SECRET=[masked]', '+ X_SECRET=[masked]']);
+});
+
+test('F4 the hint gate is the hot path: a row with no secret shape costs one scan and returns the same string', () => {
+  // Not a timing test (that lives in the mirror smoke) — the contract that makes it fast is
+  // identity: a row with nothing to mask is handed straight back, no allocation, no rules run.
+  const plain = '│ ⏵⏵ bypass permissions on                                    │';
+  assert.equal(maskSecrets(plain), plain);
+  // And the gate must be a superset of the rules: anything a rule can match, the hint sees.
+  for (const s of ['AKIAIOSFODNN7EXAMPLE', '-----BEGIN EC PRIVATE KEY-----', 'sk-0123456789abcdefgh',
+    'ghp_0123456789abcdefghij', 'Bearer 0123456789abcdefghij', 'A_SECRET=0123456789',
+    'A_TOKEN=0123456789', 'A_PASSWORD=0123456789', 'A_PASSWD=0123456789', 'A_APIKEY=0123456789',
+    'A_API_KEY=0123456789', 'A_ACCESS_KEY=0123456789', 'A_PRIVATE_KEY=0123456789',
+    'A_CREDENTIAL=0123456789', 'A_CREDENTIALS=0123456789']) {
+    assert.match(maskSecrets(s), /\[masked\]/, `the hint gate swallowed ${s}`);
+  }
 });
