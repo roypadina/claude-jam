@@ -3544,7 +3544,9 @@ export function menuTree({ host = true, state = {} } = {}) {
           + 'already running in — no restart, no lost context. Run it from inside that session '
           + '(claude can run it for you), or point `--pane %23 [--socket NAME]` at one. It shows '
           + 'what it resolved and asks first. Ending an adopted jam stops claude-jam and leaves '
-          + 'the pane, the tmux session and claude exactly as they were.' },
+          + 'the pane, the tmux session and claude exactly as they were. At adoption claude is '
+          + 'TOLD it is shared — one injected message, because a running claude cannot be given '
+          + 'hooks or a system prompt; `--no-brief` skips it.' },
       ...(host ? [{ id: 'help.flags', label: 'Host launch flags', covers: [],
         desc: 'what `claude-jam host` takes, and what each flag does',
         items: HOST_FLAGS.map((f) => ({ id: `flag${f.flag}`, label: `${f.flag}${f.arg ? ` ${f.arg}` : ''}`,
@@ -4378,6 +4380,66 @@ export function adoptAlreadyAdoptedText(pane, row = {}) {
 // contract between the two halves. Everything the resolution learned is passed explicitly —
 // recomputing the cwd or the session id in the second process is exactly how two halves of one
 // command come to disagree about what they are sharing.
+// ------------------------------------------------- v0.33: telling claude it is shared ----
+// A jam claude-jam STARTS gets the contract twice over: an appended system prompt that survives a
+// /compact, and the SessionStart hook. An ADOPTED claude can be given neither — both are read
+// once, at startup, and it started before claude-jam existed for it. What claude-jam does own is
+// the injection path, so the contract is TYPED IN instead.
+//
+// The prefix is `[claude-jam:tool]: `, and the colon is the point: NAME_RE has no `:` in it, so
+// no participant can ever hold that name and no guest's own text can carry that prefix
+// (neutralizePrefixes bends any line that tries). "This is the tool talking, not a person" is
+// therefore structural rather than a convention.
+export const BRIEF_NAME = 'claude-jam:tool';
+
+// The contract itself is buildSystemPrompt's, verbatim — one wording for the started case and the
+// adopted case, because two copies of a security contract drift and the copy claude is holding is
+// the one that decides what it does.
+export function buildBriefing({ hostName = 'the host', manual = 'MANUAL.md', participants = [],
+  jamName = '', reason = 'adoption' } = {}) {
+  const who = (Array.isArray(participants) ? participants : []).filter(Boolean);
+  const head = {
+    adoption: 'claude-jam is now bridging this session. It was ADOPTED where it stands — nothing '
+      + 'was restarted, everything above this line is still yours — and other humans can now read '
+      + 'this screen and type into it.',
+    compaction: 'Re-stating this because the context it was in has just been compacted or '
+      + 'cleared: this session is SHARED, and it is still shared.',
+    roster: 'Re-stating this because who is in the room has changed. This session is SHARED.',
+  }[reason] || 'This session is SHARED, and claude-jam is bridging it.';
+  return [
+    head,
+    'This message is from the claude-jam tool itself, not from a participant.',
+    '',
+    buildSystemPrompt({ hostName, manual }).trim(),
+    '',
+    'RIGHT NOW',
+    `- This jam is called ${jamName ? `"${jamName}"` : '(unnamed)'}; the host is ${hostName}.`,
+    `- In the room: ${who.length ? who.join(', ') : `${hostName} (nobody else yet)`}.`,
+    `- The long version of all of this is at ${manual} — read it if a participant asks something`,
+    '  this summary does not answer.',
+    '- Because this session was ADOPTED rather than started by claude-jam, it could not be given',
+    '  claude-jam\'s hooks: claude-jam reads this screen to know when your turn ends or a prompt is',
+    '  waiting. Nothing for you to do about it — but do not tell anybody that hooks are running.',
+    '',
+    'Carry on with whatever you were doing. Nobody has asked you anything yet.',
+  ].join('\n');
+}
+
+// What the CLIENT says once, when the host chose not to tell claude. A jam where the agent does
+// not know it is shared is a jam where it may answer a participant as if it were the host — which
+// is the one thing the two standing rules exist to prevent — so this is not a quiet default.
+export function noBriefWarning() {
+  return 'this session was adopted with --no-brief: claude has NOT been told it is shared, so it '
+    + 'does not know about [Name]: prefixes, that /c is hidden from it, or that it must not read '
+    + 'the token out. Say so yourself, or restart the jam without --no-brief.';
+}
+
+// `--brief-updates on|off`. One word, one place that decides it.
+export const BRIEF_UPDATE_MODES = ['on', 'off'];
+export function briefUpdates(v) {
+  return BRIEF_UPDATE_MODES.includes(String(v ?? '')) ? String(v) : 'on';
+}
+
 export function adoptPlan({ pane, socket, cwd, sessionId, extra = [] } = {}) {
   if (!validPaneId(pane)) return { ok: false, error: `bad pane: ${pane}` };
   if (!SOCKET_NAME_RE.test(String(socket ?? ''))) return { ok: false, error: `bad socket: ${socket}` };

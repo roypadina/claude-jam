@@ -21,7 +21,9 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   // v0.25/v0.26/v0.27: the sound tiers, nudges and idle, and the two transfer policies.
   notifyPrefs, notifyPlan, KNOCK_REPEAT_MS, knockRepeat, NUDGE_ALL, IDLE_AFTER, idleBucket,
   whoReport, CONFIG_FILE, parseJamConfig, ntfyRequest, UPLOAD_POLICIES,
-  uploadPolicy } from './lib.mjs';
+  uploadPolicy,
+  // v0.33: what a client must say when an adopted session was NOT told it is shared.
+  noBriefWarning } from './lib.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './xfer.mjs';
@@ -475,6 +477,14 @@ function connect() {
       // v0.23: the jam's NAME leads, because that is what a human calls the room they just
       // walked into; the session id stays, in the same 8-char form every other surface shows.
       sys(`jam ${ev.session.jamName ? `"${ev.session.jamName}" ` : ''}(${String(ev.session.id).slice(0, 8)}) — host ${ev.session.hostName}, cwd ${ev.session.cwd}`);
+      // v0.33: same two lines the ink client says — an adopted jam ends differently, and a claude
+      // that was not told it is shared is something every participant has to know.
+      if (ev.session.adopted) {
+        sys('this jam ADOPTED a session that was already running: ending it stops claude-jam and '
+          + 'leaves the pane, its tmux session and claude exactly as they are. A running claude '
+          + 'cannot be given hooks, so turn-end and "waiting for permission" are read off the screen.');
+        if (ev.session.noBrief) err(noBriefWarning());
+      }
       if (IS_HOST) logJoin();
       // A restarted daemon reissues ids from 1, so old ids in `seen` would swallow
       // everything it sends. Drop them whenever the boot id changes.

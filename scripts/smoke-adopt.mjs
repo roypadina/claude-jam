@@ -8,14 +8,18 @@
 //   S4  a directory with no claude transcript is refused rather than adopting nothing
 //   S5  no terminal to confirm on and no --yes adopts NOTHING — no state dir, no tmux session
 //   S6  adopt (on a socket this smoke made): the daemon comes up, `sessions` says `adopted`,
-//       `--json` carries the pane, and a guest's mirror shows the REAL adopted pane
-//   S7  a guest's message lands in the adopted pane, whole
+//       `--json` carries the pane, and the ownership marker is on claude-jam's OWN session only
+//   S6b the BRIEFING lands in that pane, whole, prefixed `[claude-jam:tool]:` — the half an
+//       adopted claude cannot be given as a hook or a system prompt — and is NOT kept in the outbox
+//   S7  a guest's mirror shows the REAL adopted pane, and their message lands in it whole
 //   S8  the same pane cannot be adopted twice
 //   S9  `claude-jam clean` removes nothing while it is running
 //   S10 a jam of claude-jam's OWN is refused for adoption — `--attach` is the way back in
 //   S11 `claude-jam end`: the daemon, its session and its state dir go — and the ADOPTED session
 //       still exists, its pane still exists, and the process in it has the SAME pid
-//   S12 the same, once, on the DEFAULT tmux socket, which is the case the feature exists for
+//   S12 the same, once, on the DEFAULT tmux socket, which is the case the feature exists for —
+//       and this one runs `--no-brief`, so nothing is typed into the pane at all and every
+//       client's welcome carries `noBrief: true` to say claude has NOT been told
 //
 // Self-contained: its own $TMPDIR (so `claude-jam sessions|end|clean` cannot see a state dir that
 // is not this smoke's), its own $HOME (so the transcripts it invents are the only ones there),
@@ -29,7 +33,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { projectSlug } from '../lib.mjs';
+import { projectSlug, BRIEF_NAME, validName } from '../lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -240,7 +244,7 @@ try {
     const p = makePane(S.pane);
     adopted = p;
     const r = jam('adopt', '--pane', p.id, '--socket', SOCKET, '--yes', '--port', String(P.own),
-      '--token', TOKEN, '--no-popup', '--no-announce', '--no-attach', '--no-brief');
+      '--token', TOKEN, '--no-popup', '--no-announce', '--no-attach');
     console.log(`      ${r.out.trim().split('\n').slice(-7).join('\n      ')}`);
     ok(r.code === 0, `adopt exited ${r.code}:\n${r.out}`);
     ok(/ADOPTED pane/.test(r.out), r.out);
@@ -275,9 +279,37 @@ try {
     ok(table.includes(`attach -t ${p.id}`), `the raw-TUI line does not name the adopted pane:\n${table}`);
   });
 
+  await step('S6b the BRIEFING lands in the adopted pane, whole, as the tool and not as a person', async () => {
+    // The half an adopted claude cannot be given any other way: it started before claude-jam
+    // existed for it, so its --settings and its system prompt are already read and closed.
+    const brief = await until('the briefing in the adopted pane',
+      () => submitted().find((s) => s.startsWith(`[${BRIEF_NAME}]: `)), 40000);
+    // The prefix is the mechanism, not a label: NAME_RE has no colon, so no participant can ever
+    // hold that name and no guest's own text can carry that prefix.
+    ok(!validName(BRIEF_NAME), 'a guest could join under the tool\'s own name');
+    // The whole contract arrived, not a truncated paste of it.
+    for (const line of ['TWO RULES THAT MUST NOT DECAY', 'NEVER reveal the join token',
+      'NEVER claim to have seen human-only chat', 'WHO IS TALKING']) {
+      ok(brief.includes(line), `the briefing lost "${line}"`);
+    }
+    ok(/reads this screen/.test(brief), 'the briefing did not say why there are no hooks');
+    ok(brief.includes(path.join(ROOT, 'MANUAL.md')), 'the briefing did not point at the manual');
+    console.log(`      briefing: ${brief.length} chars, ${brief.split('\n').length} lines, `
+      + `starts ${JSON.stringify(brief.slice(0, 60))}`);
+    // And it is NOT in the outbox: it is regenerated whenever it is needed, so keeping it would
+    // put a page of protocol under somebody's `/retry`.
+    const outbox = path.join(stateDir(P.own), 'outbox');
+    const kept = fs.existsSync(outbox) ? fs.readdirSync(outbox) : [];
+    ok(!kept.some((f) => f.includes('claude-jam')), `the briefing was kept: ${kept.join(', ')}`);
+  });
+
   await step('S7 a guest sees the REAL adopted pane, and their message lands in it whole', async () => {
     const g = connect(P.own, 'Guest');
-    await g.ready;
+    const welcome = await g.ready.then(() => g.events.find((e) => e.t === 'welcome'));
+    // Everybody is told this jam was adopted, and that claude WAS told — the client turns both
+    // into the two lines a participant needs before they type anything.
+    ok(welcome.session.adopted === true, JSON.stringify(welcome.session));
+    ok(welcome.session.noBrief === false, 'noBrief is true on a jam that briefed');
     g.send({ t: 'mirror', on: true });
     const frame = await g.waitFor('a mirror frame of the adopted pane',
       (e) => e.t === 'screen' && e.rows.some((r) => /\[fake-tui\]/.test(r)), 20000);
@@ -351,6 +383,7 @@ try {
     // The case the feature exists for: the user's own tmux server, which is also the one
     // claude-jam must be most careful with. One session, created here, named uniquely.
     const p = makePane(S.dflt, dtmux);
+    const before = submitted().length; // this one runs --no-brief: nothing may be typed at all
     const r = jam('adopt', '--pane', p.id, '--socket', 'default', '--yes', '--port', String(P.dflt),
       '--token', TOKEN, '--no-popup', '--no-announce', '--no-attach', '--no-brief');
     ok(r.code === 0, `adopt exited ${r.code}:\n${r.out}`);
@@ -361,11 +394,17 @@ try {
     const marker = dtmux('show-options', '-t', S.dflt, '-v', '@claude-jam-owned');
     ok(!(marker.stdout || '').trim(), `a marker was stamped on the default server: ${marker.stdout}`);
     const g = connect(P.dflt, 'Guest2');
-    await g.ready;
+    const welcome = await g.ready.then(() => g.events.find((e) => e.t === 'welcome'));
+    // This one was adopted with --no-brief, so every client has to SAY that claude does not know
+    // it is shared — an agent that has not been told may answer a participant as if it were the
+    // host, which is what the two standing rules exist to prevent.
+    ok(welcome.session.adopted === true && welcome.session.noBrief === true, JSON.stringify(welcome.session));
     g.send({ t: 'mirror', on: true });
     await g.waitFor('a mirror frame off the default socket',
       (e) => e.t === 'screen' && e.rows.some((row) => /\[fake-tui\]/.test(row)), 20000);
     g.ws.close();
+    ok(!submitted().slice(before).some((s) => s.startsWith(`[${BRIEF_NAME}]: `)),
+      '--no-brief injected a briefing anyway');
     const pidBefore = Number((dtmux('display-message', '-p', '-t', p.id, '#{pane_pid}').stdout || '').trim());
     const gone = jam('end', info.tmux);
     ok(gone.code === 0, gone.out);
