@@ -226,6 +226,9 @@ export async function listRows(tmpdir = stateDir()) {
       port,
       viewPort: info.viewPort ?? null,
       cwd: info.cwd || null,
+      // v0.23: the display name, as session.json recorded it. A jam built before v0.23 has none,
+      // and shows a dash rather than being given one it never had.
+      jamName: info.jamName || null,
       sessionId: info.sessionId || null,
       createdAt: info.createdAt || null,
       participants: rosterNames(dir),

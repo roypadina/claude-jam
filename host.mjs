@@ -40,15 +40,24 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   resolveAnswerTarget, answerLock, ANSWER_TEXT_MAX,
   // v0.24: invite-only, the runtime relay switch, and saying out loud when a relay comes up.
   remoteRows, relaySwitchDecision, relayReadyLine, relayPendingLine, inviteState,
+  // v0.23: the jam has a name, and says so on the LAN.
+  jamName, validJamName, JAM_NAME_MAX, discoveryTxt, DISCOVERY_TYPE, DISCOVERY_DOMAIN,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
 import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
 // v0.32 W0: $TMPDIR, and every file that must be readable by its owner and nobody else, come
 // from the one module that knows what operating system this is.
-import { stateDir, secureDir, secureWrite } from './platform.mjs';
+// v0.23: and so does mDNS — advertising is a platform binary, browsing is a platform binary.
+import { stateDir, secureDir, secureWrite, advertiseSpawn } from './platform.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
+// v0.23: what the TXT record's `v=` says. Read once, off the package.json beside this file, so
+// there is no second place a version number can be wrong.
+const JAM_VERSION = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(HERE, 'package.json'), 'utf8')).version || '0'; }
+  catch { return '0'; }
+})();
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 // v0.20: EVERY tmux call jam makes goes through this one helper, and every one of them carries
 // `-L <socket>` — jam's own tmux server. That is what lets jam bind a bare F3 without touching
@@ -73,6 +82,12 @@ function parseArgs(argv) {
     else if (a === '--view') o.view = true;
     else if (a === '--no-view') o.view = false;
     else if (a === '--no-popup') o.noPopup = true;
+    // v0.23: announcing on the LAN is ON by default, and this is how it is turned off. Both
+    // spellings are named here because they carry no value — the generic branch below would
+    // otherwise eat the next argument as one. (`--jam-name X` needs no branch: it DOES carry a
+    // value, so the generic branch turns it into o.jamName by itself.)
+    else if (a === '--no-announce') o.announce = false;
+    else if (a === '--announce') o.announce = true;
     // v0.24: no knocking at all. A link (or the host minting one) is the ONLY door — which is
     // what makes an invite-only jam meaningfully different from a token: every entry is
     // individually revocable, name-bound and expiring.
@@ -155,6 +170,17 @@ opts.clientCmd ||= clientCommand(HERE, process.env);
 // Which claude account/profile the TUI runs as. null = whatever claude defaults to.
 opts.configDir = resolveConfigDir(opts.configDir, process.env);
 if (!validName(opts.name)) { console.error(`bad --name: ${opts.name}`); process.exit(2); }
+// v0.23: the jam's display name. Absent means the cwd's basename, so it is never empty; a name
+// that was GIVEN and is not usable is a startup error rather than a silent substitution, exactly
+// the way a bad --name is. Cosmetic everywhere: it is never used for auth and never for a path.
+opts.jamName = jamName(opts.jamName, opts.cwd);
+if (!validJamName(opts.jamName)) {
+  console.error(`bad --jam-name: a jam name is one line, no control characters, and at most `
+    + `${JAM_NAME_MAX} bytes (it becomes one mDNS label)`);
+  process.exit(2);
+}
+// Announcing on the LAN is the default, because being findable is the point of naming a jam.
+opts.announce = opts.announce !== false;
 // v0.11: fail fast, before anything is built — a daemon that started and only then
 // discovered cloudflared is missing would strand the host inside `tmux attach`.
 if (opts.tunnel && opts.funnel) {
@@ -326,6 +352,11 @@ async function launch() {
     ...(opts.heartbeat ? ['--heartbeat', String(opts.heartbeat)] : []),
     '--replay', String(opts.replay), // v0.17 H1: the daemon is the process that seeds history
     '--answers', opts.answers, // v0.31: who may answer a question outright
+    // v0.23: the daemon is the process that advertises, so it needs both. jamName is passed
+    // already-resolved — recomputing the cwd default independently in two processes is exactly
+    // how the launcher and the daemon end up disagreeing about what the jam is called.
+    '--jam-name', opts.jamName,
+    ...(opts.announce ? [] : ['--no-announce']),
     ...(opts.configDir ? ['--config-dir', opts.configDir] : []), // daemon globs that profile's transcripts too
     ...(opts.resume ? ['--resume', opts.resume] : [])]; // daemon needs this to skip pre-existing JSONL history
 
@@ -441,6 +472,7 @@ function claimSession() {
     tmux: opts.tmux, port: opts.port, viewPort: opts.viewPort, cwd: opts.cwd,
     sessionId: opts.sessionId, createdAt: Date.now(), pid, state: opts.state,
     socket: SOCKET, // v0.20: which tmux server to look for this session on
+    jamName: opts.jamName, // v0.23: the display name, so `claude-jam sessions` need not ask a daemon
     // How `claude-jam end` authenticates its POST /end: loopback plus this, the same gate the knock
     // popup already uses. It lives in the 0700 state dir beside token.json.
     secret: opts.hookSecret,
@@ -572,6 +604,10 @@ function joinInfo() {
     relayPending: relayPending(),
     replay: opts.replay,
     answers: opts.answers,
+    // v0.23: the name, and whether the LAN is being told about it. Both ride the frame that
+    // already carries the rest of the Access state, so `/menu` needs no frame of its own.
+    jamName: opts.jamName,
+    announce: announceState(),
   };
 }
 
@@ -903,6 +939,121 @@ function stopTunnels() {
   }
 }
 
+// ------------------------------------------- v0.23: saying so on the local network ----
+// The jam announces itself over DNS-SD so guests can FIND it instead of being handed a URL. It
+// is a tracked child with exactly the discipline cloudflared has above — spawned by pid, killed
+// by that pid on every exit path, respawned with the same 1s→30s backoff when it dies, and a
+// SIGTERM of ours is never a death to recover from. It is NOT a relay: mDNS is link-local by
+// design, so a tunnel is never advertised (a tunnel is for people who are not here) and the
+// advertisement carries the LAN port and nothing else.
+//
+// WHAT GOES ON THE WIRE is decided by lib's discoveryTxt(), which builds six keys from an
+// allow-list: the jam name, the host's display name, eight characters of the session id, the
+// access mode, whether a browser view exists, and the version. Never the token, never an invite
+// secret, never the cwd, never a path. This function does not get to add a seventh.
+let announceProc = null;      // our own child, killed by pid only
+let announceAttempts = 0;     // consecutive deaths, reset once it registers
+let announceTimer = null;     // a pending respawn, cleared on shutdown
+let announceStopping = false; // our own SIGTERM is not a death
+let announceOn = opts.announce !== false; // runtime state; --no-announce is only its starting value
+let announceWhy = '';         // why it is not running, when it is not — never a silent nothing
+let announceTxtLive = null;   // the record currently registered, so a re-announce that would change nothing does nothing
+
+// The six values, taken fresh every time, so a `/token` rotation or a view toggle re-announces
+// with what is true rather than with what was true at boot.
+const announceTxt = () => discoveryTxt({
+  jam: opts.jamName,
+  host: opts.name,
+  id: String(opts.sessionId).slice(0, 8),
+  access: inviteOnly ? 'invite' : currentToken ? 'token' : 'knock',
+  view: viewOn,
+  v: JAM_VERSION,
+});
+
+function spawnAnnounce() {
+  const txt = announceTxt();
+  const r = advertiseSpawn({ name: opts.jamName, type: DISCOVERY_TYPE, domain: DISCOVERY_DOMAIN,
+    port: opts.port, txt });
+  if (!r.ok) {
+    // No mDNS tool is not an error and never stops a jam: discovery is skipped, once, with the
+    // reason and the fix, and everything else works exactly as before.
+    announceWhy = r.why;
+    console.log(`announce: off — ${r.why}`);
+    return;
+  }
+  announceWhy = '';
+  announceProc = r.child;
+  announceTxtLive = txt.join(' ');
+  console.log(`announce: "${opts.jamName}" on ${DISCOVERY_TYPE} port ${opts.port} (pid ${r.child.pid}) — ${txt.join(' ')}`);
+  let buf = '';
+  const onOut = (chunk) => {
+    buf += chunk;
+    if (buf.length > 8192) buf = buf.slice(-8192); // the banner is small; never grow unbounded
+    // dns-sd says `Name now registered and active`, and says `Name Conflict` when the label was
+    // taken — two jams called `claude-jam` on one network is the ordinary case, and Bonjour
+    // renames rather than failing, so the name it settled on is the one worth printing.
+    const m = /Got a reply for service ([^:]+): (.+)/.exec(buf);
+    if (!m) return;
+    announceAttempts = 0; // it worked: the next death waits 1s, not 30
+    buf = '';
+    console.log(`announce: ${m[2].trim()} (${m[1].trim()})`);
+  };
+  r.child.stdout.on('data', onOut);
+  r.child.stderr.on('data', onOut);
+  r.child.on('exit', (code) => {
+    if (announceProc === r.child) announceProc = null;
+    if (announceStopping || !announceOn) return;
+    console.log(`announce: exited (code ${code}) — this jam is no longer on the network`);
+    if (buf.trim()) console.log(`announce said: ${buf.trim().split('\n').slice(-3).join(' | ').slice(0, 400)}`);
+    const delay = respawnDelay(++announceAttempts);
+    console.log(`announce: restarting in ${delay / 1000}s (attempt ${announceAttempts})`);
+    announceTimer = setTimeout(() => { announceTimer = null; spawnAnnounce(); }, delay);
+    announceTimer.unref?.();
+  });
+  r.child.on('error', (e) => console.log(`announce: failed to start: ${e.message}`)); // 'exit' owns the respawn
+}
+
+function startAnnounce() {
+  if (!announceOn || announceProc) return;
+  announceStopping = false; // a previous stop must not swallow this run's respawns
+  spawnAnnounce();
+}
+
+// DEREGISTERING MATTERS. An advertisement is visible to everyone on the LAN, and a jam that
+// ended must stop claiming to exist — mDNS sends the goodbye when the registering process goes,
+// so killing the child IS the deregistration, and that is why this is called on every exit path
+// (the signal handlers, `process.on('exit')` and finishEnd) exactly like stopTunnels.
+function stopAnnounce() {
+  announceStopping = true;
+  if (announceTimer) { clearTimeout(announceTimer); announceTimer = null; }
+  announceAttempts = 0;
+  const child = announceProc;
+  announceTxtLive = null;
+  if (!child) return;
+  announceProc = null;
+  try { child.kill('SIGTERM'); } catch { /* already gone */ }
+}
+
+// A change to what the record SAYS (the token came or went, invite-only flipped, the browser
+// view came up) is a re-registration: `dns-sd -R` takes its TXT on the argv, so the honest way
+// to change one is a new child carrying the new record.
+//
+// It compares first, and that is what makes it safe to call from everywhere the access state can
+// move — including onTunnelChange(), which also fires on every relay flap. A re-register that
+// would publish a byte-identical record does nothing, so a jam does not drop off the network and
+// come back each time cloudflared reconnects.
+function reannounce() {
+  if (!announceOn || !announceProc) return;
+  if (announceTxt().join(' ') === announceTxtLive) return;
+  stopAnnounce();
+  announceStopping = false;
+  spawnAnnounce();
+}
+
+// What `/menu → Access → Announce` and the welcome show. `on` is what was asked for, `live`
+// whether a child is actually up, and `why` the reason when those two disagree.
+const announceState = () => ({ on: announceOn, live: !!announceProc, why: announceWhy });
+
 // Whenever a tunnel resolves or dies: token.json (hence claude's context) and the console
 // block reflect it right away, and already-connected host clients hear about it on the same
 // frame `/token` uses. `/token` rotation itself does NOT call this — it never touches
@@ -923,7 +1074,12 @@ function onTunnelChange({ ready = false, changed = false } = {}) {
   const info = joinInfo();
   const { join, view, tunnelJoin, tunnelView } = info;
   sendHosts({ t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView,
-    remote: relayMode, inviteOnly, relayPending: relayPending() });
+    remote: relayMode, inviteOnly, relayPending: relayPending(),
+    jamName: opts.jamName, announce: announceState() });
+  // v0.23: the browser view is one of the six things the TXT record states, and this is the one
+  // path a view toggle goes through. reannounce() compares before it acts, so a relay flap —
+  // which also arrives here — changes nothing.
+  reannounce();
   if (!ready) { if (!tunnelHosts.ws) lastAnnounced = null; return; }
   if (tunnelHosts.ws === lastAnnounced) return;
   lastAnnounced = tunnelHosts.ws;
@@ -1293,6 +1449,9 @@ function daemon() {
     }
     if (ttyd) startView();
     startTunnels();
+    // v0.23: last of the three children, and only once the port is actually bound — announcing
+    // an address nothing answers on would send guests at a closed door.
+    startAnnounce();
     // The launcher prints this too, right before the host's client takes over the screen —
     // this is the copy that stays readable, in the `daemon` window, for when the host wants
     // it after the fact (`/join` in the client is the everyday way).
@@ -1301,13 +1460,13 @@ function daemon() {
   });
   // The ttyd/cloudflared children are ours alone. tmux kill-session hangs up the daemon
   // window, and a SIGHUP would otherwise skip the exit handler and leave them orphaned.
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stopView(); stopTunnels(); stopPopup(); restoreStatusRight(); process.exit(0); });
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stopView(); stopTunnels(); stopAnnounce(); stopPopup(); restoreStatusRight(); process.exit(0); });
   // v0.18-7: the state dir goes with the session, and only with the session — `tmux
   // kill-session` from finishEnd() hangs this window up, so the removal is booked here too.
   // A daemon that merely dies (a SIGTERM of its own) leaves the dir alone on purpose: that is
   // what lets `claude-jam sessions` say `! no-daemon` and `claude-jam end` finish the job.
   process.on('exit', () => {
-    stopView(); stopTunnels(); stopPopup(); restoreStatusRight();
+    stopView(); stopTunnels(); stopAnnounce(); stopPopup(); restoreStatusRight();
     if (removeState) removeStateDir(opts.state);
   });
   setInterval(tailJsonl, 300).unref?.();
@@ -1340,6 +1499,9 @@ function endSession(why) {
 function finishEnd() {
   stopView();
   stopTunnels();
+  // v0.23: and stop claiming on the network that this jam exists. Killing the child IS the
+  // deregistration — mDNS sends the goodbye when the registering process goes.
+  stopAnnounce();
   stopPopup();
   restoreStatusRight();
   // THE gate, taken while the state dir is still intact — the marker and session.json are a
@@ -1540,7 +1702,9 @@ function admitSocket(ws, name, host, loopback = false, via = 'token') {
     // v0.15: `tmux` rides with them for the same reason — it is what F3 attaches to, and
     // `host` here is already "claimed host AND loopback", i.e. exactly who may attach.
     session: {
-      id: opts.sessionId, cwd: opts.cwd, hostName: opts.name, boot: BOOT,
+      // v0.23: the jam's name goes to EVERYONE, host and guest alike. It is cosmetic — it says
+      // which room you walked into — so unlike the join lines it is not the host's secret.
+      id: opts.sessionId, cwd: opts.cwd, hostName: opts.name, boot: BOOT, jamName: opts.jamName,
       ...(host ? { ...joinInfo(), tmux: opts.tmux, tmuxSocket: SOCKET } : {}),
     },
   });
@@ -1607,7 +1771,9 @@ function onToken(ws, m) {
     const info = joinInfo();
     sendHosts({ t: 'token', token: currentToken, join: info.join, view: info.view,
       tunnelJoin: info.tunnelJoin, tunnelView: info.tunnelView,
-      remote: relayMode, inviteOnly, relayPending: relayPending() });
+      remote: relayMode, inviteOnly, relayPending: relayPending(),
+      jamName: opts.jamName, announce: announceState() });
+    reannounce(); // the advertised access mode just became `invite`, or stopped being it
     broadcast({ t: 'sys', text: inviteOnly
       ? 'this jam is invite-only now — a knock is refused, an invite link is the only way in'
       : 'knocking is allowed again — the host is asked when somebody wants in' });
@@ -1631,7 +1797,11 @@ function onToken(ws, m) {
   // Rotation never respawns cloudflared — tunnelHosts is untouched — but the join command
   // embeds the token and the view URL embeds viewKey, so both tunnel strings still change.
   const { join, view, tunnelJoin, tunnelView } = joinInfo();
-  sendHosts({ t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView });
+  sendHosts({ t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView,
+    jamName: opts.jamName, announce: announceState() });
+  // v0.23: `access=` follows the token. The record NEVER carries the token itself — only which
+  // kind of door this is — so a rotation changes one word and no secret moves.
+  reannounce();
   printJoin();
 }
 
@@ -1933,6 +2103,22 @@ function onSocket(ws, req) {
       broadcast({ t: 'sys', text: viewOn
         ? `the browser view is on — the host can hand out its URL (${'read-only'})`
         : 'the browser view is off' });
+      // v0.23: announcing on the local network, on and off while the jam runs. Same gate as the
+      // relay switch and the browser view, and for the same reason: it publishes something about
+      // this jam to people who were never invited to it.
+    } else if (m.t === 'announce') {
+      if (!trusted(me)) return sendError(ws, 'announcing on the network is the host\'s to switch, on loopback only');
+      announceOn = m.on !== false;
+      if (announceOn) startAnnounce(); else stopAnnounce();
+      onTunnelChange();
+      // Said to EVERYONE, not just the host: whether this room is findable by strangers on the
+      // LAN is something every person in it has a stake in knowing.
+      broadcast({ t: 'sys', text: announceOn
+        ? (announceProc
+          ? `this jam is announced on the local network as "${opts.jamName}" — anyone here can see its name, `
+            + `the host's name and how to knock, but discovery is not a key and getting in is unchanged`
+          : `announcing was asked for but is not running: ${announceWhy}`)
+        : 'this jam is no longer announced on the local network — it is reachable only by an address somebody was given' });
       // v0.24C: the `always` grants a guest holds. They were invisible once given; now they are
       // listed and individually revocable, which is what makes them safe to hand out.
     } else if (m.t === 'grants') {
