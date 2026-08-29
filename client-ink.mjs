@@ -25,7 +25,7 @@ import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
 import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
-import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage, historyDivider, toolLiveLine } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
@@ -383,7 +383,14 @@ function connect() {
       // A restarted daemon reissues ids from 1, so old ids in `seen` would swallow
       // everything it sends. Drop them whenever the boot id changes.
       if (ev.session?.boot !== boot) { boot = ev.session?.boot; seen.clear(); }
-      for (const hist of ev.history || []) if (!seen.has(hist.id)) { seen.add(hist.id); render(hist); }
+      let replayed = 0;
+      for (const hist of ev.history || []) if (!seen.has(hist.id)) { seen.add(hist.id); replayed++; render(hist); }
+      // v0.17 H1/H2: a replay has no turn boundary to collapse on — the `status` frame that
+      // normally ends a turn arrives after this — so fold its tool lines here, or they would sit
+      // in the live region and then land BELOW the divider that says they are history.
+      flushTools();
+      const divider = historyDivider(replayed);
+      if (divider) emit({ text: divider, textColor: C.dim, wrap: false, bare: true });
       sys(`here: ${store.roster.join(', ')}`);
       toTranscript--;
       sendResize(); // host only: fit the claude window to this terminal
@@ -685,6 +692,10 @@ function submit(raw) {
     case 'send': doSend(act.path); break;
     case 'paste': doPaste(act.caption); break;
     case 'get': sendMsg({ t: 'get', name: act.name || undefined }); break;
+    // v0.17 F2/F3: only the daemon has the transcript and the cwd, so both are its answer to
+    // give. `/files` comes back to this client alone; `/diff` is broadcast to everyone.
+    case 'files': sendMsg({ t: 'files' }); break;
+    case 'diff': sendMsg({ t: 'diff', path: act.path || undefined }); break;
     case 'token':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'token', op: act.op, value: act.value });
@@ -872,7 +883,10 @@ function App() {
         e: {
           gap: false, label: '', color: C.dim, glyph: t.kind === 'tool-result' ? '⎿' : '⚙',
           glyphColor: t.kind === 'tool-result' ? C.dimmer : C.dim, md: false, wrap: true, bare: false,
-          text: t.text, textColor: t.kind === 'tool-result' ? C.dimmer : C.dim,
+          // v0.17 F1: one ROW per tool call. A 20-line Edit diff rendered whole in here would
+          // push the status and input rows off the bottom of the screen; the full diff is in
+          // the transcript and in `/tools`.
+          text: toolLiveLine(t.text), textColor: t.kind === 'tool-result' ? C.dimmer : C.dim,
           labelW: s.labelW, cols: process.stdout.columns || 80,
         },
       })))
