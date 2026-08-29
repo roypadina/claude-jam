@@ -443,6 +443,7 @@ function connect() {
       session = ev.session;
       roster = ev.roster;
       idle = ev.idle || {}; // v0.26: who is here AND how long since each of them typed
+      reportIdle();         // …and say our own state now, rather than at the next tick
       labelW = labelWidth(roster); // set before the replay, so history aligns with what follows
       // v0.23: the jam's NAME leads, because that is what a human calls the room they just
       // walked into; the session id stays, in the same 8-char form every other surface shows.
