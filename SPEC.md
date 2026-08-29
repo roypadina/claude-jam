@@ -1600,3 +1600,52 @@ host's pane scrollback is never sent, so a guest cannot scroll back through the 
    the full transcript`. No silent truncation anywhere.
 5. Docs: README, MANUAL (claude must answer "how do I scroll back"), wiki Joining-a-Jam +
    Troubleshooting, CHANGELOG; the keys join the `/menu` keyboard reference (v0.24 test).
+
+## v0.29 — peer tasks: the host's agent can dispatch to a guest's own Claude (judged)
+
+Source: ~/ClaudWork/2026-08-29-jam-distributed-agents/RESEARCH.md. Judged: build Design A
+(host-side MCP tool + per-task guest approval + the guest's OWN `claude -p`), skip MCP sampling
+(deprecated, unimplemented) and skip the Agent SDK as the executor (it authenticates with an API
+key, so it would pool nothing). Design B's shared queue survives only as the documented fallback
+for a guest who declines automation — no code.
+
+**The compliance frame is part of the feature, not a footnote.** Every task runs on the guest's
+machine, in their own already-authenticated Claude Code, spending their own quota, and ONLY after
+that guest approves that specific task. No credential ever crosses the wire; the host never sees
+a guest's token; nothing is ever executed on a guest's behalf without their explicit consent.
+README/MANUAL/wiki state this, state that a guest may decline anything, and state the open
+question (whether a coordinated multi-account fan-out counts as ordinary individual usage) so
+nobody discovers it later. Feature is OFF by default: `--peer-tasks` on the host, and a guest
+opt-in (`/peer on`) before they can be dispatched to at all.
+
+1. **Host side.** An in-process MCP server exposes to the host's own claude:
+   `list_peers()` → `[{name, capable, busy, tasksToday, tokenBudgetLeft?}]`, and
+   `dispatch_to_peer({peer, prompt, allowedTools?, maxTurns?, schema?})` → the peer's result, so
+   the host agent uses it exactly like the built-in Agent tool (including structured output when
+   `schema` is given). Registered via the generated `--settings` (never the user's global config).
+2. **Wire.** New `peertask` frames on the existing protocol, modelled on the `ladders` table in
+   `host.mjs` but with the direction inverted (host asks, guest approves):
+   `{t:'peertask', id, prompt, allowedTools, maxTurns, deadline}` →
+   `{t:'peertask-ack'|'peertask-decline'}` → `{t:'peertask-progress', text}` (streamed) →
+   `{t:'peertask-result', ok, text|json}`. Progress and result are ALSO broadcast into the
+   transcript attributed `[Dana → task]` so the whole room sees what was asked and what came back.
+3. **Guest side.** The guest's client shows the FULL prompt, the tool whitelist, the caps and who
+   asked, then `[a]ccept · [d]ecline · [n]ever this session`. On accept it spawns
+   `claude -p --output-format stream-json --allowedTools <list> --max-turns <n>
+   --permission-mode plan|acceptEdits(never bypass) --settings <generated>` in a **fresh scratch
+   dir** (`$TMPDIR/claude-jam-peer-<id>`), never the guest's repo, with the guest's own MCP
+   servers disabled, and streams the output back. Cancel any time with `Esc`.
+4. **Non-negotiable controls** (from the research's trust-boundary section):
+   per-task approval; default tool whitelist is read-only research (`WebSearch`, `WebFetch`,
+   `Read`, `Grep`, `Glob` inside the scratch dir) with `Bash`/`Write`/`Edit` requiring the guest
+   to opt in per task; scratch cwd only; no guest MCP servers; hard caps on turns AND wall-clock
+   (`--max-turns` is a proxy, not a spend cap — say so); a per-guest daily task/consent counter
+   they can zero; an audit log both sides can read (`/peers log`); and prompt-injection treated
+   as bidirectional — the host's prompt is untrusted input on the guest's machine, and the
+   guest's result is untrusted input in the host's context (results are quoted, never executed,
+   and never auto-applied to files).
+5. **Failure honesty.** Decline, timeout, cap-hit and crash are all distinct results the host
+   agent sees, with partial output preserved. A busy or offline peer is reported, never queued
+   silently.
+6. Docs per the standing rule, plus a wiki page `Peer-Tasks` covering the compliance frame,
+   what a guest is agreeing to, and how to say no.
