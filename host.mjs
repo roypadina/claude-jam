@@ -1663,6 +1663,14 @@ const PROMPT_GAP = 400;
 // ponytail: the watch itself still rides pumpPrompt, so a compaction while NOBODY is connected is
 // only noticed if its marker is still on screen when somebody joins. The roster re-brief is the
 // backstop. Give it its own slow timer if that turns out to matter.
+//
+// ponytail: this is EDGE detection over a signature, which means two identical context losses
+// with no observable screen change between them read as one. v0.21.2 closed the case that
+// actually bit (a startup screen and a `/clear` are different signatures now), and a compaction
+// re-arms as soon as its marker scrolls off. What is left is narrow: `/clear`, then exchanges
+// short enough that the screen never leaves `cleared:/clear`, then `/clear` again. The roster
+// re-brief is the backstop for that one. Upgrade path if it ever matters: something other than
+// the pane for "the context went" — the transcript's own file is the obvious candidate.
 let lostSig;
 function watchContext(screen) {
   if (!ADOPTED || opts.brief === false) return;
@@ -1674,7 +1682,9 @@ function watchContext(screen) {
   if (!sig) return; // the marker scrolled away, which is what re-arms this
   const d = briefUpdateDecision({ mode: opts.briefUpdates, reason: 'compaction',
     promptKind: prompt.kind, busy: status.busy, lastAt: briefedAt, now: Date.now() });
-  console.log(`[brief] ${now.kind}: ${d.brief ? 're-telling claude' : `not re-telling — ${d.why}`}`);
+  // The SIGNATURE rather than the kind: `cleared` and `cleared:/clear` are the same kind and the
+  // difference between them is the whole of the v0.21.2 fix, so the log has to show which fired.
+  console.log(`[brief] ${sig}: ${d.brief ? 're-telling claude' : `not re-telling — ${d.why}`}`);
   if (d.brief) brief('compaction');
 }
 

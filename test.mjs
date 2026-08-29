@@ -6051,33 +6051,59 @@ test('contextLostSignal finds a REAL compaction — the marker is measured now, 
 
 test('contextLostSignal finds a REAL /clear', () => {
   const src = fs.readFileSync(new URL('./fixtures/pane/cleared.txt', import.meta.url), 'utf8');
-  assert.deepEqual(contextLostSignal(src), { kind: 'cleared', sig: 'cleared' });
+  assert.deepEqual(contextLostSignal(src), { kind: 'cleared', sig: 'cleared:/clear' });
   // What it is actually keying on, in a real capture: the banner glyphs and the version line.
   assert.match(src, /[\u2590\u259b\u259c\u259d\u2588]{2,}/);
   assert.match(src, /Claude Code v\d/);
 });
 
-test('a fresh claude reads as `cleared` too — the known ceiling of a screen-shaped test', () => {
-  // Measured 2026-08-30 and pinned deliberately. A just-started claude and a just-cleared one
-  // draw the SAME screen — same banner, same emptiness — so nothing looking at the pane can tell
-  // them apart, and this is the heuristic's ceiling rather than a bug in it.
+test('F7: a STARTUP screen and a /clear are different signatures — the echo is the difference', () => {
+  // The campaign's F7 (2026-08-30). A just-started claude and a just-cleared one draw the SAME
+  // nearly-empty banner screen, so both read `cleared` — and a session ADOPTED at its startup
+  // screen therefore took a real `/clear` without the signature changing, so watchContext never
+  // fired and the agent silently lost the two standing rules.
   //
-  // What absorbs it: watchContext re-briefs only on a CHANGE from the baseline taken at
-  // adoption, so adopting a fresh (or just-cleared) session re-briefs nobody for nothing.
-  //
-  // What it still costs, and why this test says so out loud: adopt a just-started claude
-  // (baseline `cleared`), keep every exchange short enough that the banner never scrolls away —
-  // startup-one-turn.txt is a REAL screen after a REAL turn that still reads `cleared` — and a
-  // later `/clear` does not change the signature, so no re-brief fires. Narrow, and the roster
-  // re-brief is the backstop. If this is ever fixed, this test is the one to delete.
+  // Measured against the real captures rather than argued: `/clear` prints its own echo where the
+  // transcript it wiped used to be, and a startup screen has no such row. That row is the whole
+  // difference between them, and it is enough.
+  const read = (f) => fs.readFileSync(new URL(`./fixtures/pane/${f}`, import.meta.url), 'utf8');
+  const cleared = read('cleared.txt');
+  const startup = read('startup.txt');
+  const oneTurn = read('startup-one-turn.txt'); // a REAL screen after a REAL turn: still nearly empty
+
+  // Both are still "the context is gone" — the KIND does not move, only the signature.
   for (const f of ['startup.txt', 'startup-one-turn.txt']) {
-    const src = fs.readFileSync(new URL(`./fixtures/pane/${f}`, import.meta.url), 'utf8');
-    assert.deepEqual(contextLostSignal(src), { kind: 'cleared', sig: 'cleared' }, f);
+    assert.deepEqual(contextLostSignal(read(f)), { kind: 'cleared', sig: 'cleared' }, f);
   }
-  // The one that matters: a compaction and a clear are DIFFERENT signatures, so a compaction on
-  // a screen that had been reading `cleared` still fires.
-  const compacted = fs.readFileSync(new URL('./fixtures/pane/compacted.txt', import.meta.url), 'utf8');
-  assert.notEqual(contextLostSignal(compacted).sig, 'cleared');
+  // …and this is the fix: the two the campaign could not tell apart now differ.
+  assert.notEqual(contextLostSignal(cleared).sig, contextLostSignal(startup).sig);
+  assert.notEqual(contextLostSignal(cleared).sig, contextLostSignal(oneTurn).sig);
+
+  // F7's exact repro, replayed as the watcher sees it: adopt at the startup screen (that
+  // signature becomes the baseline), take one ordinary turn (unchanged — nobody re-briefed for
+  // nothing), then `/clear`. That last step is the one that used to be swallowed.
+  const seen = [startup, oneTurn, cleared].map((s) => contextLostSignal(s).sig);
+  assert.equal(seen[1], seen[0], 'an ordinary turn is not a context loss');
+  assert.notEqual(seen[2], seen[1], 'the /clear after it IS one, and now says so');
+
+  // The echo has to be a TRANSCRIPT row. `/clear` sitting in the input box is somebody who has
+  // typed it and not pressed Enter, and briefing into that box would submit the two glued
+  // together — so that shape must not fire.
+  const typing = startup.split('\n');
+  const box = typing.findLastIndex((l) => /^\s*❯/.test(l));
+  typing[box] = '❯ /clear';
+  assert.equal(contextLostSignal(typing).sig, 'cleared',
+    'a half-typed /clear in the box is not a clear that happened');
+
+  // And the fallback direction is the safe one: a build that stops printing the echo still reads
+  // `cleared`, which is neither null nor `compacted:…`, so a clear arriving on a screen that was
+  // showing anything else still fires.
+  const noEcho = cleared.split('\n').filter((l) => !/^\s*❯\s*\/clear\s*$/.test(l));
+  assert.equal(contextLostSignal(noEcho).sig, 'cleared');
+
+  // Unchanged by all of it: a compaction is its own signature, and a real one leaves the
+  // scrollback full, so it never reaches the cleared branch at all.
+  assert.notEqual(contextLostSignal(read('compacted.txt')).sig, 'cleared');
 });
 
 test('paneCommandNote: the native installer runs claude as its VERSION, and that is still claude', () => {

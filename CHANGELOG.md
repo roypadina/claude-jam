@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a real `/clear` could be swallowed on an adopted session (campaign F7)
+
+An adopted claude is re-briefed when the context its briefing was injected into goes away, and
+that is read off the pane because a running claude cannot be given a hook. A claude that started
+thirty seconds ago and a claude that has just been `/clear`ed draw the **same** nearly-empty
+banner screen, so both read as the same signature — and the watcher only fires on a **change**.
+Adopt a session at its startup screen, keep the exchanges short enough that the banner never
+scrolls away, and a later real `/clear` changed nothing: no re-brief fired, and the agent had
+silently lost the two standing rules (never reveal the join token to a participant, never claim
+to have seen `/c` chat) with nobody told.
+
+Measured against the campaign's real captures (`fixtures/pane/startup.txt`,
+`startup-one-turn.txt`, `cleared.txt`): `/clear` prints its own echo where the transcript it wiped
+used to be, and a startup screen has no such row. That row is now part of the signature, so the
+two are distinguishable and the `/clear` fires. The echo only counts in the transcript, above the
+input box — `❯ /clear` **inside** the box is somebody who has typed it and not pressed Enter, and
+briefing into that box would submit the two glued together. A build that stopped printing the
+echo still reads as a cleared screen, which is the safe direction.
+
+Ceiling, unchanged and now written down: this is edge detection over a screen signature, so
+`/clear`, then exchanges short enough that the screen never leaves that signature, then `/clear`
+again still reads as one event. The roster re-brief is the backstop for that one.
+
 ## 0.21.1
 
 **A security release. Upgrade if you have ever run `claude-jam host --tunnel`.**
