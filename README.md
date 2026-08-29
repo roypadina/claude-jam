@@ -40,6 +40,34 @@ cd claude-jam && npm install
 ./jam host --name You --cwd .
 ```
 
+## The menu
+
+`claude-jam` with **no arguments** opens a launcher: Host a jam · Join a jam · My jams · End a
+jam. The Host screen collects the directory, your name, the jam's name, the access mode
+(knock / token / invite-only), the remote relay, the browser view and any extra claude args —
+and prints the exact command line **before** it runs it, so it teaches the CLI instead of
+hiding it. Options that cannot work on this machine are greyed with the reason and the fix.
+
+```
+── Host a jam ──────────────────────────────────────────────
+↑↓ move · ←→/space change · Enter edits a text field · Esc back
+  directory     /Users/roy/Code/some-project
+  your name     roy
+  jam name      jam (the tmux session)
+  access         INVITE   invite links only — a knock is refused
+❯ remote         TUNNEL   cloudflared quick tunnel (new URL on every restart)
+                funnel — unavailable: Funnel is not enabled for this tailnet
+                  Enable it once, as a tailnet admin: …
+  browser view  off
+  claude args   e.g. --model opus
+
+this runs:
+  claude-jam host --cwd /Users/roy/Code/some-project --name roy --invite-only --tunnel
+```
+
+Any argument at all (including `--no-menu`) skips the menu, and a non-tty prints the usage.
+Inside a running jam, **`/menu`** is the live control panel — see [Commands](#commands).
+
 ## Host quickstart
 
 ```sh
@@ -107,17 +135,28 @@ approves); `/help` reprints the onboarding block. Typing `/` raises a dim list o
 commands. `--basic` swaps ink for a plain readline client (transcript
 only, no live view, no F2/F3, no command list) and is picked automatically when stdin is not a tty.
 
-## Access: token, knock, tunnel, funnel
+## Access: token, knock, invite-only, tunnel, funnel
 
-Three ways to let someone in. All of them end in the same welcome.
+Several ways to let someone in. All of them end in the same welcome, and all of them are
+switchable while the jam runs from `/menu → Access`.
 
 | mode | how | who decides |
 | --- | --- | --- |
 | **token** | `--token <value>` at startup (8–64 chars of `[A-Za-z0-9_-]`), or `/token set` later. One shared secret; anyone holding it joins immediately | whoever has the string |
 | **invite link** | `jam invite Dana` mints `cjam1_…`, and `jam join <link>` is the guest's entire command — the link carries the addresses, their name and a per-invite secret, so they are admitted with no approval | the host, per person, in advance — and revocably |
 | **knock** | no token at all. The guest connects without one, sees `waiting for host approval…`, the host gets `⚑ Dana wants to join (100.86.8.97)` and answers `/accept Dana` | the host, per person |
+| **invite-only** | `--invite-only`, or `/token invite-only on` later. A knock is refused outright with the reason, so an invite link is the only door — every entry individually revocable, name-bound and expiring | the host, in advance, per link |
 | **tunnel** | `--tunnel` spawns two Cloudflare quick tunnels (needs `cloudflared`) and prints `wss://<words>.trycloudflare.com` join/view URLs — for a friend who is not on your LAN or tailnet | still the token or the knock; the tunnel only moves the bytes |
 | **funnel** | `--funnel` runs Tailscale Funnel instead (needs `tailscale`, and Funnel enabled for the tailnet). Same job, but the URL is your node's own name — `wss://<machine>.<tailnet>.ts.net` and `https://…:8443` for the view — so it is the **same every run**, unlike a quick tunnel's random words. Your guest still installs nothing | as above; mutually exclusive with `--tunnel` |
+
+Neither relay is launch-only. `/menu → Access → Remote`, `/remote off|tunnel|funnel`, or
+`claude-jam remote <off|tunnel|funnel> [--jam NAME] [--reissue]` from a shell switches them
+while the jam runs — same relay children as the launcher, **nobody already connected is
+dropped**, and a mode that cannot run here says why with the exact fix. Links minted earlier
+carry the old address, so the switch offers to re-issue every live link (and waits for the new
+hostname before minting, or they would carry exactly the address they replace). When a relay
+comes up, host clients get `tunnel ready: <the whole join command>` rather than a silent
+refresh, and `/join` prints one dated block instead of another near-identical copy.
 
 ### Invite links
 
@@ -215,6 +254,7 @@ approves.
 | *(plain line)* | anyone | goes to claude as `[Name]: …` — attribution is symmetric, the host is a `[Name]` too |
 | `/c <text>` | anyone | human-only chat; the agent never sees it |
 | `/who`, `/help`, `/quit` | anyone | roster · reprint onboarding · leave (session keeps running) |
+| `/menu` | anyone | the live control panel: People · Invites · Access · Session · Help & guides. Shows the jam's state next to every toggle, runs any command with one key, and renders MANUAL.md inline. A guest's `/menu` lists exactly what a guest may do. **Every feature has to be reachable from it — a unit test fails when one is not** |
 | `/mirror`, **F2** | anyone | swap live TUI ⇄ transcript |
 | **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. **F3 again** (or `Ctrl-b d`) comes back. Host **and** loopback only |
 | `a` `d` `i`/Esc | host | answer the approval bar above the status row — accept · deny · dismiss. Only while the input line is empty |
@@ -226,7 +266,9 @@ approves.
 | `/answer other <text>` | host | the free-text option. Host-only whatever `--answers` says: arbitrary text into the terminal is raw keyboard access |
 | `/outbox`, `/retry` | anyone | what jam kept when it could not confirm a message landed · send the newest kept one again (yours; the host may send anybody's) |
 | `↑` / `↓` | anyone | recall your own last 50 submissions — per client, and they survive a restart |
-| `/join`, `/token new\|set\|off` | host | reprint the invite lines · rotate or drop the token |
+| `/join`, `/token new\|set\|off` | host | reprint the invite lines (one dated block, so which one is live is never a guess) · rotate or drop the token |
+| `/token invite-only on\|off` | host | refuse knocks outright, so an invite link is the only door |
+| `/remote off\|tunnel\|funnel` | host | put the jam on a public relay, or take it back off, without dropping anybody. `claude-jam remote …` does the same from a shell |
 | `/invite <Name> [--uses N] [--expires 24h]` | host | mint a link that joins as that name with no approval |
 | `/invites`, `/invite revoke <Name\|id>` | host | list the links (never reprinting one) · take one back |
 | `/kick <name> [revoke]` | host | remove somebody already in: their socket closes 4406, they drop out of the roster, everybody is told — and you are offered their invite link back |
