@@ -241,9 +241,7 @@ export function parseClientLine(line) {
   // without a name) grants that guest standing approval for the rest of this jam; no name
   // means the only guest currently waiting.
   if (t === '/allow-cmd' || t.startsWith('/allow-cmd ')) {
-    const words = t.slice(10).trim().split(/\s+/).filter(Boolean);
-    const always = words.at(-1)?.toLowerCase() === 'always';
-    return { kind: 'cmd', op: 'allow', name: (always ? words.slice(0, -1) : words).join(' ') || null, always };
+    return { kind: 'cmd', op: 'allow', ...answerWords(t.slice(10)) };
   }
   if (t === '/deny-cmd' || t.startsWith('/deny-cmd ')) {
     return { kind: 'cmd', op: 'deny', name: t.slice(9).trim() || null, always: false };
@@ -265,16 +263,44 @@ export function parseClientLine(line) {
     const text = t.slice(2).trim();
     return text ? { kind: 'chat', text } : { kind: 'error', text: 'usage: /c <message>' };
   }
+  // v0.12: the session transcript, on the host's say-so. Same ladder as /allow-cmd.
+  if (t === '/export') return { kind: 'export' };
+  if (t === '/allow-export' || t.startsWith('/allow-export ')) {
+    return { kind: 'export-ok', op: 'allow', ...answerWords(t.slice(13)) };
+  }
+  if (t === '/deny-export' || t.startsWith('/deny-export ')) {
+    return { kind: 'export-ok', op: 'deny', name: t.slice(12).trim() || null, always: false };
+  }
+  // v0.13: files. Everything after `/send ` is the path — paths have spaces far more often
+  // than a caption is wanted, and `/paste <caption>` covers the captioned case.
+  if (t === '/send' || t.startsWith('/send ')) {
+    const p = t.slice(5).trim();
+    return p ? { kind: 'send', path: p } : { kind: 'error', text: 'usage: /send <path>' };
+  }
+  if (t === '/paste' || t.startsWith('/paste ')) return { kind: 'paste', caption: t.slice(6).trim() };
+  if (t === '/accept-file' || t.startsWith('/accept-file ')) {
+    return { kind: 'file-ok', op: 'allow', ...answerWords(t.slice(12)) };
+  }
+  if (t === '/deny-file' || t.startsWith('/deny-file ')) {
+    return { kind: 'file-ok', op: 'deny', name: t.slice(10).trim() || null, always: false };
+  }
+  if (t === '/get' || t.startsWith('/get ')) return { kind: 'get', name: t.slice(4).trim() || null };
   // v0.14: anything else that looks like a command belongs to claude, not to jam — the host
   // client types it into the real TUI, a guest's becomes a request the host approves.
   if (t.startsWith('/')) {
-    if (RESERVED_COMMANDS.includes(slashName(t))) {
-      return { kind: 'error', text: `${slashName(t)} is specced (v0.12/v0.13) but not built yet` };
-    }
     const v = validSlashCommand(t);
     return v.ok ? { kind: 'slash', text: v.text } : { kind: 'error', text: v.error };
   }
   return { kind: 'say', text: t };
+}
+
+// `Dana K always` → {name:'Dana K', always:true}; `always` alone, or nothing at all, means the
+// only request waiting. One parser for all three approval commands (`/allow-cmd`,
+// `/allow-export`, `/accept-file`) so their syntax cannot drift apart.
+function answerWords(rest) {
+  const words = String(rest ?? '').trim().split(/\s+/).filter(Boolean);
+  const always = words.at(-1)?.toLowerCase() === 'always';
+  return { name: (always ? words.slice(0, -1) : words).join(' ') || null, always };
 }
 
 // ------------------------------------------- v0.14: claude slash commands ----
@@ -282,12 +308,10 @@ export function parseClientLine(line) {
 // jam's own commands: everything a client answers itself. Everything else is claude's.
 // Kept as data so the client, the daemon and the docs cannot drift apart.
 export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror', '/tools',
-  '/join', '/accept', '/deny', '/token', '/allow-cmd', '/deny-cmd'];
-
-// Specced (v0.12 export, v0.13 files) but not implemented. Named here so they are refused
-// with the truth instead of being typed into the TUI, where claude would just shrug.
-export const RESERVED_COMMANDS = ['/export', '/send', '/paste', '/get',
-  '/allow-export', '/deny-export', '/accept-file', '/deny-file'];
+  '/join', '/accept', '/deny', '/token', '/allow-cmd', '/deny-cmd',
+  // v0.12 export, v0.13 files.
+  '/export', '/allow-export', '/deny-export', '/send', '/paste', '/get',
+  '/accept-file', '/deny-file'];
 
 // Session-lifecycle commands: they end or wipe the conversation for EVERYBODY, so they stay
 // with the host. Hard list, enforced server-side — no guest request, no `/allow-cmd always`
@@ -363,10 +387,12 @@ export function buildPopupArgs({ session, client, node, script, name, ip, ttlS, 
 }
 
 // What the popup says. One line, because a popup is seven rows and four of them are frame.
+// v0.12/v0.13 added two more kinds of request to the same popup: the transcript and a file.
 export function popupPrompt(kind, name, ip, detail) {
-  return kind === 'cmd'
-    ? `⌘ ${name} wants to run ${detail}`
-    : `⚑ ${name} wants to join${ip ? ` (${ip})` : ''}`;
+  if (kind === 'cmd') return `⌘ ${name} wants to run ${detail}`;
+  if (kind === 'export') return `⇩ ${name} wants the session transcript`;
+  if (kind === 'file') return `⇪ ${name} wants to send ${detail}`;
+  return `⚑ ${name} wants to join${ip ? ` (${ip})` : ''}`;
 }
 
 // The jam session's status line while knocks are pending; null means "put the host's own
@@ -661,11 +687,13 @@ export function onboardingLines(name = 'You', host = false) {
       'F2                → transcript ⇄ live TUI (this screen)',
       'F3                → type INTO the TUI (permissions, /model)',
       '/model /compact…  → run any claude command in the TUI',
+      '/send <path>      → offer a file to everyone · /export',
       '/help /who /join  → this block · participants · invite line']
     : [`plain line        → claude (attributed [${name}])`,
       '/c <text>         → humans only — claude never sees it',
       'F2                → transcript ⇄ live TUI (this screen)',
       '/who /quit        → participants / leave',
+      '/send <path>      → give claude a file · /paste · /export',
       'Shift+Enter or \\  → multi-line message · /tools · /help',
       'Lost? just ask claude — e.g. "how does this jam work?",',
       '"how do I chat privately?" — it knows the full manual.'];
@@ -708,6 +736,125 @@ export function tunnelJoinLines(tunnelJoin, tunnelView) {
 // reply, so those four can never drift — the client used to drop the tunnel lines entirely.
 export function inviteLines(info = {}) {
   return [...tunnelJoinLines(info.tunnelJoin, info.tunnelView), ...joinLines(info.join, info.view)];
+}
+
+// ------------------------------- v0.12 / v0.13: export and file transfers ----
+
+// One frame carries 64 KB of bytes, base64'd so a PNG survives a JSON text frame. The ws
+// server's maxPayload has to clear that plus the envelope: 64 KB → 87.4 KB of base64.
+export const XFER_CHUNK = 64 * 1024;
+export const XFER_FRAME_MAX = 128 * 1024;
+// Caps, enforced on the daemon side (the client checks too, so a typo fails before the host
+// is asked): a transcript or an offered file may be 50 MB, an upload from a guest 20 MB.
+export const EXPORT_MAX = 50 * 1024 * 1024;
+export const UPLOAD_MAX = 20 * 1024 * 1024;
+// One transfer in flight per client per direction — a guest cannot start ten uploads at once.
+export const XFER_IN_FLIGHT = 1;
+
+// `2.1 MB`, `12 KB` — sizes in approval lines, where an exact byte count means nothing.
+export function humanBytes(n) {
+  const b = Math.max(0, Math.floor(Number(n) || 0));
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${Math.round(b / 1024)} KB`;
+  return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// A file name arriving over the wire is a trust boundary: it decides a path on disk. Refuse
+// anything with a separator (that is a traversal attempt, not a file name — the sender is
+// supposed to send a basename), refuse the dot entries, then reduce what is left to a boring
+// charset. null = refuse the transfer, never "guess a name".
+export const UPLOAD_NAME_MAX = 80;
+export function safeBaseName(name) {
+  const raw = String(name ?? '').trim();
+  if (!raw || raw.length > 255 || /[\\/]/.test(raw) || raw === '.' || raw === '..') return null;
+  // Everything outside [A-Za-z0-9._-] becomes '_': no control bytes, no shell metacharacters,
+  // no unicode lookalike for a separator. A leading dot goes too — no writing dotfiles.
+  let s = raw.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
+  if (!s) return null;
+  if (s.length > UPLOAD_NAME_MAX) {
+    const dot = s.lastIndexOf('.');
+    const ext = dot > 0 && s.length - dot <= 8 ? s.slice(dot) : '';
+    s = s.slice(0, UPLOAD_NAME_MAX - ext.length) + ext;
+  }
+  return s;
+}
+
+// A second photo.png never overwrites the first: photo-1.png, photo-2.png, … `exists` is
+// injected so this stays pure. null = give up rather than loop forever.
+export function uniqueName(name, exists = () => false, max = 99) {
+  if (!exists(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  for (let i = 1; i <= max; i++) if (!exists(`${stem}-${i}${ext}`)) return `${stem}-${i}${ext}`;
+  return null;
+}
+
+// One transfer as the frames it goes out as. A generator, so a 50 MB export never exists twice
+// in memory as base64. A zero-byte file is one `done` frame, not zero frames.
+export function* xferFrames(xfer, data, chunk = XFER_CHUNK) {
+  const buf = Buffer.from(data);
+  for (let off = 0, seq = 0; off < buf.length || seq === 0; off += chunk, seq++) {
+    yield {
+      t: 'file', xfer, seq, done: off + chunk >= buf.length,
+      b64: buf.subarray(off, off + chunk).toString('base64'),
+    };
+  }
+}
+
+// Feed frames out a few per tick: a 20 MB upload is 320 frames, and doing them all in one turn
+// of the event loop stalls the sender (the daemon's HTTP endpoints, or the client's UI).
+// `alive` stops a transfer whose peer went away mid-stream.
+export function pumpFrames(frames, sendOne, alive = () => true, perTick = 8) {
+  const tick = () => {
+    for (let i = 0; i < perTick; i++) {
+      if (!alive()) return;
+      const { value, done } = frames.next();
+      if (done) return;
+      sendOne(value);
+    }
+    setImmediate(tick);
+  };
+  tick();
+}
+
+// Where claude keeps a session's transcript: the cwd with every non-alphanumeric character
+// turned into '-'. Verified against a real ~/.claude/projects (a path with a dot in it lands
+// as '--'). Printed for the guest, never used to write anything ourselves.
+export function projectSlug(cwd) {
+  return String(cwd ?? '').replace(/[^A-Za-z0-9]/g, '-');
+}
+
+export function exportFileName(sessionId) {
+  return `jam-session-${sessionId}.jsonl`;
+}
+
+// What the guest is told after an export lands. `claude --resume` scans projects/*.jsonl, so
+// copying the file into the folder for THEIR cwd is the whole trick.
+export function resumeInstructions(sessionId, file, cwd) {
+  const slug = projectSlug(cwd);
+  return [
+    `to continue this conversation yourself, from ${cwd}:`,
+    `  mkdir -p ~/.claude/projects/${slug}`,
+    `  cp ${file} ~/.claude/projects/${slug}/${sessionId}.jsonl`,
+    `  claude --resume ${sessionId}`,
+    'the folder name is that cwd with every non-alphanumeric character turned into "-" —',
+    'a different cwd means a different folder (ls ~/.claude/projects to check).',
+    'this transcript holds everything claude saw here: file contents it read, tool output,',
+    'and whatever was in its context. The host should run /token new now.',
+  ];
+}
+
+// Best-effort scrub of OUR OWN join-token block from an exported transcript. hooks.sh writes
+// it as one line, so its first and last words identify it; the raw token is replaced too, in
+// case the agent quoted it back somewhere in the conversation. Best-effort by design and
+// documented as such: a transcript is everything claude saw, and only the join credential is
+// worth trying to keep out of a copy that leaves the host.
+export const TOKEN_BLOCK_RE = /Join token: [^"\n]{0,800}?tell them to ask the host\./g;
+export function stripTokenBlock(text, token = null) {
+  let out = String(text).replace(TOKEN_BLOCK_RE, '[jam join-token block removed on export]');
+  if (typeof token === 'string' && token.length >= 8) out = out.split(token).join('[token removed]');
+  return out;
 }
 
 export function buildSettings(hooksPath) {
