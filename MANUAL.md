@@ -8,16 +8,19 @@ manual to answer any "how do I…" question about the jam itself, for the host a
 One real Claude Code session (this one) on the host's machine, bridged so several humans can
 talk to you and to each other. **Every participant, the host included, reaches you as
 `[Name]: …`** — the prefix always tells you who is talking. A message with NO prefix was typed
-straight into this terminal: somebody ran `tmux attach`, or the host took keyboard control of
-your screen from their client (F3, below).
+straight into this terminal: somebody ran `tmux attach` — which is also what the host's own
+**F3** does (below).
 
 ## One client, two views
 
 Everybody — host and guests — runs the same single-pane client, and it has exactly two views:
 
-- **live TUI (the default):** a mirror of this very screen, streamed as real cells at up to 4
-  frames a second. Under it: a 3-row **chat strip** with the things your screen cannot show
-  (humans-only chat, knocks, join/leave and error lines), a status row, and their input row.
+- **live TUI (the default):** a mirror of this very screen, streamed as real cells. The cadence
+  adapts: up to 25 frames a second while somebody is watching and something is moving, back to
+  4 a second once it goes quiet, and an unchanged screen sends nothing at all. Under it: a 3-row
+  **chat strip** with what your screen cannot show (humans-only chat, join/leave, system and
+  error lines), the host's **approval bar** when somebody is waiting for them, a status row, and
+  their input row.
 - **transcript (F2, or `/mirror`):** the full jam history — every message, your replies, tool
   lines — with the same status and input rows. F2 flips back.
 
@@ -29,22 +32,28 @@ working (`✻ claude is working…`), and whether you are waiting for a permissi
 - **Host** — started the session (`./jam host --name <Name> --cwd <dir>`). Their client runs
   full-screen in the terminal they launched from; the tmux session (`jam`, windows `daemon` and
   `claude`) stays **detached** — `tmux attach -t jam` is the escape hatch for the raw TUI, and
-  closing the client leaves everything running. Host extras: F3, claude's slash commands,
-  `/accept`/`/deny`, `/token`, `/join`, and answering your permission prompts.
+  closing the client leaves everything running. Host extras: F3, the approval bar's one-key
+  answers, claude's slash commands, `/accept`/`/deny`, `/token`, `/join`, and answering your
+  permission prompts.
 - **Guest** — joins from their own machine:
   `jam join ws://<host-ip>:7777 --name <Name>` (plus `--token <t>` when one is set) — or, if the
   host is running from a source checkout instead of the Homebrew install, `node client.mjs` in
   place of `jam join`. The invite line the host hands out already has the right one.
   They need to reach the host — same Tailscale network typically, or the host's `--tunnel` URL.
 
-## F3 — the host types into your screen
+## F3 — the host attaches to your screen
 
-The host presses **F3** to hand their keyboard to this TUI: every key goes straight in, the
-status row reads `⌨ TUI control — F3 returns`, and F3 gives the keyboard back to the jam. It is
-how they answer your permission prompts, the trust dialog, or drive an interactive command
-picker. While it is on, even Ctrl-C goes to you. Guests never get it (host + loopback only,
-enforced by the daemon) — if a guest asks, tell them to ask the host or send a `/command`
-request.
+The host presses **F3** and their client hands the whole terminal to `tmux attach -t <jam>:claude`
+— this very screen, at native speed, with nothing in between: permission prompts, the trust
+dialog, an interactive `/model` picker, the mouse, even Ctrl-C. **`Ctrl-b d` gives the terminal
+back to their jam client** (that is tmux's detach, not jam's), and their mirror picks up where it
+left off. Until v0.15 F3 proxied each keystroke over the network and waited for the next frame,
+which was 300-500 ms per key; now there is no proxy at all. While the host is attached their
+mirror is paused, so guests keep watching but the host's own client is not on screen.
+
+Guests never get F3 (host + loopback only, enforced by the daemon) — if a guest asks, tell them
+to ask the host, or to send a `/command` request. `tmux attach -t jam` by hand does the same
+thing as F3 and always did.
 
 ## Slash commands
 
@@ -58,9 +67,10 @@ request.
     F3 drives it. Everyone sees `* Roy ran /model in the TUI`.
   - From a **guest** it becomes a request: they see "sent to the host for approval", the host
     sees `⌘ Dana wants to run /compact — /allow-cmd Dana · /allow-cmd Dana always ·
-    /deny-cmd Dana`. Approved, it runs and everybody is told who approved it. `always` is
-    standing approval for that guest for this jam only. Default is deny; requests expire after
-    2 minutes and only one at a time per guest.
+    /deny-cmd Dana`, and the same request in their approval bar, where `a` allows it once.
+    Approved, it runs and everybody is told who approved it. `always` is standing approval for
+    that guest for this jam only. Default is deny; requests expire after 2 minutes and only one
+    at a time per guest.
   - **`/exit`, `/clear` and `/resume` are host-only, hard**: they end or wipe the session for
     everyone, so a guest cannot request them at all and `always` never covers them. (`/exit`
     and `/quit` in a client just leave that client — the session keeps running.)
@@ -69,8 +79,16 @@ request.
 
 - Token set → guests with `--token` enter directly.
 - No token (default) → a guest "knocks": they wait, and the host sees
-  `⚑ Dana wants to join — /accept Dana | /deny Dana` in their client (plus a tmux popup for
-  anyone attached: `a` accept, `d` deny, `i` ignore). Knocks expire after 2 minutes.
+  `⚑ Dana wants to join — /accept Dana | /deny Dana` in their client. Knocks expire after
+  2 minutes.
+- **The approval bar (v0.16).** Every request waiting for the host — a knock, a guest's
+  `/command`, an `/export`, a file — also raises one row just above the host's status row:
+  `⚑ Dana wants to join (100.86.8.97) · [a]ccept [d]eny [i]gnore · 2:00`, counting down to that
+  request's expiry, with `+N more` when several wait. **`a` accepts, `d` denies, `i` or Esc
+  hides the bar** (the request keeps waiting). Those keys work only while the host's input line
+  is empty: the first character they type turns them off until Esc, so typing can never approve
+  anything by accident. It runs the very same commands as `/accept` and friends. Anyone attached
+  to the tmux session still gets the one-key popup as well; whoever answers first wins.
 - Host token commands: `/token new` (random), `/token set <value>`, `/token off` (knock-only).
   Rotating never kicks people already in.
 - `/join` (host only) reprints every invite line — the LAN/Tailscale one, the browser view URL
@@ -99,7 +117,8 @@ per file:
 - Guest runs `/send <path>` (or `/paste`, which grabs an **image off their macOS clipboard**;
   `/paste <caption>` adds a note). They see "waiting for the host to accept it".
 - The host sees `⇪ Dana wants to send photo.png (2.1 MB) — /accept-file Dana ·
-  /accept-file Dana always · /deny-file Dana`, plus a tmux popup if they are attached.
+  /accept-file Dana always · /deny-file Dana`, gets the approval bar (`⇪ … [a]ccept [d]eny`,
+  one key), plus a tmux popup if they are attached.
   `always` = that guest's later files are accepted without asking, for this jam only.
 - Accepted, the file is written to **`<cwd>/jam-uploads/<name>`** and you are told about it as a
   normal attributed message: `[Dana]: sent a file: jam-uploads/photo.png have a look`. **That
@@ -119,8 +138,9 @@ into `jam-uploads/` — that is how an image with no path reaches you.
 writing as we talk.
 
 - The host sees `⇩ Dana requests the session transcript — /allow-export Dana ·
-  /allow-export Dana always · /deny-export Dana`. Default is no; `always` = that person may
-  export again for the rest of this jam.
+  /allow-export Dana always · /deny-export Dana`, and the same request in the approval bar
+  (`⇩ … [a]ccept [d]eny`). Default is no; `always` = that person may export again for the rest
+  of this jam — which needs the typed command, since one key never grants standing approval.
 - Approved, the guest's client writes `./jam-session-<session-id>.jsonl` and prints the recipe
   to continue the conversation on their own machine: copy it into
   `~/.claude/projects/<their cwd with every non-alphanumeric turned into "-">/<session-id>.jsonl`
@@ -161,7 +181,7 @@ Shift+Enter, Option+Enter or a trailing `\` for multi-line.
 Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` · `/join` ·
 `/allow-cmd [name] [always]` · `/deny-cmd <name>` · `/allow-export [name] [always]` ·
 `/deny-export <name>` · `/accept-file [name] [always]` · `/deny-file <name>` ·
-**F3** TUI control.
+**F3** attach the real TUI (`Ctrl-b d` back) · **a**/**d**/**i** answer the approval bar.
 Any other `/command` is one of yours — see Slash commands above.
 
 ## Host launch flags (most useful)
@@ -188,7 +208,13 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
 - `/paste` says it is macOS-only → it is: it reads a PNG off the mac clipboard (pngpaste if
   installed, otherwise osascript). Elsewhere, save the image and use `/send <path>`.
 - F3 does nothing → they are a guest (host + loopback only), or their terminal sends a
-  different F3 sequence; the host can `tmux attach -t jam` instead.
+  different F3 sequence; the host can `tmux attach -t jam` instead — that is exactly what F3
+  does for them.
+- Host is stuck inside the TUI after F3 → `Ctrl-b d` detaches and their jam client comes back.
+  If they launched jam from inside another tmux, the outer prefix takes the first `Ctrl-b`, so
+  it is `Ctrl-b Ctrl-b d`.
+- `a` or `d` does nothing / lands in the message → they have something typed in the input line;
+  the single keys are armed only on an empty line, and Esc re-arms them. A guest never has them.
 - F2, Shift+Enter or the live view do nothing → they are running `--basic`, which is
   transcript-only. Drop the flag.
 - Their screen looks cropped or half empty → their terminal is smaller than the host's window;

@@ -99,8 +99,13 @@ Three ways to let someone in. All of them end in the same welcome.
 Rotating a token (`/token new` / `set` / `off`) never disconnects anyone already in — the token
 is checked at join time only. A *wrong* token knocks, so rotating strands nobody. Knocks expire
 after 2 minutes, at most 10 wait at once, and two live participants can never share a name
-(attribution is by name). A knock also opens a one-key `tmux display-popup` for anyone attached
-to the jam session.
+(attribution is by name). A knock — and every other request on the ladder — raises a one-row
+**approval bar** just above the host's status row: `⚑ Dana wants to join (100.86.8.97) ·
+[a]ccept [d]eny [i]gnore · 2:00`, counting down to that request's own expiry, with `+N more`
+when several wait. One key answers it, and only while the input line is empty: the first
+character you type disarms the keys until Esc, so a message that starts with `d` can never deny
+anybody. Anyone attached to the jam session still gets the one-key `tmux display-popup` too —
+whoever answers first wins and the other closes.
 
 `--view` (needs `ttyd`) additionally serves the live TUI read-only in a browser at
 `http://jam:<token>@<host>:7778`. Each tab gets its own grouped tmux session, so viewers never
@@ -123,7 +128,8 @@ approves.
 | `/c <text>` | anyone | human-only chat; the agent never sees it |
 | `/who`, `/help`, `/quit` | anyone | roster · reprint onboarding · leave (session keeps running) |
 | `/mirror`, **F2** | anyone | swap live TUI ⇄ transcript |
-| **F3** | host | hand the keyboard raw to the real TUI — permission prompts, `/model` pickers, Ctrl-C. Host **and** loopback only |
+| **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. `Ctrl-b d` comes back. Host **and** loopback only |
+| `a` `d` `i`/Esc | host | answer the approval bar above the status row — accept · deny · dismiss. Only while the input line is empty |
 | `/tools`, `/tools on\|off` | anyone | reprint the last turn's full tool log · stop/resume collapsing tool lines |
 | `/join`, `/token new\|set\|off` | host | reprint the invite lines · rotate or drop the token |
 | `/accept [name]`, `/deny <name>` | host | answer a knock |
@@ -148,11 +154,14 @@ The daemon injects messages into the real TUI with `tmux load-buffer` + `paste-b
 the pane, and only then sends Enter — text never passes through a shell or argv. Output comes
 back by tailing `~/.claude/projects/*/<session-id>.jsonl`. Turn boundaries come from `Stop` /
 `Notification` hooks in a generated `settings.json` passed with `--settings`, so nothing global
-is touched. The live view is `tmux capture-pane -e`, at most 4 frames a second, only for
-clients that asked, never stored. Everything a guest can send is either sanitized (messages,
+is touched. The live view is `tmux capture-pane -e`, only for clients that
+asked, never stored, at an adaptive cadence: 40 ms while somebody is watching *and* something
+moved in the last 2 s (a message, a turn, typing, the screen itself), 250 ms once it goes quiet,
+and no polling at all with nobody watching — capped at 25 frames a second per client, with an
+unchanged screen still sending nothing. Everything a guest can send is either sanitized (messages,
 chat, captions) or gated (commands, keys, resize, transfers).
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **125 tests**. Seven
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **143 tests**. Seven
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
 in `SPEC.md`.
 
@@ -162,7 +171,12 @@ in `SPEC.md`.
 - Claude Code's JSONL format is officially unstable. All parsing lives in one function
   (`parseJsonlLine`), so a format change is a one-place fix.
 - A message injected mid-response is queued by Claude Code as the next turn, not merged.
-- Guests cannot answer permission prompts; the host does, with F3 or by attaching to tmux.
+- Guests cannot answer permission prompts; the host does, with F3 — which *is* a `tmux attach`.
+  While the host is attached their own mirror is paused, and coming back re-feeds only the last
+  40 transcript lines to the client: the rest stays in the terminal's own scrollback, because
+  ink's `<Static>` would otherwise reprint the whole session on every return.
+- The frame signal is a poll, not `tmux pipe-pane`: the cadence adapts (40 ms active, 250 ms
+  idle) but an active mirror still costs one `capture-pane` per tick.
 - Admission is per person, but there are no per-friend credentials: once in, everybody is
   equally trusted, and `/deny` cannot kick somebody already admitted.
 - The token-in-context guard ("reveal only to the host") is an instruction to the model, not a
