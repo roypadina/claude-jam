@@ -134,7 +134,7 @@ function Host({ back }) {
     h(Head, { title: 'Host a jam', hint: '↑↓ move · ←→/space change · Enter edits a text field · Esc back' }),
     h(Field, { label: 'directory', value: form.cwd, current: field === 'cwd', focused: field === 'cwd' && editing, onSubmit: done('cwd') }),
     h(Field, { label: 'your name', value: form.name, current: field === 'name', focused: field === 'name' && editing, onSubmit: done('name') }),
-    h(Field, { label: 'jam name', value: form.jamName, placeholder: 'jam (the tmux session)', current: field === 'jamName', focused: field === 'jamName' && editing, onSubmit: done('jamName') }),
+    h(Field, { label: 'jam name', value: form.jamName, placeholder: 'claude-jam (the tmux session)', current: field === 'jamName', focused: field === 'jamName' && editing, onSubmit: done('jamName') }),
     h(Box, null, h(Box, { width: 16, flexShrink: 0 }, h(Text, { color: field === 'access' ? C.accent : C.dim }, `${field === 'access' ? '❯' : ' '} access`)),
       h(Badge, { color: form.access === 'knock' ? 'blue' : form.access === 'token' ? 'yellow' : 'magenta' }, form.access),
       h(Text, { color: C.dimmer }, form.access === 'knock' ? '  friends knock, you accept them'

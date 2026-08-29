@@ -531,6 +531,10 @@ export function statusRightWaiting(pendingCount) {
 // ever answer with jam's sessions, because nothing else has a reason to be there.
 export const TMUX_SOCKET_PREFIX = 'claude-jam-';
 export const TMUX_DEFAULT_SOCKET = 'default'; // tmux's own name for the shared server
+// v0.21: the tmux session a jam gets when nobody names one. One constant, because the launcher,
+// the attach lines and the auto-naming all have to agree on what "the default one" is called —
+// and because it used to be spelled `jam` in five separate places.
+export const DEFAULT_TMUX = 'claude-jam';
 export function tmuxSocketFor(port, override = null) {
   const o = typeof override === 'string' ? override.trim() : '';
   // A socket name becomes a filename under tmux's own directory, so keep it to a boring charset
@@ -550,7 +554,7 @@ export function tmuxSocketArgs(socket) {
 // The socket means `tmux attach` alone no longer finds the session, so every line that tells
 // somebody how to attach has to carry it. On the default server it is left off: that is the
 // line people already know.
-export function tmuxAttachLine(socket, session = 'jam', target = null) {
+export function tmuxAttachLine(socket, session = DEFAULT_TMUX, target = null) {
   const s = String(socket || TMUX_DEFAULT_SOCKET);
   const t = target || session;
   return s === TMUX_DEFAULT_SOCKET ? `tmux attach -t ${t}` : `tmux -L ${s} attach -t ${t}`;
@@ -1813,10 +1817,10 @@ export function exitPromptText(guests = 0) {
 
 // The way back in, printed whenever a client leaves a jam running (`k`, `--keep-on-exit`, a
 // non-interactive exit) — one wording, so the launcher and `jam sessions` agree.
-export function reattachLines({ tmux = 'jam', port = 7777, clientCmd = 'node client.mjs', name = 'Host',
+export function reattachLines({ tmux = DEFAULT_TMUX, port = 7777, clientCmd = 'node client.mjs', name = 'Host',
   token = null, socket = TMUX_DEFAULT_SOCKET } = {}) {
   return [
-    `client:  jam host --attach${tmux === 'jam' ? '' : ` --tmux ${tmux}`}`,
+    `client:  claude-jam host --attach${tmux === DEFAULT_TMUX ? '' : ` --tmux ${tmux}`}`,
     `  or:    ${clientCmd} ws://127.0.0.1:${port} --name ${name}${token ? ` --token ${token}` : ''} --host`,
     // v0.20: jam's tmux lives on a socket of its own, so a bare `tmux attach` no longer finds it.
     `raw TUI: ${tmuxAttachLine(socket, tmux, claudeTarget(tmux))}`,
@@ -1840,10 +1844,10 @@ export function foreignSessionText(name, why = '') {
     + `  or look at it yourself:           tmux attach -t ${name}`;
 }
 
-// `jam` → `jam-2` → `jam-3`. The first free suffix, so a third jam does not reuse a name that
-// is only free because the second one is between states.
+// `claude-jam` → `claude-jam-2` → `claude-jam-3`. The first free suffix, so a third jam does not
+// reuse a name that is only free because the second one is between states.
 export function autoSessionName(base, taken = []) {
-  const b = String(base ?? 'jam');
+  const b = String(base ?? DEFAULT_TMUX);
   const used = new Set((Array.isArray(taken) ? taken : []).map(String));
   if (!used.has(b)) return b;
   for (let n = 2; n <= 99; n++) { if (!used.has(`${b}-${n}`)) return `${b}-${n}`; }
