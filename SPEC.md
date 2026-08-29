@@ -1365,3 +1365,24 @@ Two additions Roy asked for explicitly.
      for the guest's reduced menu (it must list exactly what a guest may do).
    - The menu shows current state next to each toggle (view on/off, announce on/off, access mode,
      relay + URL, replay size, participants, standing approvals) so it doubles as the status page.
+
+## v0.24b — invite-line noise and the missing relay-up announcement
+
+Observed live (14:25): the host's welcome printed only the LAN invite line because cloudflared
+had not resolved yet; nothing announced the tunnel when it came up ~10 s later; and a later
+`/join` then printed the full set, leaving three near-identical lines in the log with no
+indication which was current.
+
+- **Announce a relay when it becomes ready**: when `onTunnelChange()` resolves a NEW hostname,
+  host clients get a distinct one-line event — `tunnel ready: <join line>` (and the same for
+  funnel / for a hostname change after a respawn) — not a silent `{t:'token'}` that only
+  refreshes state. Verify the push actually reaches a connected host client (it did not
+  visibly do so in the observed run; treat that as a bug to reproduce and fix, not just a
+  wording change).
+- **At boot, say what is pending instead of printing a soon-stale line**: with `--tunnel`/
+  `--funnel` the welcome shows `tunnel: starting…` under the LAN invite, replaced by the real
+  line when it lands.
+- **`/join` replaces rather than appends**: one compact block with a heading
+  (`── invite ─────`), the current lines, and a dim `(earlier invite lines above are stale)`
+  when the log already holds some — or better, tag every printed invite line with a short
+  timestamp so "which one is live" is unambiguous. Same for `{t:'token'}` refreshes.
