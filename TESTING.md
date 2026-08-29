@@ -61,6 +61,24 @@ Run when the feature list is done. Not a smoke re-run — an adversarial pass ov
   through to the read-only allowlist and the pane looks the same. That is exactly the blind spot
   the step exists to close, and it was measured rather than argued.
 
+  **And then the RELEASE itself was probed, not just the tree.** The campaign's `check-released.sh`
+  found Homebrew 0.21.0 vulnerable; the same shape was re-run on 2026-08-30 against the installed
+  `claude-jam 0.21.1` (`/opt/homebrew/bin/claude-jam`, `brew test` exit 0, libexec `package.json`
+  at 0.21.1) — a throwaway jam with a fake pane, a real `--tunnel`, a real `trycloudflare.com`
+  hostname:
+
+  | probe | result |
+  | --- | --- |
+  | stranger over the public URL, `host: true`, no token | **no welcome** — knocked, `pending` |
+  | ... the join token / tmux session handed over | **null / null** |
+  | relay guest WITH the token | admitted as an ordinary guest; no host payload |
+  | ... their raw keys, their `/end` | both refused, jam still alive |
+  | loopback socket carrying forged `x-forwarded-for` / `cf-connecting-ip` / `cf-ray` | **no welcome** — knocked (the test fails closed) |
+  | the host's own plain loopback client | admitted as host, `session.tmux` + join line, keystrokes landed in the real pane, `/grants` answered, **zero error frames** |
+  | a plain loopback client not claiming host | ordinary guest, no host payload |
+
+  Still unproven, and unchanged by this: `--funnel`. See the deferral below.
+
 - **0.21.0 — 2026-08-29.** All eighteen suites, in the documented order, one at a time, on node
   24.15 / tmux 3.7c / claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2. Every one green; unit
   suite 389/0. Nothing was left behind: no tmux server on a socket the gate created, no `dns-sd`
