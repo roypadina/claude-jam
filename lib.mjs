@@ -912,7 +912,7 @@ export function historyPageRange({ before = 0, rows = 40, historySize = 0,
   return {
     before: off,
     rows: want,
-    start: -off,
+    start: -off || 0, // `-0` is a real value in JS and would make two spellings of one range
     end: want - 1 - off,
     maxBefore: depth,
     // At the top means the row above the window is one the pane no longer has. A pane with no
