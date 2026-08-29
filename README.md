@@ -606,6 +606,11 @@ test instead of somebody's message.
   `funnel` node attribute in Access Controls), and the macOS App Store build of Tailscale.app
   cannot change funnel config at all — its CLI answers `The Tailscale GUI failed to start …
   (Tailscale.CLIError error 3.)`. Use the standalone build from tailscale.com.
+- `--funnel` also carries a known **upstream** risk: tailscale/tailscale#18827 (open since
+  2026-02-27) reports WebSockets through `tailscale serve`'s HTTP reverse proxy — the layer
+  Funnel rides — closing every 10–40 s with code 1001. A 30 s heartbeat cannot save a 10 s
+  drop. Take `--funnel` for what it is proven to give you, a hostname that never changes, and
+  expect `--tunnel` to be the steadier long session until somebody runs Funnel for real.
 - **claude-claude-jam's ownership of a session is a marker on disk, not a capability.** `@claude-jam-owned` plus a
   matching `session.json` is what authorises an end, so anybody who can already set a tmux
   option on their own session and write a directory can make claude-jam end *that* session — which

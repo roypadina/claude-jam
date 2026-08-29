@@ -63,4 +63,11 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   by the 0.20.0 release gate (smoke-perm P3), not by any unit test. Prove: a lint or test that
   every client call site resolves (no undefined identifiers) — a `node --check` passes this file,
   so it needs more than syntax. Owed to the campaign.
+- 2026-08-29 · `--funnel` carries a known UPSTREAM risk, not merely an unverified path:
+  tailscale/tailscale#18827 (filed 2026-02-27, open) reports WebSockets through `tailscale
+  serve`'s HTTP reverse proxy — the same layer Funnel rides — closing every 10–40 s with code
+  1001 "Going Away". Our 30 s heartbeat cannot save a 10 s drop; the reconnect tiers would just
+  churn. Prove: one real WS session over Funnel before `--funnel` is recommended anywhere in the
+  docs. Until then it is a stable-URL convenience with an unproven long-session story, and the
+  docs must not imply otherwise.
 
