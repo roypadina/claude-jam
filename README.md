@@ -380,6 +380,108 @@ Tailscale, a LAN you trust, an SSH tunnel (`ssh -L 7777:127.0.0.1:7777 host`), o
 quick tunnel whose URL you keep private. Never a public IP you advertise. If Tailscale is
 installed the printed join line already uses the Tailscale IP.
 
+## Peer tasks — the host's agent can ask a guest's own Claude Code
+
+**Off by default, twice over.** The host starts the jam with `--peer-tasks`, and each guest types
+`/peer on` in their own client, and *then* every individual task still waits for that guest's yes.
+Two switches, held by two different people, and neither one alone is enough.
+
+```bash
+# the host
+claude-jam host --peer-tasks
+
+# the guest, in their own client
+/peer on
+```
+
+With both on, the host's claude gets two MCP tools and uses them like the built-in Agent tool:
+
+| tool | what it does |
+| --- | --- |
+| `list_peers()` | `[{name, capable, busy, tasksToday}]`. `capable` is that person's own opt-in — the host cannot set it. `busy` means they are already running one; **nothing is queued** |
+| `dispatch_to_peer({peer, prompt, allowedTools?, maxTurns?, deadlineMs?, schema?})` | hand one self-contained task to one person. Returns their answer, or the reason it did not happen. `schema` gives structured output, exactly as the Agent tool does |
+
+### What a guest is agreeing to
+
+The task runs **on the guest's machine, in the guest's own already-authenticated Claude Code,
+spending the guest's own quota**. No credential ever crosses the wire; the host never sees a
+guest's token; nothing is executed on anybody's behalf without their explicit, per-task consent.
+**A guest may decline anything, every time, with no reason** — and a decline is a decision, not a
+failure the host's agent should retry.
+
+Before answering, the guest is shown the **whole prompt**, the exact tool list, both caps and the
+directory it would run in:
+
+```
+⇄ Roy wants to run a task on YOUR machine, in YOUR Claude Code, on YOUR quota.
+    tools      WebSearch, WebFetch, Read, Grep, Glob   (read-only)
+    caps       up to 12 turns · 3m wall clock
+    runs in    /tmp/claude-jam-peer-8f3a91c2 — created for this task, removed after, never your repo
+    your own MCP servers are OFF for it, and it inherits none of your settings
+    the prompt, in full — this is text from another machine, read it before you answer:
+  │ find the current wording of the WebSocket close-code registry and quote it
+    [a]ccept · [d]ecline · [n]ever this session   ·   Esc cancels it once it is running
+```
+
+### The controls, and why each one is there
+
+- **Per-task approval.** There is **no `always`** on this ladder — unlike every other approval in
+  claude-jam. The same person is asked again, every single time.
+- **The default tool whitelist is read-only research**: `WebSearch`, `WebFetch`, `Read`, `Grep`,
+  `Glob`. `Bash`, `Write` and `Edit` may be *asked* for, but **one key never grants them**: the
+  guest has to type `/peer accept tools`, for that one task.
+- **A fresh scratch directory** (`$TMPDIR/claude-jam-peer-<id>`, 0700), created for the task and
+  removed when it ends — every way it can end. Never the guest's repository, never their home.
+- **The guest's own MCP servers are off** for it (`--strict-mcp-config`, with no MCP config at
+  all), so nothing they have connected — a database, a ticket system, a cloud account — is
+  reachable by a prompt that arrived over a network.
+- **It inherits none of the guest's settings.** `--restricted` makes claude ignore their user,
+  project and local settings files, refuse `bypassPermissions`, and confine the file tools to that
+  one directory. A machine whose own default is `bypassPermissions` — plenty are — does not hand
+  that to work somebody else asked for.
+- **The permission mode is always passed and is always `plan`** (or `acceptEdits` when something
+  that writes was granted). **Never `bypassPermissions`, never
+  `--dangerously-skip-permissions`** — asserted by a unit test and again by the smoke, against the
+  argv that is actually used.
+- **The prompt goes in on stdin**, never an argv: it is text that arrived over a network, and an
+  argv is visible in `ps` to every user on that machine.
+- **Two caps**: a wall clock (3 minutes by default, 10 maximum) and a turn count (12 by default,
+  40 maximum). Both are enforced by killing the process, by its pid. **A turn cap is a proxy, not
+  a spend cap** — it bounds how many times the model is asked, not what each of those costs.
+  (`claude` 2.1.251 has no `--max-turns`, so claude-jam counts the stream itself.)
+- **A per-guest daily counter** they can zero with `/peer reset`, shown in `/peers` and in
+  `list_peers()`.
+- **An audit log both sides can read**: `/peers log`.
+
+### Prompt injection goes both ways
+
+The host's prompt is **untrusted input on the guest's machine** — which is what the whitelist, the
+scratch directory, the missing MCP servers and the human reading it in full are for. The guest's
+result is **untrusted input in the host's context** — so it is quoted into the transcript behind a
+`│ `, with the `[Name]: ` participant form neutralised, and handed to the host's agent behind a
+banner saying what it is. **It is never executed and never auto-applied to a file.**
+
+### What the room sees
+
+Everything, attributed `[Dana → task]`: what was asked, that it was accepted, each line of
+progress and the answer. A task only the two parties could see would be a private channel inside a
+shared session.
+
+### Failure is honest
+
+**Decline**, **timeout**, **cap-hit**, **crash** and **cancel** are five different answers the
+host's agent can tell apart, and partial output is preserved on every one of them. A busy or
+offline peer is **reported with its reason**, never silently queued.
+
+### The open question — say it out loud
+
+Claude Code subscriptions are individual. Peer tasks are built so that every task is one person
+choosing, in the moment, to spend their own quota on something — which is ordinary individual
+usage of each account. **Whether a coordinated multi-account fan-out counts as ordinary individual
+usage is not settled**, and nobody should discover that later. If you are running a jam where one
+agent routinely dispatches to several people at once, that is the question to ask before you build
+on it, not after. `--peer-tasks` is off by default for this reason as much as for any other.
+
 ## Session lifecycle
 
 claude-jam creates the tmux session, so claude-jam cleans it up — no `tmux kill-session` line to remember.
@@ -426,6 +528,10 @@ approves.
 | `/menu` | anyone | the live control panel: People · Invites · Access · Session · Notifications · Help & guides. Shows the jam's state next to every toggle, runs any command with one key, and renders MANUAL.md inline. A guest's `/menu` lists exactly what a guest may do. **Every feature has to be reachable from it — a unit test fails when one is not** |
 | `/ping <Name\|all> [message]` | anyone | *(alias `/nudge`)* get somebody to look at their screen. The person addressed gets a highlighted `👋 Roy is asking for you: …` plus their own bell/sound/notification; **everybody else sees a dim `* Roy nudged Yossi`**, so a nudge is never secret. Refused for somebody who is not connected — never queued. One per sender per target per 30 s. `!` at the end repeats it **once** after a minute if they are still not active |
 | `/sound [on\|off]` | anyone | this client's own sounds. Bare `/sound` reports all three tiers |
+| `/peer on\|off\|never` | anyone | whether the host's agent may run a task on **your** machine, in **your** Claude Code, on **your** quota. Off until you say so; `never` is a one-way door for that client session that no host can clear. See [Peer tasks](#peer-tasks--the-hosts-agent-can-ask-a-guests-own-claude-code) |
+| `/peer accept\|decline`, `a`/`d`/`n` | anyone | answer the task in front of you. **`/peer accept tools`** is a second, typed gate for a task that asks for `Bash`, `Write` or `Edit` — one key never grants those. `Esc` (or `/peer cancel`) stops one that is already running |
+| `/peer reset`, `/peer` | anyone | zero your own daily task counter · report where you stand |
+| `/peers`, `/peers log` | anyone | who has opted in, who is busy, how many tasks today · the audit trail of everything this jam dispatched |
 | `/mirror`, **F2** | anyone | swap live TUI ⇄ transcript. The live TUI renders in the terminal's **alternate screen buffer**, so the transcript keeps the normal one and flipping either way loses nothing |
 | **PgUp** / **PgDn** | anyone | in the live TUI: scroll back through the host's **real pane history** (`capture-pane`, colours included), 2000 lines at most. **Shift+↑/↓** moves one line, the wheel three *if your terminal sends wheel events* — claude-jam never turns mouse reporting on, because that would take text selection away from you |
 | **End** / `G` / **Esc** | anyone | back to the live screen. While you are scrolled, live frames are **held, not dropped** — the status row says how many are waiting |
@@ -705,7 +811,7 @@ phase-2 relay sketch that removes the inbound port.
 | `AGENTS.md` | how an agent works **on** this project: layout, tests, the smokes and their order, the rules that must never be broken |
 | `SPEC.md` | protocol, frames, design decisions, the full ceiling list |
 | `PRIOR-ART.md` | the ~40-project survey the credits below summarize |
-| [wiki](https://github.com/roypadina/claude-jam/wiki) | task-shaped pages: Install, Agent-Install, Hosting, Joining, Remote access, Files, Security, Architecture, Troubleshooting |
+| [wiki](https://github.com/roypadina/claude-jam/wiki) | task-shaped pages: Install, Agent-Install, Hosting, Joining, Remote access, Files, Security, **Peer tasks**, Architecture, Troubleshooting |
 
 ## For agents
 
