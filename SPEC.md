@@ -763,7 +763,10 @@ and a daemon with replayed history puts an older turn's collapsed-tool line ther
 # is what the 2026-08-29 run used.
 # Run the launcher inside a tmux session of your own so it has a real terminal size, and
 # --no-attach so no host client of its own opens (the smokes bring their own clients).
-tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
+# v0.20: jam builds on ITS OWN tmux socket (claude-jam-<port>), so the driver session goes there
+# too — then this whole recipe touches the default tmux server not at all, and the socket's server
+# disappears on its own once its last session is killed.
+tmux -L claude-jam-7799 new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
   "JAM_CLAUDE=$(whence -p claude 2>/dev/null || command -v claude) node host.mjs \
    --tmux jamtest --port 7799 --view-port 7801 --name Host --token smoketoken \
    --hook-secret smokehooksecret --cwd '$PWD' --no-attach -- --model haiku; sleep 1800"
@@ -776,16 +779,17 @@ node scripts/smoke-popup.mjs ws://127.0.0.1:7799 jamtest 7799 smokehooksecret
 node scripts/smoke-slash.mjs ws://127.0.0.1:7799 smoketoken jamtest   # last, and ONCE per
 #   daemon: it grants Guest standing approval (`/allow-cmd always`), which lives in daemon
 #   memory, so a second run against the same daemon gets no cmdreq to answer.
-tmux kill-session -t jamtest          # exact names only, never a pattern
-tmux kill-session -t jamdrive
+tmux -L claude-jam-7799 kill-session -t =jamtest   # exact names only, never a pattern
+tmux -L claude-jam-7799 kill-session -t =jamdrive
 rm -rf "$TMPDIR/claude-jam-7799" jam-uploads
 
 # knock-only daemon (no --token) for the admission smoke
-tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
+tmux -L claude-jam-7799 new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
   "JAM_CLAUDE=... node host.mjs --tmux jamtest --port 7799 --name Host --cwd '$PWD' \
    --no-attach -- --model haiku; sleep 300"
 node scripts/smoke-knock.mjs ws://127.0.0.1:7799
-tmux kill-session -t jamtest; tmux kill-session -t jamdrive
+tmux -L claude-jam-7799 kill-session -t =jamtest
+tmux -L claude-jam-7799 kill-session -t =jamdrive
 rm -rf "$TMPDIR/claude-jam-7799"
 
 # v0.17: the transport smoke takes NO arguments and needs no daemon of yours. It starts and
@@ -1215,6 +1219,37 @@ this machine (Roy runs many). So:
 4. Docs: MANUAL.md, README, CHANGELOG — F3 in/F3 out, the dedicated socket, and that
    `tmux attach` from outside now needs `tmux -L jam-<port> attach -t <name>` (print that exact
    line in `jam sessions` and in the client's "keep it running" message from v0.18).
+
+#### v0.20 — shipped 2026-08-29
+
+All four items, 6 unit tests (243 total) and two new steps in `smoke-lifecycle.mjs`. What is worth
+knowing beyond the item text:
+
+- **`-L default` IS the shared server.** Measured on tmux 3.7c: `tmux -L default
+  display-message -p '#{socket_path}'` and the bare form both answer
+  `/private/tmp/tmux-501/default`. So `tmuxSocketArgs()` always emits `-L <name>` and the escape
+  hatch needs no branch — only the F3 binding is skipped, and only the printed attach line drops
+  the flag (that is the line people already know).
+- **The socket name is `claude-jam-<port>`, not `jam-<port>`** as this section originally said —
+  v0.21's canonical naming, applied here because the socket is a new user-visible surface and
+  there was no reason to ship it under the old name and rename it later.
+- **A socket name becomes a filename** under tmux's own directory, so `--tmux-socket` is validated
+  like one: `[A-Za-z0-9._-]`, no leading `-` (tmux would read it as an option), 64 characters, and
+  anything else silently falls back to the per-port name rather than being obeyed.
+- **The ownership rule gained a third leg.** `killOwned(name, socket, verdict)` refuses a verdict
+  whose recorded socket is not the one it was asked about — so two servers holding a same-named
+  session cannot be confused for each other. `session.json` records the socket; a file written
+  before v0.20 names none and is read as the default server, which is where it is.
+- **The status line needed no new machinery.** `statusRightText(pending, {home})` composes on top
+  of `statusRightWaiting`, so the `⚑ N waiting` badge still wins by construction, and v0.4's
+  save/restore is unchanged. It also inherits v0.4's `--no-popup`, which turns the whole status
+  line off — the smoke asserts both halves.
+- **A pleasant side effect:** a tmux server with no sessions exits, so jam's socket cleans itself
+  up. After a full smoke run, `tmux -L claude-jam-7799 ls` answers `no server running`.
+- **The smokes all moved.** Six derive the socket from the jam's port (`JAM_SOCKET` overrides);
+  `smoke-replay` and `smoke-lifecycle` pin one socket of their own, which makes the latter the
+  `--tmux-socket <name>` test as well. Two new steps there: the default socket never hears about
+  jam's sessions or its F3 binding, and F3 detaches a real attached pty.
 
 ## v0.21 — one name, and docs an agent can install from
 

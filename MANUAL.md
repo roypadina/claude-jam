@@ -54,17 +54,21 @@ plugins, MCP servers and version), so nothing there is a guess.
 
 ## F3 — the host attaches to your screen
 
-The host presses **F3** and their client hands the whole terminal to `tmux attach -t <jam>:claude`
-— this very screen, at native speed, with nothing in between: permission prompts, the trust
-dialog, an interactive `/model` picker, the mouse, even Ctrl-C. **`Ctrl-b d` gives the terminal
-back to their jam client** (that is tmux's detach, not jam's), and their mirror picks up where it
-left off. Until v0.15 F3 proxied each keystroke over the network and waited for the next frame,
+The host presses **F3** and their client hands the whole terminal to
+`tmux -L claude-jam-<port> attach -t <jam>:claude` — this very screen, at native speed, with
+nothing in between: permission prompts, the trust dialog, an interactive `/model` picker, the
+mouse, even Ctrl-C. **F3 again gives the terminal back** (v0.20: jam runs its own tmux server, so
+it can bind a bare F3 to `detach-client` without touching anybody's config), and `Ctrl-b d` does
+the same. Their mirror picks up where it left off, and while they are attached the session's own
+status line says `F3 or Ctrl-b d → back to jam` — unless somebody is waiting, in which case
+`⚑ N waiting` takes that row instead. Until v0.15 F3 proxied each keystroke over the network and waited for the next frame,
 which was 300-500 ms per key; now there is no proxy at all. While the host is attached their
 mirror is paused, so guests keep watching but the host's own client is not on screen.
 
 Guests never get F3 (host + loopback only, enforced by the daemon) — if a guest asks, tell them to
 ask the host, to send a `/command` request, or (for a permission prompt specifically) to use
-`/answer`, below. `tmux attach -t jam` by hand does the same thing as F3 and always did.
+`/answer`, below. Attaching by hand does the same thing as F3, and since v0.20 needs the socket:
+`tmux -L claude-jam-<port> attach -t <jam>:claude` (`claude-jam sessions` prints it).
 
 ## Slash commands
 
@@ -358,7 +362,9 @@ Any other `/command` is one of yours — see Slash commands above.
 ## Host launch flags (most useful)
 
 `--name` display name · `--token <t>` fixed token · `--cwd <dir>` project dir ·
-`--config-dir <dir>` run under another claude profile (e.g. `~/.claude3`) · `--resume <uuid>`
+`--config-dir <dir>` run under another claude profile (e.g. `~/.claude3`) ·
+`--tmux-socket <name>` which tmux server to build on (default: `claude-jam-<port>`, jam's own;
+`default` puts it on the shared server and leaves F3-out unbound) · `--resume <uuid>`
 continue an existing conversation · `--replay <N>` how many events of an existing transcript a
 joining guest is replayed (default 300, `0` for none) · `--tmux <name>` a second jam · `--view` browser view (needs
 ttyd) · `--no-popup` no tmux knock popup · `--no-token-in-context` don't tell you the token ·
@@ -395,7 +401,12 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
 - F3 does nothing → they are a guest (host + loopback only), or their terminal sends a
   different F3 sequence; the host can `tmux attach -t jam` instead — that is exactly what F3
   does for them. A guest who only needs to answer a permission prompt wants `/answer`.
-- Host is stuck inside the TUI after F3 → `Ctrl-b d` detaches and their jam client comes back.
+- Host is stuck inside the TUI after F3 → **F3 again** detaches (v0.20 binds it on jam's own
+  tmux server), and `Ctrl-b d` still does the same. A host running `--tmux-socket default` has
+  only `Ctrl-b d`, because a bare binding there would be their whole tmux.
+- "`tmux attach -t jam` says there is no session" → since v0.20 jam runs its own tmux server.
+  The line is `tmux -L claude-jam-<port> attach -t <name>:claude`, and `claude-jam sessions`
+  prints the exact one.
   If they launched jam from inside another tmux, the outer prefix takes the first `Ctrl-b`, so
   it is `Ctrl-b Ctrl-b d`.
 - `a` or `d` does nothing / lands in the message → they have something typed in the input line;
