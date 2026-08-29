@@ -77,18 +77,37 @@ await step('the injected message shows up in the mirrored rows', async () => {
   console.log(`      row: ${JSON.stringify(hit.ev.rows.find((r) => r.includes(MARK)).replace(/\x1b\[[0-9;]*m/g, '').trim().slice(0, 80))}`);
 });
 
-await step('frames stay at or under 4/s while the TUI animates', async () => {
+// v0.15: the cadence is adaptive, so this is two steps instead of the old flat 4/s one.
+// While the TUI is animating a watcher gets frames at up to 25/s (the 40 ms gap); two
+// seconds after the last sign of life the poll drops back to 250 ms.
+const gaps = (frames) => frames.slice(1).map((s, i) => s.at - frames[i].at);
+
+await step('v0.15: while the TUI animates, frames come fast — under 25/s, never inside 40 ms', async () => {
   const from = Date.now();
   await sleep(3000);
   const inWindow = watcher.screens.filter((s) => s.at >= from);
   const rate = inWindow.length / 3;
-  console.log(`      ${inWindow.length} frames in 3s (${rate.toFixed(1)}/s)`);
-  if (rate > 4.4) throw new Error(`${rate.toFixed(1)} frames/s exceeds the 4/s guard`);
-  // Two frames closer together than the coalescing gap would mean the guard is not applied.
-  for (let i = 1; i < inWindow.length; i++) {
-    const gap = inWindow[i].at - inWindow[i - 1].at;
-    if (gap < 200) throw new Error(`two frames only ${gap}ms apart`);
+  const g = gaps(inWindow);
+  console.log(`      ${inWindow.length} frames in 3s (${rate.toFixed(1)}/s), gaps min ${Math.min(...g, Infinity)}ms `
+    + `median ${g.length ? [...g].sort((a, b) => a - b)[Math.floor(g.length / 2)] : '-'}ms max ${Math.max(...g, 0)}ms`);
+  // The cap: 40 ms between frames is 25/s per client, and nothing may be closer than that.
+  if (rate > 25.4) throw new Error(`${rate.toFixed(1)} frames/s exceeds the 25/s cap`);
+  for (const gap of g) if (gap < 35) throw new Error(`two frames only ${gap}ms apart — under the 40 ms cap`);
+  // And the point of v0.15: at least one gap under the old fixed 250 ms poll.
+  if (inWindow.length >= 3 && Math.min(...g) >= 250) {
+    throw new Error(`fastest gap was ${Math.min(...g)}ms — the fast cadence never engaged`);
   }
+});
+
+await step('v0.15: once the turn is over and nothing moves, the stream goes quiet again', async () => {
+  await watcher.want('ok', (f) => f.t === 'agent' && f.kind === 'text' && /ok/i.test(f.text), 60000);
+  await sleep(3000); // longer than the 2 s activity window, so the cadence has fallen back
+  const from = Date.now();
+  await sleep(3000);
+  const inWindow = watcher.screens.filter((s) => s.at >= from);
+  const rate = inWindow.length / 3;
+  console.log(`      idle: ${inWindow.length} frames in 3s (${rate.toFixed(1)}/s)`);
+  if (rate > 4.4) throw new Error(`${rate.toFixed(1)} frames/s while idle — the cadence did not fall back`);
 });
 
 await step('{t:mirror,on:false} stops the stream', async () => {
