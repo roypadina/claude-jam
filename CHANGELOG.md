@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.0
 
 ### v0.28 — real scrollback ("I can only see very little")
 
@@ -148,6 +148,15 @@ approving.
   therefore unkillable on shutdown. The flag now belongs to the child, where a successor cannot
   clear it, and `scripts/smoke-discover.mjs` gained a step that counts the `dns-sd -R` processes
   for one port across a real re-announce: it sees 2 on the old code and 1 on the new.
+- **A `/c` mention never rang the bell in `--basic`** (found during the 0.20.0 release gate,
+  2026-08-29). The sound/notification rework renamed `nudge()` to `alert()` everywhere except one
+  call site — the readline client's `chat` case still called `nudge()`, a `ReferenceError` at
+  runtime, so the bell, the notification and the sound were all silently lost for a mention in a
+  humans-only line. `node --check` does not catch a dead reference reached only at runtime;
+  `smoke-perm.mjs`'s P3 step does, and did.
+- **`--resume <session-id>` was missing from the launcher's own `--help` text.** `claude-jam host`
+  has supported it since before v0.19.0 (README, MANUAL, and `host.mjs` itself all already had
+  it) — the usage block just never said so.
 
 ### Internal
 
@@ -161,6 +170,14 @@ approving.
   client gets a directory in front of its `PATH` holding a stub `afplay` and `osascript` that
   append to a log of that client's own — so "a knock and an auto-join are two different calls"
   and "only the addressed client was interrupted" are facts on disk rather than inferences.
+- **`smoke-lifecycle.mjs`'s `FAKE_CLAUDE` stub wrote its one line of content at row 0** of an
+  otherwise blank pane — a shape no real claude ever has. The v0.28 mirror's 45 s "welcome block
+  moved" notice reserves one row, and `fitFrame` crops the OLDEST row to make it — correct for a
+  real TUI, whose newest content is always at the bottom, but it silently ate this stub's only
+  line for the first 45 s of every attach. Caught by the 0.20.0 release gate (three of the
+  smoke's steps failing identically at two different system loads, root-caused with a raw WS
+  probe against the daemon); the stub is now bottom-anchored (padded to the pane height with
+  `tput lines`), immune to a top-crop of any depth rather than just today's one reserved row.
 
 ## 0.19.0
 
