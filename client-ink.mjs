@@ -25,7 +25,7 @@ import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
 import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
-import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
@@ -104,6 +104,9 @@ const touch = () => { for (const l of store.listeners) l(); };
 const seen = new Set(); // dedupe replayed history across reconnects
 let ws = null;
 let backoff = 1000;
+// v0.17 T3: consecutive failures, reset on a socket that actually opened. Five of them is the
+// point where "retrying" stops being the useful thing to say — see reconnectMessage.
+let attempts = 0;
 let boot = null; // daemon boot id: event ids restart at 1 when it changes
 let lastTypingSent = 0;
 let seq = 0; // <Static> keys
@@ -358,6 +361,7 @@ function connect() {
   ws = new WebSocket(url);
   ws.addEventListener('open', () => {
     backoff = 1000;
+    attempts = 0;
     // `mirror` in the hello subscribes from the very first frame — including through a knock,
     // where the welcome only comes when the host accepts. A reconnect repeats it: the daemon
     // knows nothing about the socket that died.
@@ -397,7 +401,7 @@ function connect() {
     // and a "disconnected, retrying" line lands on top of the rejection first.
     if (e.code >= 4400 && e.code <= 4429) return leave(1, `! rejected: ${e.reason || 'auth'}`);
     store.status = { busy: false, waiting: false }; // nothing is known while the socket is down
-    sys(`disconnected, retrying in ${backoff / 1000}s`);
+    sys(reconnectMessage(++attempts, backoff));
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 10000);
   });

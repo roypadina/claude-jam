@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // claude-jam terminal client. No dependencies: global WebSocket + readline.
 import readline from 'node:readline';
-import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames, reconnectMessage } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
 
 const argv = process.argv.slice(2);
@@ -35,6 +35,7 @@ let state = { busy: false, waiting: false };
 let roster = [];
 let ws = null;
 let backoff = 1000;
+let attempts = 0; // v0.17 T3: consecutive failures, so the fifth can say something better
 let cont = []; // pending continuation lines
 let lastTypingSent = 0;
 let boot = null; // daemon boot id: event ids restart at 1 when it changes
@@ -201,6 +202,7 @@ function connect() {
   ws = new WebSocket(url);
   ws.addEventListener('open', () => {
     backoff = 1000;
+    attempts = 0;
     ws.send(JSON.stringify({ t: 'hello', name: NAME, token: TOKEN, host: IS_HOST || undefined }));
   });
   ws.addEventListener('message', (m) => {
@@ -231,7 +233,7 @@ function connect() {
       process.exit(1);
     }
     setSpinner(false); // nothing is known about the turn while the socket is down
-    sys(`disconnected, retrying in ${backoff / 1000}s`);
+    sys(reconnectMessage(++attempts, backoff));
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 10000);
   });
