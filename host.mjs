@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -533,17 +533,21 @@ function stopPopup() {
   try { child.kill('SIGTERM'); } catch { /* already gone */ }
 }
 
-// Called on every change to `pending` or `cmdRequests`: keeps the status line honest and
+// What the popup's one line names: the command, or the file with its size. A knock names the
+// person and their IP, which popupPrompt takes separately.
+const popupDetail = (kind, rec) => (kind === 'file' ? `${rec.detail} (${humanBytes(rec.size)})` : rec.detail || '');
+
+// Called on every change to `pending` or a ladder's requests: keeps the status line honest and
 // opens the next popup. v0.14: the host normally sits in the client, not in tmux, so this is
 // the path for anyone who IS attached — `hostClients()` is empty otherwise and the request
 // waits for a client command instead.
 function pumpPopups() {
   refreshStatusRight();
   if (opts.noPopup || popupProc) return;
-  // Knocks first, then command requests; `popped` is set on the record itself, so a request
-  // whose popup was ignored waits for a client command instead of popping again.
+  // Knocks first, then every kind of approval request; `popped` is set on the record itself,
+  // so a request whose popup was ignored waits for a client command instead of popping again.
   const queued = [...[...pending.values()].map((p) => ['knock', p]),
-    ...[...cmdRequests.values()].map((r) => ['cmd', r])];
+    ...Object.entries(ladders).flatMap(([kind, L]) => [...L.requests.values()].map((r) => [kind, r]))];
   const next = queued.find(([, p]) => !p.popped);
   if (!next) return;
   const [kind, rec] = next;
@@ -554,7 +558,7 @@ function pumpPopups() {
   const child = spawn(TMUX, buildPopupArgs({
     session: opts.tmux, client, node: process.execPath, script: path.join(HERE, 'popup.mjs'),
     name: rec.name, ip: rec.ip || '', ttlS: Math.round(KNOCK_TTL / 1000), port: opts.port,
-    secret: opts.hookSecret, kind, detail: rec.text || '',
+    secret: opts.hookSecret, kind, detail: popupDetail(kind, rec),
   }), { stdio: ['ignore', 'ignore', 'pipe'] });
   popupProc = child;
   let err = '';
@@ -576,9 +580,11 @@ function pumpPopups() {
 function daemon() {
   saveStatusRight();
   const http = createServer(onRequest);
-  // Frame size is enforced by ws before hello/token, so keep it just above MAX_TEXT
-  // instead of the ~100 MB default an unauthenticated peer could throw at us.
-  const wss = new WebSocketServer({ server: http, maxPayload: 64 * 1024 });
+  // Frame size is enforced by ws before hello/token, so keep it small instead of the ~100 MB
+  // default an unauthenticated peer could throw at us. v0.13 raised it from 64 KB to fit ONE
+  // upload chunk (64 KB of bytes = 87 KB of base64) plus its envelope; the transfer itself is
+  // capped, gated and counted in onUploadChunk, not here.
+  const wss = new WebSocketServer({ server: http, maxPayload: XFER_FRAME_MAX });
   wss.on('connection', onSocket);
   http.listen(opts.port, opts.host, () => {
     console.log(`claude-jam daemon on ${opts.host}:${opts.port}, session ${opts.sessionId}`);
@@ -621,10 +627,12 @@ function onRequest(req, res) {
     req.on('end', () => {
       let m;
       try { m = JSON.parse(body); } catch { return reply(400, { error: 'bad JSON' }); }
-      // Exactly the path a host client's `admit`/`cmd` frame takes. A request that expired
-      // or was already answered in a client is a 404, and the popup exits silently. A popup
-      // cannot grant STANDING approval (`always`) — one key, one command.
-      const err = m?.kind === 'cmd' ? answerCmd(m?.name, m?.ok === true) : admit(m?.name, m?.ok === true);
+      // Exactly the path a host client's frame takes. A request that expired or was already
+      // answered in a client is a 404, and the popup exits silently. A popup cannot grant
+      // STANDING approval (`always`) — one key, one request.
+      const err = ladders[m?.kind]
+        ? answerHost(m.kind, m?.name, m?.ok === true)
+        : admit(m?.name, m?.ok === true);
       reply(err ? 404 : 200, err ? { error: err } : { ok: true });
     });
     return;
@@ -681,11 +689,13 @@ function admitSocket(ws, name, host, loopback = false) {
   });
   rosterChanged({ joined: name });
   send(ws, { t: 'status', id: nextId++, ts: Date.now(), busy: status.busy, waiting: status.waiting });
-  // Knocks and command requests stay out of `history`, so a host client that connects (or
+  // Knocks and approval requests stay out of `history`, so a host client that connects (or
   // reconnects) while somebody is waiting would otherwise never hear about them.
   if (host) {
     for (const p of pending.values()) send(ws, { t: 'knock', id: nextId++, ts: Date.now(), name: p.name, ip: p.ip });
-    for (const r of cmdRequests.values()) send(ws, { t: 'cmdreq', id: nextId++, ts: Date.now(), name: r.name, cmd: r.text });
+    for (const L of Object.values(ladders)) {
+      for (const r of L.requests.values()) send(ws, { ...L.frame(r), id: nextId++, ts: Date.now() });
+    }
   }
 }
 
@@ -822,7 +832,24 @@ function onSocket(ws, req) {
     } else if (m.t === 'slash') {
       onSlash(ws, me, m.text);
     } else if (m.t === 'cmd') {
-      onCmd(ws, me, m);
+      onLadderAnswer('cmd', ws, me, m);
+      // v0.12: the session transcript, and the host's answer to a request for it.
+    } else if (m.t === 'export') {
+      onExport(ws, me);
+    } else if (m.t === 'exportok') {
+      onLadderAnswer('export', ws, me, m);
+      // v0.13: a guest sending a file in (request, then the chunks once granted), the host's
+      // answer, the host offering a file out, and a guest taking one.
+    } else if (m.t === 'upload') {
+      onUpload(ws, me, m);
+    } else if (m.t === 'file') {
+      onUploadChunk(ws, me, m);
+    } else if (m.t === 'fileok') {
+      onLadderAnswer('file', ws, me, m);
+    } else if (m.t === 'offer') {
+      onOffer(ws, me, m);
+    } else if (m.t === 'get') {
+      onGet(ws, me, m);
     } else if (m.t === 'key') {
       // F3 passthrough: the host's keyboard, straight into the TUI. This is the one path
       // where bytes are NOT sanitized — driving a permission prompt or the /model picker is
@@ -850,9 +877,13 @@ function onSocket(ws, req) {
   ws.on('close', () => {
     const p = pending.get(ws);
     if (p) { clearTimeout(p.timer); pending.delete(ws); pumpPopups(); }
-    // A guest who left has nothing waiting for approval any more.
-    const req = cmdRequests.get(ws);
-    if (req) { clearTimeout(req.timer); cmdRequests.delete(ws); pumpPopups(); }
+    // A guest who left has nothing waiting for approval any more, and a half-arrived upload
+    // is dropped rather than written.
+    for (const L of Object.values(ladders)) {
+      const req = L.requests.get(ws);
+      if (req) { clearTimeout(req.timer); L.requests.delete(ws); pumpPopups(); }
+    }
+    uploads.delete(ws);
     const me = clients.get(ws);
     // Drop the mirror subscription first: the last watcher leaving stops the capture timer.
     if (mirrors.has(ws)) setMirror(ws, false);
@@ -861,54 +892,78 @@ function onSocket(ws, req) {
   ws.on('error', () => { /* client vanished */ });
 }
 
-// ---------------------------------------------------------- slash commands ----
-// v0.14: a `/command` jam does not own belongs to claude. From the host's client (loopback,
-// `--host`) it is typed into the real TUI verbatim — no `[Name]:` prefix, so claude's own
-// command palette runs it and any picker it opens shows up in everyone's mirror. From a
-// guest it is a REQUEST: default deny, the host approves it once (or, with `always`, for the
-// rest of this jam), and the session-lifecycle commands cannot be approved at all.
-const cmdRequests = new Map(); // ws -> {name, text, timer} — one in flight per guest
-const cmdAlways = new Set(); // lowercased guest names with standing approval, this jam only
-const CMD_TTL = 120000; // same patience as a knock
+// ---------------------------------------------------------- approval ladder ----
+// v0.14 built this for a guest's slash command; v0.12 (the session transcript) and v0.13 (a
+// file upload) reuse it rather than growing a second mechanism. Per kind and per client: ONE
+// request in flight, default deny, the same two-minute patience as a knock, the same popup,
+// and `always` = standing approval for that person for the rest of this jam (daemon memory
+// only, gone on restart). Each kind supplies only what differs: the frame a host client is
+// shown, the wording, and what "approved" actually does.
+const LADDER_TTL = 120000;
 
-function onSlash(ws, me, text) {
-  const v = validSlashCommand(text);
-  if (!v.ok) return sendError(ws, v.error);
-  if (trusted(me)) return runSlash(me.name, v.text);
-  switch (guestSlashDecision(v.text, cmdAlways.has(me.name.toLowerCase()))) {
-    case 'refuse':
-      return sendError(ws, `${slashName(v.text)} ends or wipes the session for everyone — ` +
-        'the host runs that one, and it cannot be approved for a guest');
-    case 'run':
-      return runSlash(me.name, v.text, ` (${opts.name} approved ${me.name}'s commands for this jam)`);
-    default:
-      return requestSlash(ws, me, v.text);
-  }
-}
+const ladders = {
+  cmd: {
+    label: 'command',
+    frame: (r) => ({ t: 'cmdreq', name: r.name, cmd: r.detail }),
+    ask: (r) => `${r.name} wants ${r.detail} — /allow-cmd ${r.name} | /allow-cmd ${r.name} always | /deny-cmd ${r.name}`,
+    busy: (r) => `${r.detail} is still waiting for the host — one at a time`,
+    expired: (r) => `${r.detail} expired — nobody approved it`,
+    denied: (r) => `${r.detail} was denied by ${opts.name}`,
+    run: (r, always) => runSlash(r.name, r.detail, ` (approved by ${opts.name}${always ? ' — standing' : ''})`),
+  },
+  // v0.12: the whole transcript, which is everything claude saw here.
+  export: {
+    label: 'export',
+    frame: (r) => ({ t: 'exportreq', name: r.name }),
+    ask: (r) => `${r.name} wants the session transcript — /allow-export ${r.name} | /allow-export ${r.name} always | /deny-export ${r.name}`,
+    busy: () => 'your /export is still waiting for the host — one at a time',
+    expired: () => '/export expired — nobody approved it',
+    denied: () => `${opts.name} did not share the transcript`,
+    run: (r) => sendExport(r),
+  },
+  // v0.13: a file into <cwd>/jam-uploads/, which claude is then told to look at.
+  file: {
+    label: 'file',
+    frame: (r) => ({ t: 'filereq', name: r.name, file: r.detail, size: r.size }),
+    ask: (r) => `${r.name} wants to send ${r.detail} (${humanBytes(r.size)}) — /accept-file ${r.name} | /accept-file ${r.name} always | /deny-file ${r.name}`,
+    busy: (r) => `${r.detail} is still waiting for the host — one file at a time`,
+    expired: (r) => `${r.detail} expired — nobody approved it`,
+    denied: (r) => `${r.detail} was refused by ${opts.name}`,
+    run: (r, always) => grantUpload(r, always),
+  },
+};
+// requests: ws -> record {name, ws, detail?, size?, timer, popped}. always: lowercased names.
+for (const l of Object.values(ladders)) { l.requests = new Map(); l.always = new Set(); }
 
-function requestSlash(ws, me, text) {
-  const mine = cmdRequests.get(ws);
-  if (mine) return sendError(ws, `${mine.text} is still waiting for the host — one at a time`);
-  const timer = setTimeout(() => {
-    cmdRequests.delete(ws);
-    sendError(ws, `${text} expired — nobody approved it`);
+const standing = (kind, me) => ladders[kind].always.has(me.name.toLowerCase());
+
+function askHost(kind, ws, me, rec = {}) {
+  const L = ladders[kind];
+  const mine = L.requests.get(ws);
+  if (mine) return sendError(ws, L.busy(mine));
+  const r = { name: me.name, ws, popped: false, ...rec };
+  r.timer = setTimeout(() => {
+    L.requests.delete(ws);
+    sendError(ws, L.expired(r));
     pumpPopups();
-  }, CMD_TTL);
-  timer.unref?.();
-  cmdRequests.set(ws, { name: me.name, text, timer });
-  sendHosts({ t: 'cmdreq', name: me.name, cmd: text });
-  console.log(`[cmd] ${me.name} wants ${text} — /allow-cmd ${me.name} | /allow-cmd ${me.name} always | /deny-cmd ${me.name}`);
+  }, LADDER_TTL);
+  r.timer.unref?.();
+  L.requests.set(ws, r);
+  sendHosts(L.frame(r));
+  console.log(`[${kind}] ${L.ask(r)}`);
   pumpPopups();
 }
 
-// The one decision, shared by `/allow-cmd`/`/deny-cmd` in a host client and by the popup.
-// No name = the only request waiting. Returns null when it acted, else why it did not.
-function answerCmd(name, ok, always = false) {
-  const waiting = [...cmdRequests.entries()];
+// The one decision, shared by the host client's command and by the in-TUI popup. No name =
+// the only request of that kind waiting. Returns null when it acted, else why it did not.
+function answerHost(kind, name, ok, always = false) {
+  const L = ladders[kind];
+  const waiting = [...L.requests.entries()];
   let hit;
   if (name == null || name === '') {
     if (waiting.length !== 1) {
-      return waiting.length ? `${waiting.length} commands are waiting — name one` : 'no command is waiting';
+      return waiting.length ? `${waiting.length} ${L.label} requests are waiting — name one`
+        : `no ${L.label} request is waiting`;
     }
     hit = waiting[0];
   } else {
@@ -917,25 +972,47 @@ function answerCmd(name, ok, always = false) {
   }
   const [sock, r] = hit;
   clearTimeout(r.timer);
-  cmdRequests.delete(sock);
+  L.requests.delete(sock);
   if (!ok) {
-    sendError(sock, `${r.text} was denied by ${opts.name}`);
-    console.log(`[cmd] ${r.name}'s ${r.text} denied`);
+    sendError(sock, L.denied(r));
+    console.log(`[${kind}] ${r.name}'s request denied`);
   } else {
-    // Standing approval is per person and never covers the hard list — guestSlashDecision
-    // re-checks it on every later command, so `always` can never widen into /clear.
-    if (always) cmdAlways.add(r.name.toLowerCase());
-    runSlash(r.name, r.text, ` (approved by ${opts.name}${always ? ' — standing' : ''})`);
+    // Standing approval is per person and per kind, and never widens the hard command list —
+    // guestSlashDecision re-checks that on every later command, so `always` cannot reach /clear.
+    if (always) L.always.add(r.name.toLowerCase());
+    L.run(r, always);
   }
   pumpPopups();
   return null;
 }
 
-function onCmd(ws, me, m) {
-  // Approving types into the real TUI, so the gate is the same as F3's: host + loopback.
+// `/allow-cmd`, `/allow-export`, `/accept-file` and their denials all land here. Answering any
+// of them acts on the real TUI or the host's disk, so the gate is F3's: host AND loopback.
+function onLadderAnswer(kind, ws, me, m) {
   if (!trusted(me)) return sendError(ws, 'host TUI only');
-  const err = answerCmd(m.name, m.op === 'allow', m.always === true);
+  const err = answerHost(kind, m.name, m.op === 'allow', m.always === true);
   if (err) sendError(ws, err);
+}
+
+// ---------------------------------------------------------- slash commands ----
+// v0.14: a `/command` jam does not own belongs to claude. From the host's client (loopback,
+// `--host`) it is typed into the real TUI verbatim — no `[Name]:` prefix, so claude's own
+// command palette runs it and any picker it opens shows up in everyone's mirror. From a
+// guest it is a REQUEST on the ladder above, and the session-lifecycle commands cannot be
+// approved at all.
+function onSlash(ws, me, text) {
+  const v = validSlashCommand(text);
+  if (!v.ok) return sendError(ws, v.error);
+  if (trusted(me)) return runSlash(me.name, v.text);
+  switch (guestSlashDecision(v.text, standing('cmd', me))) {
+    case 'refuse':
+      return sendError(ws, `${slashName(v.text)} ends or wipes the session for everyone — ` +
+        'the host runs that one, and it cannot be approved for a guest');
+    case 'run':
+      return runSlash(me.name, v.text, ` (${opts.name} approved ${me.name}'s commands for this jam)`);
+    default:
+      return askHost('cmd', ws, me, { detail: v.text });
+  }
 }
 
 // Serialized on the injection queue: typing a command into the pane while a message is
@@ -957,6 +1034,162 @@ async function typeSlash(text) {
   // a beat to settle on the exact match before submitting.
   await sleep(300);
   tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+}
+
+// ----------------------------------------------- v0.12/v0.13: file transfers ----
+// Both directions are the same frames: a `{t:'xfer'}` header saying what is coming, then
+// `{t:'file', xfer, seq, done, b64}` chunks of 64 KB. base64 because a PNG has to survive a
+// JSON text frame, and because nothing here is ever interpreted as text. Every cap and every
+// file name is enforced HERE, on the daemon side: a client's own checks are a courtesy.
+let xferN = 0;
+
+function streamXfer(ws, header, data) {
+  send(ws, { ...header, id: nextId++, ts: Date.now() });
+  // A few frames per tick, so a 50 MB transcript does not stall the hook endpoints.
+  pumpFrames(xferFrames(header.xfer, data), (f) => send(ws, f), () => clients.has(ws));
+}
+
+// --- v0.12: the session transcript ---
+// What claude saw, as the file claude wrote. The guest gets a copy of the JSONL, minus our own
+// join-token block (best effort — see stripTokenBlock), and prints its own resume recipe.
+function onExport(ws, me) {
+  if (trusted(me) || standing('export', me)) return sendExport({ name: me.name, ws });
+  askHost('export', ws, me);
+}
+
+function sendExport(rec) {
+  const file = jsonlPath || findJsonl();
+  if (!file) return sendError(rec.ws, 'there is no transcript on disk yet');
+  let size;
+  try { size = fs.statSync(file).size; } catch { return sendError(rec.ws, 'the transcript is not readable'); }
+  if (size > EXPORT_MAX) {
+    return sendError(rec.ws, `the transcript is ${humanBytes(size)}, over the ${humanBytes(EXPORT_MAX)} export cap`);
+  }
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return sendError(rec.ws, `could not read the transcript: ${e.message}`); }
+  const data = Buffer.from(stripTokenBlock(text, currentToken), 'utf8');
+  const xfer = `e${++xferN}`;
+  console.log(`[export] ${rec.name} ← ${file} (${humanBytes(data.length)})`);
+  broadcast({ t: 'sys', text: `${rec.name} took a copy of the session transcript (${humanBytes(data.length)})` });
+  streamXfer(rec.ws, { t: 'xfer', xfer, kind: 'export', name: exportFileName(opts.sessionId), size: data.length, session: opts.sessionId });
+}
+
+// --- v0.13: a guest sends a file in ---
+// Approved uploads land in <cwd>/jam-uploads/ and nowhere else, 0644, never executed, never
+// opened — then claude is TOLD about the path so it can Read it if it wants to.
+const UPLOAD_DIR = 'jam-uploads';
+const uploads = new Map(); // ws -> {name, detail, size, caption, xfer, parts, got, seq}
+
+// A caption rides into claude's prompt, so it is sanitized exactly like a message — one line,
+// no forged `[Name]:` attribution, short.
+function fileCaption(v) {
+  const s = sanitize(typeof v === 'string' ? v : '');
+  return s.ok ? neutralizePrefixes(s.text.replace(/\s+/g, ' ')).slice(0, 200) : '';
+}
+
+function onUpload(ws, me, m) {
+  if (uploads.has(ws)) return sendError(ws, 'one upload at a time — the last one is still arriving');
+  const name = safeBaseName(m.name);
+  if (!name) return sendError(ws, `${JSON.stringify(String(m.name).slice(0, 40))} is not a file name I will write — send a plain basename, no paths`);
+  const size = Number(m.size);
+  if (!Number.isInteger(size) || size < 0) return sendError(ws, 'the upload announced no size');
+  if (size > UPLOAD_MAX) return sendError(ws, `${name} is ${humanBytes(size)}, over the ${humanBytes(UPLOAD_MAX)} upload cap`);
+  const rec = { detail: name, size, caption: fileCaption(m.caption) };
+  if (trusted(me) || standing('file', me)) return grantUpload({ name: me.name, ws, ...rec }, standing('file', me));
+  askHost('file', ws, me, rec);
+}
+
+// Approved: the sender may start the chunks. Nothing is on disk yet.
+function grantUpload(rec, always = false) {
+  const xfer = `u${++xferN}`;
+  uploads.set(rec.ws, { ...rec, xfer, parts: [], got: 0, seq: 0 });
+  send(rec.ws, { t: 'xfergrant', id: nextId++, ts: Date.now(), xfer, name: rec.detail });
+  console.log(`[file] ${rec.name} may send ${rec.detail} (${humanBytes(rec.size)})${always ? ' — standing' : ''}`);
+}
+
+function abortUpload(ws, why) {
+  const up = uploads.get(ws);
+  uploads.delete(ws);
+  console.log(`[file] upload ${up?.detail ?? '?'} dropped: ${why}`);
+  sendError(ws, `upload dropped: ${why}`);
+}
+
+function onUploadChunk(ws, me, m) {
+  const up = uploads.get(ws);
+  // No grant, no bytes: this is the gate that makes the host's approval mean something.
+  if (!up || m.xfer !== up.xfer) return sendError(ws, 'no approved upload is in flight — /send asks the host first');
+  if (typeof m.b64 !== 'string' || m.b64.length > XFER_FRAME_MAX) return abortUpload(ws, 'oversized or missing chunk');
+  if (m.seq !== up.seq) return abortUpload(ws, `chunk ${m.seq} arrived where ${up.seq} was expected`);
+  up.seq++;
+  const buf = Buffer.from(m.b64, 'base64');
+  up.got += buf.length;
+  if (up.got > up.size || up.got > UPLOAD_MAX) return abortUpload(ws, `more bytes than the ${humanBytes(up.size)} it announced`);
+  up.parts.push(buf);
+  if (m.done !== true) return;
+  uploads.delete(ws);
+  if (up.got !== up.size) {
+    return sendError(ws, `${up.detail}: ${humanBytes(up.got)} arrived of ${humanBytes(up.size)} — nothing written`);
+  }
+  writeUpload(me.name, up, Buffer.concat(up.parts));
+}
+
+function writeUpload(who, up, data) {
+  const dir = path.join(opts.cwd, UPLOAD_DIR);
+  let name;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    // A second photo.png never overwrites the first, and the name was already reduced to
+    // [A-Za-z0-9._-] with no separator in it, so this join cannot leave the directory.
+    name = uniqueName(up.detail, (n) => fs.existsSync(path.join(dir, n)));
+    if (!name) return sendError(up.ws, `too many files are already called ${up.detail}`);
+    fs.writeFileSync(path.join(dir, name), data, { mode: 0o644 });
+  } catch (e) { return sendError(up.ws, `could not write ${UPLOAD_DIR}/${up.detail}: ${e.message}`); }
+  const rel = `${UPLOAD_DIR}/${name}`;
+  console.log(`[file] ${who} → ${path.join(dir, name)} (${humanBytes(data.length)})`);
+  // Injected like any message, so claude can Read the file and knows who sent it. The path is
+  // text in a prompt — the daemon never runs or opens what it just wrote.
+  const text = `sent a file: ${rel}${up.caption ? ` ${up.caption}` : ''}`;
+  broadcast({ t: 'say', from: who, text });
+  status.busy = true; startTurn(); pushStatus();
+  enqueueInject(who, text, up.ws);
+}
+
+// --- v0.13: the host offers a file out ---
+// `/send <path>` in the HOST's client. Nothing is pushed: every guest is told what is on offer
+// and takes it with `/get`, which writes into their own ./jam-downloads/.
+const offers = new Map(); // sanitized name -> {path, size, from}
+
+function onOffer(ws, me, m) {
+  if (!trusted(me)) return sendError(ws, 'only the host offers files — /send <path> uploads yours instead');
+  const raw = typeof m.path === 'string' ? m.path.trim() : '';
+  if (!raw) return sendError(ws, 'usage: /send <path>');
+  const abs = path.resolve(opts.cwd, raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw);
+  let st;
+  try { st = fs.statSync(abs); } catch { return sendError(ws, `no such file: ${abs}`); }
+  if (!st.isFile()) return sendError(ws, `${abs} is not a file`);
+  if (st.size > EXPORT_MAX) return sendError(ws, `${humanBytes(st.size)} is over the ${humanBytes(EXPORT_MAX)} cap`);
+  const name = safeBaseName(path.basename(abs));
+  if (!name) return sendError(ws, `${path.basename(abs)} is not a name I can offer`);
+  offers.set(name, { path: abs, size: st.size, from: me.name });
+  console.log(`[file] ${me.name} offers ${abs} (${humanBytes(st.size)}) as ${name}`);
+  broadcast({ t: 'offer', from: me.name, name, size: st.size });
+}
+
+function onGet(ws, me, m) {
+  const all = [...offers.keys()];
+  const asked = m.name == null || m.name === '' ? (all.length === 1 ? all[0] : null) : safeBaseName(m.name);
+  if (!asked) {
+    return sendError(ws, all.length ? `name one: /get ${all.join(' | ')}` : 'nothing has been offered yet');
+  }
+  const offer = offers.get(asked);
+  if (!offer) return sendError(ws, `${asked} is not on offer${all.length ? ` — /get ${all.join(' | ')}` : ''}`);
+  let data;
+  try { data = fs.readFileSync(offer.path); } catch (e) { return sendError(ws, `could not read ${asked}: ${e.message}`); }
+  if (data.length > EXPORT_MAX) return sendError(ws, `${asked} grew past the ${humanBytes(EXPORT_MAX)} cap`);
+  const xfer = `d${++xferN}`;
+  console.log(`[file] ${me.name} ← ${offer.path} (${humanBytes(data.length)})`);
+  broadcast({ t: 'sys', text: `${me.name} took ${asked} (${humanBytes(data.length)})` });
+  streamXfer(ws, { t: 'xfer', xfer, kind: 'file', name: asked, size: data.length });
 }
 
 // ------------------------------------------------------- raw key passthrough ----
