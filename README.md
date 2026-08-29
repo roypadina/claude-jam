@@ -47,8 +47,15 @@ jam host --name Roy --cwd ~/Code/some-project -- --model sonnet
 ```
 
 That builds a **detached** tmux session `jam` (two windows: `daemon` log, `claude` the real
-TUI) and runs your own jam client full-screen in the terminal you launched from. Nothing is
-attached to tmux — the window size is jam's to pick, so the mirror fills your screen exactly.
+TUI) **on a tmux server of jam's own** — socket `claude-jam-<port>` — and runs your own jam
+client full-screen in the terminal you launched from. Nothing is attached to tmux, so the window
+size is jam's to pick and the mirror fills your screen exactly.
+
+Because it is jam's own server, jam can bind a bare **F3** to `detach-client` without touching
+your tmux config, and it literally cannot see your own sessions. The flip side: reaching the raw
+TUI from another terminal needs the socket —
+`tmux -L claude-jam-7777 attach -t jam:claude`, which `jam sessions` prints for you.
+`--tmux-socket default` puts jam back on your shared server (and then F3-out is not bound).
 
 ```
 ┌ your terminal ─────────────────────────────────────────────┐   ┌ tmux session `jam` ──────┐
@@ -192,6 +199,11 @@ hand-written `@jam-owned` marker — are refused, never listed, and never touche
 started before v0.18 has no marker, so it is jam's to leave alone too
 (`tmux kill-session -t <name>` remains yours to run).
 
+Since v0.20 that is structural as well as checked: jam's sessions live on **its own tmux server**
+(socket `claude-jam-<port>`, recorded in `session.json`), so `list-sessions` there cannot return
+one of yours even in principle. The marker check stays anyway, and `killOwned` additionally
+refuses a session whose recorded socket is not the one it was asked about.
+
 ## Commands
 
 jam owns the commands below; **everything else starting with a slash belongs to claude** — from
@@ -204,7 +216,7 @@ approves.
 | `/c <text>` | anyone | human-only chat; the agent never sees it |
 | `/who`, `/help`, `/quit` | anyone | roster · reprint onboarding · leave (session keeps running) |
 | `/mirror`, **F2** | anyone | swap live TUI ⇄ transcript |
-| **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. `Ctrl-b d` comes back. Host **and** loopback only |
+| **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. **F3 again** (or `Ctrl-b d`) comes back. Host **and** loopback only |
 | `a` `d` `i`/Esc | host | answer the approval bar above the status row — accept · deny · dismiss. Only while the input line is empty |
 | `/tools`, `/tools on\|off` | anyone | reprint the last turn's full tool log · stop/resume collapsing tool lines |
 | `/files` | anyone | every path this session read, wrote or edited — newest first, with a count |

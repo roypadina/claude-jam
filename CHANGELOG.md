@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### jam runs its own tmux server, and F3 comes back out
+
+- **F3 detaches as well as attaches.** jam binds `F3 → detach-client` on its own tmux server, so
+  the key that hands the host the real TUI is the key that hands it back. `Ctrl-b d` still works.
+- **Every tmux session jam makes lives on socket `claude-jam-<port>`**, not the shared server —
+  which is what makes that binding safe, and means jam cannot see (or kill) your own tmux
+  sessions even in principle. v0.18's `@jam-owned` marker check stays on top of it.
+- Reaching the raw TUI from elsewhere now needs the socket:
+  `tmux -L claude-jam-<port> attach -t <name>:claude`. That exact line is printed by the
+  launcher, by the "keep it running" message, and once per live row in `claude-jam sessions`.
+- The jam session's `status-right` says `F3 or Ctrl-b d → back to jam`; the `⚑ N waiting` badge
+  still wins while anything is pending, and `--no-popup` still turns the status line off entirely.
+- **`--tmux-socket <name>`** picks the server by hand; `--tmux-socket default` puts jam back on
+  the shared one, and there the bare F3 binding is deliberately skipped.
+
 ### Invite links — one command joins
 
 - **`claude-jam invite <Name>`** mints `cjam1_…`, and **`claude-jam join <link>`** is the guest's
