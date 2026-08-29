@@ -85,12 +85,12 @@ let spinFrames = [];
 
 try {
   await step('v0.14: the client opens on the LIVE TUI, with a clean `Dana ❯` row under it', async () => {
-    // The connect block is printed above the frame, which then fills the screen — so the
-    // welcome line lives in the scrollback, not necessarily on the visible rows.
-    // v0.23: the welcome leads with the jam's NAME and the 8-char session id, not a full UUID
-    // nobody reads. The name here is the default one — the cwd's basename, which for this
-    // daemon is the repo directory.
-    await until('welcome', () => /jam "[^"]+" \([0-9a-f]{8}\) — host /.test(back(PEER_SESSION)));
+    // v0.28: the connect block is printed to the terminal's NORMAL buffer and the live TUI then
+    // takes the ALTERNATE one — so the welcome is in this pane's real scrollback but not under
+    // `capture-pane` while the mirror is up. One row over the mirror says where it went, and the
+    // step below presses F2 to read it, which is what a human does.
+    await until('the row that says where the welcome went',
+      () => /F2 shows it · \/help reprints the keys/.test(pane(PEER_SESSION)));
     const all = await until('the mirrored TUI plus the live-view chip', () => {
       const r = rows(PEER_SESSION);
       return r.some((l) => /Claude Code v|⏵⏵|❯/.test(l)) && r.some((l) => /⧉ live TUI/.test(l)) ? r : null;
@@ -104,6 +104,10 @@ try {
   await step('v0.10c: the onboarding block is printed on connect, above the history', async () => {
     // Scrollback, not the visible screen: on a daemon with history to replay the block is
     // printed first and can be scrolled off by the time the roster line lands.
+    // v0.28: and it is in the NORMAL buffer, so F2 first — the flip is what brings that buffer
+    // back, and that the whole block survives it is exactly the v0.28 claim.
+    key('F2');
+    await until('the transcript view', () => /≡ transcript/.test(pane(PEER_SESSION)), 10000);
     const p = await until('the onboarding box and the roster line',
       () => (/── claude-jam ─/.test(back(PEER_SESSION)) && /here: /.test(back(PEER_SESSION)) ? back(PEER_SESSION) : null));
     for (const want of ['/c <text>', 'F2', 'Shift+Enter or \\', 'just ask claude', 'attributed [Dana]']) {
@@ -117,6 +121,10 @@ try {
   });
 
   await step('v0.14: F2 flips to the transcript view (where the middle of this run happens)', async () => {
+    // v0.28: the step above already flipped here to read the connect block, so this one flips
+    // out and back — which proves the same thing and leaves the run where it expects to be.
+    key('F2');
+    await until('the live TUI again', () => /⧉ live TUI/.test(pane(PEER_SESSION)), 10000);
     key('F2');
     const all = await until('the transcript chip', () => {
       const r = rows(PEER_SESSION);

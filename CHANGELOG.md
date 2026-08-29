@@ -16,7 +16,10 @@ All three are gone.
   flip did it. The alternate buffer has no `<Static>` at all, so it cannot happen.
 - **The client now opens on the transcript** and turns the mirror on once the welcome block is
   printed, so the block a first-time guest needs is in their own scrollback rather than in a
-  buffer that is thrown away.
+  buffer that is thrown away. The mirror then covers it, so one row sits over the mirror saying
+  where it went — `the welcome block, the keys and the history are in the transcript — F2 shows
+  it · /help reprints the keys` — because losing the block that teaches F2 exists would be the
+  v0.10c complaint in a new costume.
 - **The F3 attach re-feed is gone**, with the README ceiling that named it: tmux draws on the
   alternate screen and hands the normal one back untouched, so the transcript is exactly where it
   was. It used to re-feed the last 40 lines and drop the rest.
