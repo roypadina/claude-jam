@@ -49,7 +49,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `platform.mjs` | the platform seam. The **only** module allowed to spawn a platform binary (`osascript`, `pngpaste`, `afplay`, `pbcopy`, `open`, …) or to decide where `$TMPDIR`/`~/.config` are. |
 | `popup.mjs` | the one-key `tmux display-popup` approval. |
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
-| `test.mjs` | the unit suite. `scripts/` holds the fifteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
+| `test.mjs` | the unit suite. `scripts/` holds the sixteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
 
 **tmux, claude, git, curl, cloudflared, tailscale and ttyd are not platform binaries** — they are
 the tool's dependencies, spelled the same everywhere, and they stay where they are used.
@@ -62,7 +62,7 @@ the tool's dependencies, spelled the same everywhere, and they stay where they a
 node --test test.mjs      # the whole unit suite; must be green before every commit
 ```
 
-325 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
+338 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
 framework. Add tests to `test.mjs` next to the ones for the same version heading.
 
 Two of them are lints rather than assertions about behaviour, and both exist because the thing
@@ -79,7 +79,7 @@ binaries** and stay where they are used — see §1.
 
 If you add a module to the repo root, both lints pick it up automatically. That is deliberate.
 
-### The fifteen smokes, and the order
+### The sixteen smokes, and the order
 
 They are end-to-end and they are the only thing that proves the tmux/injection/WS half works.
 The full recipe — driver session, ports, arguments — is in `SPEC.md` under **"Running the
@@ -134,7 +134,14 @@ Then, in any order, the ones that bring their own everything:
     this smoke's case, leaves an advertisement on somebody's network. Ask for the socket by
     session name.
 
-Prefer 8–15 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
+16. `smoke-scroll.mjs` — no arguments, no real claude. Own `$TMPDIR`, port 7901, sessions
+    `jamscroll` and `jamscrollink`. ~90 s, costs nothing. The pane is a shell stub that prints
+    400 numbered lines and then one `TICK` per change of a control file, so "the screen moved" is
+    something the smoke decides rather than waits for — which is what makes the held-frame count
+    assertable. It runs a REAL ink client on a real pty as a GUEST, and compares what that guest
+    sees, scrolled back, against `capture-pane -S` on the host pane row for row.
+
+Prefer 8–16 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
 real tokens, so run them once, at the end, and use `--model haiku`.
 
 ---
@@ -145,7 +152,7 @@ real tokens, so run them once, at the end, and use `--model haiku`.
    decision, `host.mjs`/`sessions.mjs` for the effect, both clients for the surface. A small
    diff in the wrong place is a second bug, not a lazy fix.
 2. **Put the decision in `lib.mjs`** as a pure function, and the effect in the impure file. That
-   is what makes it testable, and it is why the suite is 283 fast tests and not a mock farm.
+   is what makes it testable, and it is why the suite is 338 fast tests and not a mock farm.
 3. **One commit per discrete change**, on `main`, with a message that says what changed and why
    it is that way. No amend, no rebase, no push.
 4. **The docs are part of the change, not after it** (see §4).

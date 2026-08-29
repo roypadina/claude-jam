@@ -31,14 +31,29 @@ Everybody — host and guests — runs the same single-pane client, and it has e
   **chat strip** with what your screen cannot show (humans-only chat, join/leave, system and
   error lines), the host's **approval bar** when somebody is waiting for them, a status row, and
   their input row.
+  The live TUI is drawn in the terminal's **alternate screen buffer** (the same trick `less`,
+  `vim` and tmux use), and it **scrolls**: `PgUp`/`PgDn` page back through YOUR pane's real
+  scrollback — the actual `capture-pane` output, colours included, up to 2000 lines — `Shift+↑/↓`
+  move one line, and `End`, `G` or `Esc` returns to live. While somebody is scrolled back, the
+  live frames are **held rather than painted over what they are reading**, and their status row
+  says how many are waiting (`⧉ mirror · scrolled back 40 lines · 3 live frames waiting`).
+  Everyone gets this, guests included: it is a read of a screen they are already watching.
 - **transcript (F2, or `/mirror`):** the full jam history — every message, your replies, tool
-  lines — with the same status and input rows. F2 flips back.
+  lines — with the same status and input rows. F2 flips back. Because the mirror lives in the
+  alternate buffer, the transcript keeps the NORMAL one: its lines are their terminal's own
+  scrollback, they survive every flip, and nothing is reprinted or lost either way.
 
 Somebody who joins late is not starting from nothing: the daemon seeds its history from the
 transcript file you are writing, so their client replays what happened before they arrived (up
 to `--replay` events, 300 by default) and prints
 `── history above (N replayed) · live from here ──` under it. On a `--resume`d session that is
 the whole earlier conversation, which is why they may already know things nobody told them.
+
+The jam KEEPS more than it replays: `--history` events (2000 by default, 20000 at most), of
+which a joiner is shown `min(--replay, --history)`. `/history [n|all]` re-prints further back
+than that, a page at a time, under a dim divider saying what is still behind it — so
+"I can only see a little of this conversation" has an answer that is not `/export`. `--replay all`
+gives a joiner everything the jam kept up front instead.
 
 The status row shows which view they are in (`⧉ live TUI` / `≡ transcript`), whether you are
 working (`✻ claude is working…`), whether you are waiting for a permission answer, who is typing,
@@ -589,6 +604,9 @@ be wrong; and `/join` prints ONE block with the time in its heading, with
 
 `/c <text>` humans-only chat · `/who` participants · `/help` reprint the onboarding block ·
 `/mirror` (or F2) swap views · `/tools [on|off]` tool log / collapse mode · `/quit` leave ·
+`/history [n|all]` re-print further back than the replay they were given ·
+`PgUp`/`PgDn` scroll the live TUI back through the host's real pane history (`Shift+↑/↓` a line,
+the wheel if their terminal sends wheel events), `End`/`G`/`Esc` back to live ·
 `/files` paths this session touched · `/diff [path]` git diff of the working tree ·
 `/answer [n]` answer a question (anyone) or a permission prompt (host approves) ·
 `/answer <q> <n>` one question of a multi-question form · `/outbox` what was kept ·
@@ -631,8 +649,10 @@ always the host's) ·
 `--no-sound` start your client silent (`/menu → Notifications` and `/sound on|off` switch it,
 and the notification and bell tiers, at runtime) ·
 `--resume <uuid>`
-continue an existing conversation · `--replay <N>` how many events of an existing transcript a
-joining guest is replayed (default 300, `0` for none) · `--tmux <name>` a second jam · `--view` browser view (needs
+continue an existing conversation · `--replay <N|all>` how many events of an existing transcript a
+joining guest is replayed (default 300, `0` for none, `all` for everything the jam kept) ·
+`--history <N>` how many events the jam keeps for replay and `/history` (default 2000, cap 20000) ·
+`--tmux <name>` a second jam · `--view` browser view (needs
 ttyd) · `--no-popup` no tmux knock popup · `--no-token-in-context` don't tell you the token ·
 `--tunnel` two Cloudflare quick tunnels · `--funnel` Tailscale Funnel instead, with a stable
 URL (`--funnel-cli <path>` if the CLI is not on PATH — on macOS it lives inside
@@ -707,8 +727,24 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   it is `Ctrl-b Ctrl-b d`.
 - `a` or `d` does nothing / lands in the message → they have something typed in the input line;
   the single keys are armed only on an empty line, and Esc re-arms them. A guest never has them.
-- F2, Shift+Enter or the live view do nothing → they are running `--basic`, which is
-  transcript-only. Drop the flag.
+- F2, Shift+Enter, PgUp or the live view do nothing → they are running `--basic`, which is
+  transcript-only. Drop the flag. (`/history` does work in `--basic`.)
+- "I can only see a little of the conversation" → three different limits, and they are separate.
+  What they were SHOWN on arrival is `--replay`; what the jam still HAS is `--history`, and
+  `/history [n|all]` prints it; what the live TUI can scroll back through is the host pane's own
+  scrollback, 2000 lines at most, with `PgUp`. Only `/export` is the complete record. The client
+  says which limit it hit the first time somebody scrolls to the top:
+  `— that is as far back as this jam kept (N events · host pane 2000 lines) · /export for the
+  full transcript`.
+- PgUp scrolls their terminal instead of the mirror → their terminal claimed the key. Most
+  terminals send plain `PgUp` to the program and keep `Shift+PgUp` for themselves; if theirs does
+  the opposite, `Shift+↑/↓` moves a line at a time and `/history` still works.
+- The mouse wheel does nothing in the live TUI → expected unless their terminal is already
+  sending wheel events. claude-jam deliberately never turns mouse reporting on, because that
+  would take text selection away from them; the keys are the supported way.
+- A scrolled-back page looks a second or two out of date → it is: a page is cached for 2 s per
+  range, so one `PgUp` costs one `capture-pane` and a held-down one still costs one. `End` and
+  a fresh `PgUp` re-read it.
 - A guest keeps seeing "still retrying — the join URL changed" → it probably did. The host's
   `--tunnel` relay restarted and Cloudflare handed out a fresh random hostname; the host runs
   `/join` and sends the new line. `--funnel` does not have this problem.
