@@ -3046,7 +3046,9 @@ export const MANUAL_FILE = 'MANUAL.md';
 // on the input line when it needs an argument. Derived from the parser rather than from a list
 // somebody has to remember: if `parseClientLine('/kick')` is a usage error, `/kick` needs typing.
 export function menuRunsBare(cmd) {
-  const a = parseClientLine(String(cmd ?? '').trim());
+  const t = String(cmd ?? '').trim();
+  if (!t.startsWith('/')) return false; // not a command at all, so never something to "run"
+  const a = parseClientLine(t);
   return a.kind !== 'error' && a.kind !== 'say';
 }
 

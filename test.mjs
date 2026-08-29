@@ -55,7 +55,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   ACCESS_MODES, REMOTE_MODES, accessMode, remoteMode, shellQuote, hostCommandLine, hostPlan,
   parseJoinInput, buildJoinArgv, remoteRows, relaySwitchDecision, joinBlock, relayPendingLine,
   relayReadyLine, COMMAND_HELP, HOST_MENU_ONLY, guestCommands, HOST_FLAGS, KEY_HELP, WIKI_PAGES,
-  menuTree, menuItems, menuGaps,
+  menuTree, menuItems, menuGaps, menuRunsBare, MANUAL_FILE,
 } from './lib.mjs';
 import fs from 'node:fs';
 
@@ -3563,4 +3563,17 @@ test('v0.24 /remote, /menu and /token invite-only parse as jam commands', () => 
   assert.match(parseClientLine('/token nonsense').text, /invite-only on\|off/);
   // Both are jam's, so they never leak into the pane as one of claude's commands.
   assert.ok(JAM_COMMANDS.includes('/menu') && JAM_COMMANDS.includes('/remote'));
+});
+
+test('v0.24.2 the menu runs a bare command with one key, and TYPES one that needs an argument', () => {
+  // Derived from the parser, so it cannot drift from what the command actually accepts.
+  for (const c of ['/who', '/files', '/diff', '/help', '/menu', '/remote', '/invites', '/end', '/export']) {
+    assert.equal(menuRunsBare(c), true, c);
+  }
+  for (const c of ['/kick', '/invite', '/token', '/c', '/send', '/deny']) {
+    assert.equal(menuRunsBare(c), false, c);
+  }
+  // A plain word is not a command at all, and must never be "run".
+  assert.equal(menuRunsBare('hello'), false);
+  assert.equal(menuRunsBare(''), false);
 });
