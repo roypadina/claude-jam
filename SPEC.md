@@ -1298,3 +1298,37 @@ Ink overlay (Select-driven, Esc closes, everything it does maps to an existing c
   `/diff`, `/export`, `/send`, `/answer`, `/help`) with one-key launch, no host controls.
 `/menu` is discoverability: every feature we ship must appear there, and the standing doc rule
 (v0.21) extends to it — a new user-visible feature that is not reachable from `/menu` is a defect.
+
+## v0.23 — named jams and LAN discovery
+
+Guests on the same network should be able to find jams instead of being handed a URL.
+
+1. **A jam has a name.** `claude-jam host --jam-name "reeco debugging"` (default: the cwd's
+   basename, so it is never empty). The name shows in the launcher menu, `claude-jam sessions`,
+   the client's welcome, `/menu`, and the discovery listing. It is cosmetic — never used for
+   auth or paths.
+2. **Advertise over mDNS/DNS-SD, no new dependency.** macOS ships `dns-sd`; advertise with
+   `dns-sd -R "<jam name>" _claude-jam._tcp local <port> <txt...>` as a tracked child (same
+   lifecycle discipline as ttyd/cloudflared: killed on exit, respawned with backoff on death).
+   TXT record carries ONLY: `jam=<name>`, `host=<host display name>`, `id=<8-char session id>`,
+   `access=knock|token|invite`, `view=yes|no`, `v=<jam version>`. **Never** the token, an invite
+   secret, the cwd, or any path. If `dns-sd` is absent (Linux) try `avahi-publish-service`;
+   if neither exists, skip discovery with one log line and no error.
+   The implementer must verify `dns-sd -R`/`-B` output parsing against the real binary and, if
+   parsing proves unreliable in practice, may fall back to the `bonjour-service` npm package —
+   report which shipped and why.
+3. **Find jams.** `claude-jam find` (alias `discover`) browses `_claude-jam._tcp` for ~3 s and
+   prints a table: jam name, host, access mode, address:port, view. `--json` for scripting.
+   In the launcher menu, **Join a jam** starts with the discovered list (Select), plus
+   "paste a link or URL" as the last row; `claude-jam join` with no argument does the same.
+   Picking a knock jam connects and knocks; a token jam prompts for the token; an invite-only
+   jam says so and asks for a link.
+4. **Privacy, stated plainly.** Advertising tells everyone on the local network that this jam
+   exists, its name and the host's display name — that is the point, and it is a leak on an
+   untrusted network (café wifi). Default is ON for LAN; `--no-announce` disables it, and the
+   launcher menu has an "announce on the network" toggle. Discovery never bypasses a gate:
+   a found jam still requires knock approval, a token, or an invite link. Tunnels are not
+   advertised (mDNS is link-local by design, and a tunnel is for people who are not here).
+5. Docs: README, MANUAL (so claude can explain "how do I find Roy's jam"), wiki
+   `Joining-a-Jam` + `Security-Model` (the privacy note), CHANGELOG. `/menu` gains the
+   announce toggle and shows the jam name.
