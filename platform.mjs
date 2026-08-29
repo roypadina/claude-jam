@@ -168,3 +168,87 @@ export function openExternal(url) {
     return true;
   } catch { return false; }
 }
+
+// ------------------------------------------------------------- v0.23: mDNS ----
+// Advertising a jam on the LAN and finding one. `dns-sd` is a platform binary like everything
+// else in this file — it is Apple's Bonjour CLI, it ships in /usr/bin on macOS, the Bonjour
+// installer puts the same tool on Windows, and avahi's compat package provides it on Linux — so
+// the rule applies: no other module may name it, and a unit test says so.
+//
+// ONE tool rather than a per-OS pair. The alternative the spec allowed was `avahi-publish-service`
+// plus `avahi-browse` on Linux, and it was not built: avahi-browse prints a completely different
+// format, this machine has no avahi to verify a parser against, and shipping a parser written
+// from a man page is exactly the confident-wrong-fix this project's `-Z` parser exists to avoid.
+// A machine with neither gets discovery skipped, with a line saying so and the fix. That is a
+// stated deviation, not an oversight.
+//
+// These two hand back the CHILD rather than a promise, because an advertisement is a long-lived
+// tracked child with the same lifecycle discipline as ttyd and cloudflared — killed on exit,
+// respawned with backoff — and that discipline lives in host.mjs beside the other relays. What
+// belongs here is only "which binary, which argv".
+//
+// TODO(W1 — native Windows client): Bonjour's dns-sd.exe is the same CLI with the same output,
+// so this needs a path probe (`%PROGRAMFILES%\Bonjour\dns-sd.exe`, and PATH) added to
+// DNSSD_PATHS and nothing else — no second parser, no second lifecycle. If a platform ever turns
+// up with avahi ONLY, that is when a second parser is owed, and it must be written against the
+// real binary the way parseDnssdZone() was.
+export const DNSSD_PATHS = ['/usr/bin/dns-sd', '/usr/local/bin/dns-sd', '/opt/homebrew/bin/dns-sd'];
+export const DNSSD_MISSING = 'no dns-sd on this machine, so claude-jam cannot announce or find '
+  + 'jams on the network — everything else works, and an invite link or a ws:// URL still joins. '
+  + 'macOS ships it in /usr/bin; on Linux install avahi-utils, on Windows Apple Bonjour. '
+  + 'JAM_DNSSD=<path> points at one somewhere else.';
+
+// `JAM_DNSSD` first (the same escape hatch JAM_TAILSCALE and JAM_TTYD give), then the known
+// locations. A refusal carries its reason and the fix, never a bare null.
+export function resolveDnssd(env = process.env, exists = fs.existsSync) {
+  const override = env.JAM_DNSSD;
+  if (override) {
+    return exists(override) ? { ok: true, bin: override }
+      : { ok: false, why: `JAM_DNSSD points at ${override}, which is not there` };
+  }
+  for (const p of DNSSD_PATHS) if (exists(p)) return { ok: true, bin: p };
+  return { ok: false, why: DNSSD_MISSING };
+}
+
+export function discoveryAvailable(env = process.env) { return resolveDnssd(env).ok; }
+
+// `dns-sd -R "<name>" _claude-jam._tcp local <port> jam=… host=… …`. The TXT strings arrive
+// already built (and already reduced to six keys) from lib's discoveryTxt — this function does
+// not decide what is published, it only publishes it. Every value goes on the argv as its own
+// word, so a jam name containing a space, a quote or a `$` is a name and never a second argument.
+export function advertiseSpawn({ name, type, domain = 'local', port, txt = [] } = {}, env = process.env) {
+  const tool = resolveDnssd(env);
+  if (!tool.ok) return { ok: false, why: tool.why };
+  try {
+    const child = spawn(tool.bin, ['-R', String(name), String(type), String(domain), String(port),
+      ...txt.map(String)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    return { ok: true, child, bin: tool.bin };
+  } catch (e) { return { ok: false, why: e.message }; }
+}
+
+export function browseSpawn({ type, domain = 'local' } = {}, env = process.env) {
+  const tool = resolveDnssd(env);
+  if (!tool.ok) return { ok: false, why: tool.why };
+  try {
+    const child = spawn(tool.bin, ['-Z', String(type), String(domain)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    return { ok: true, child, bin: tool.bin };
+  } catch (e) { return { ok: false, why: e.message }; }
+}
+
+// Browse for `ms` and hand back what was printed, for lib's parseDnssdZone to read. dns-sd never
+// exits on its own — it is a watch, not a query — so the timer is what ends it, and the child is
+// killed by the pid we spawned, never by name.
+export const BROWSE_BUF_MAX = 256 * 1024; // a busy network is not a reason to grow without bound
+export async function browseText({ type, domain = 'local', ms = 3000 } = {}, env = process.env) {
+  const s = browseSpawn({ type, domain }, env);
+  if (!s.ok) return { ok: false, why: s.why, text: '' };
+  let text = '';
+  // The tail, when it comes to that: parseDnssdZone drops the half-line a truncation leaves
+  // behind rather than reading it as a record, which is exactly what it was made total for.
+  s.child.stdout.on('data', (d) => { text += d; if (text.length > BROWSE_BUF_MAX) text = text.slice(-BROWSE_BUF_MAX); });
+  s.child.stderr.on('data', () => { /* dns-sd says nothing useful here; the timer decides */ });
+  s.child.on('error', () => { /* it vanished mid-browse: whatever arrived is the answer */ });
+  await new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
+  try { s.child.kill('SIGTERM'); } catch { /* already gone */ }
+  return { ok: true, text, bin: s.bin };
+}
