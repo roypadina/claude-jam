@@ -17,13 +17,18 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   // v0.31: the status line and the question block are drawn from the daemon's classification of
   // the live pane. v0.30-3: readline already gives ↑/↓ recall — this makes it survive a restart.
   promptStatusText, questionBlock,
-  historyPush, parseHistoryFile, serializeHistory, HISTORY_LIVE } from './lib.mjs';
+  historyPush, parseHistoryFile, serializeHistory, HISTORY_LIVE,
+  // v0.25/v0.26/v0.27: the sound tiers, nudges and idle, and the two transfer policies.
+  notifyPrefs, notifyPlan, KNOCK_REPEAT_MS, knockRepeat, NUDGE_ALL, IDLE_AFTER, idleBucket,
+  whoReport, CONFIG_FILE, parseJamConfig, ntfyRequest, UPLOAD_POLICIES,
+  uploadPolicy } from './lib.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './xfer.mjs';
 // v0.32 W0: anything that touches this machine's clipboard, desktop or dot-directories goes
 // through the one module that knows what operating system this is.
-import { clipboardImage, notify, historyFile, secureWrite, secureDir } from './platform.mjs';
+import { clipboardImage, notify, playSound, configDir, historyFile, secureWrite,
+  secureDir } from './platform.mjs';
 
 const argv = process.argv.slice(2);
 const url = argv.find((a) => a.startsWith('ws'));
@@ -62,6 +67,7 @@ const typing = new Map(); // name -> last typing ms
 // permission | dialog. The status line is drawn from it, so it cannot outlive what is on screen.
 let state = { busy: false, waiting: false, prompt: { kind: 'none' }, answers: 'anyone' };
 let roster = [];
+let idle = {}; // v0.26: name -> seconds since that person last typed, as THEY reported it
 let ws = null;
 let backoff = 1000;
 let attempts = 0; // v0.17 T3: consecutive failures, so the fifth can say something better
@@ -94,13 +100,57 @@ function rememberInput(text) {
   } catch { /* the recall still works for this session */ }
 }
 
-// v0.17 P3/P4: claude needs an answer, or somebody said your name. The bell is the portable half;
-// macOS gets a real notification with it. Rate-gated, so a burst is one nudge.
-function nudge(title, body) {
-  if (!bellAllowed(lastBell, Date.now())) return;
-  lastBell = Date.now();
-  try { process.stdout.write(BELL); } catch { /* stdout closed */ }
-  notify(title, body);
+// v0.17 P3/P4, extended by v0.25/v0.26: claude needs an answer, somebody said your name, or
+// somebody is asking for you. Three independently switchable tiers plus a sound, decided by
+// lib's notifyPlan() so this renderer and the ink one cannot honour a toggle differently.
+const prefs = { sound: !argv.includes('--no-sound'), notification: true, bell: true };
+function alert(title, body, { event = '', phone = false, force = false } = {}) {
+  const plan = notifyPlan({ event, prefs, phone });
+  const gated = !force && !bellAllowed(lastBell, Date.now());
+  if (!gated) lastBell = Date.now();
+  if (plan.sound) playSound(plan.sound);
+  if (gated) return;
+  if (plan.bell) { try { process.stdout.write(BELL); } catch { /* stdout closed */ } }
+  if (plan.notification) notify(title, body);
+  if (plan.phone) toPhone(title, body);
+}
+
+// v0.26 tier 3. The ntfy topic is a bearer secret: it lives only in THIS person's own config
+// dir, THIS client posts it, and it never travels in the protocol, an invite link or a log.
+const jamConfig = (() => {
+  try { return parseJamConfig(fs.readFileSync(path.join(configDir(), CONFIG_FILE), 'utf8')); }
+  catch { return { ok: true, ntfy: null, why: 'no config file' }; }
+})();
+function toPhone(title, message) {
+  const req = ntfyRequest(jamConfig.ntfy, { title, message });
+  if (req) fetch(req.url, { method: 'POST', headers: req.headers, body: req.body }).catch(() => { /* silent */ });
+}
+
+// v0.26: coarse seconds since this human last submitted. One number, never a keystroke, pushed
+// only when the bucket changes.
+let activeAt = Date.now();
+let idleSaid = null;
+const localActivity = () => { activeAt = Date.now(); reportIdle(); };
+function reportIdle() {
+  const s = Math.round((Date.now() - activeAt) / 1000);
+  const b = idleBucket(s);
+  if (b === idleSaid) return;
+  idleSaid = b;
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'idle', s }));
+}
+setInterval(reportIdle, Math.max(5000, (IDLE_AFTER * 1000) / 4)).unref?.();
+
+// v0.25: a knock rings, and repeats once after 30 s if nobody answered. Once, never a loop.
+const knocks = new Map();
+function armKnock(name) {
+  if (!IS_HOST || !name || knocks.has(name)) return;
+  const rec = { at: Date.now(), repeated: false, answered: false };
+  knocks.set(name, rec);
+  alert('⚑ claude-jam', `${name} wants to join`, { event: 'knock' });
+  setTimeout(() => {
+    if (knockRepeat({ ...rec, now: Date.now() })) alert('⚑ claude-jam', `${name} is still waiting to join`, { event: 'knock', force: true });
+    knocks.delete(name);
+  }, KNOCK_REPEAT_MS).unref?.();
 }
 
 function statusLine() {
@@ -204,7 +254,7 @@ function render(ev) {
   switch (ev.t) {
     case 'say': {
       // v0.17 P3: somebody said your name — never your own line.
-      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) nudge(`${ev.from} in the jam`, ev.text);
+      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) alert(`${ev.from} in the jam`, ev.text);
       // Self is always green; everybody else gets a stable color hashed from their name, so
       // it survives reconnects and roster churn instead of depending on join order.
       const c = ev.from === NAME ? C.me : fg256(userColor(ev.from));
@@ -224,10 +274,27 @@ function render(ev) {
     case 'roster': {
       roster = ev.roster;
       labelW = labelWidth(roster); // the column follows the longest name in the room
+      if (ev.idle) idle = ev.idle; // v0.26: coarse seconds per person; absent on an older daemon
       // v0.22B: an invite join has no knock to announce it, so the roster line says HOW.
-      if (ev.joined) sys(`${ev.joined} joined${ev.via && ev.via !== 'token' ? ` (${ev.via})` : ''}`);
-      if (ev.left) sys(`${ev.left} left`);
+      if (ev.joined) {
+        sys(`${ev.joined} joined${ev.via && ev.via !== 'token' ? ` (${ev.via})` : ''}`);
+        // v0.25: a token or invite arrival is already in — one short chime, host only.
+        if (IS_HOST && ev.joined !== NAME && (ev.via === 'token' || ev.via === 'invite')) {
+          alert('claude-jam', `${ev.joined} joined`, { event: 'join' });
+        }
+      }
+      if (ev.left) { delete idle[ev.left]; sys(`${ev.left} left`); }
       return;
+    }
+    // v0.26: somebody is asking for you, or for the room. One frame to everybody — a nudge is
+    // never secret — and this end decides how loud it is.
+    case 'nudge': {
+      if (ev.from === NAME) return sys(`you nudged ${ev.to}${ev.again ? ' again' : ''}`);
+      if (!(ev.to === NAME || ev.to === NUDGE_ALL)) return sys(`${ev.from} nudged ${ev.to}`);
+      emit({ glyph: '👋', glyphColor: C.chat, textColor: C.chat,
+        text: `${ev.from} is asking for you${ev.again ? ' (again)' : ''}${ev.text ? `: ${ev.text}` : ''}` });
+      return alert(`👋 ${ev.from}`, ev.text || 'is asking for you',
+        { event: 'nudge', phone: !!jamConfig.ntfy, force: true });
     }
     case 'typing': if (ev.from !== NAME) { typing.set(ev.from, Date.now()); reprompt(); } return;
     case 'status': {
@@ -238,7 +305,7 @@ function render(ev) {
       const was = state.prompt?.kind || 'none';
       const fresh = p.kind !== was && p.kind !== 'none';
       if (fresh && (IS_HOST || p.kind === 'question')) {
-        nudge('claude needs an answer', promptStatusText(p, { host: IS_HOST, answers: ev.answers }));
+        alert('claude needs an answer', promptStatusText(p, { host: IS_HOST, answers: ev.answers }));
       }
       state = { busy: ev.busy, waiting: ev.waiting, prompt: p, answers: ev.answers || 'anyone' };
       if (fresh && p.kind === 'question') sys(questionBlock(p, { answers: state.answers, host: IS_HOST }));
@@ -254,6 +321,7 @@ function render(ev) {
       if (ev.state === 'pending') return sys('waiting for host approval…');
       if (ev.state === 'denied') { emit({ glyph: '!', glyphColor: C.err, text: 'the host denied your request', textColor: C.err }); return process.exit(1); }
       if (ev.state === 'expired') { emit({ glyph: '!', glyphColor: C.err, text: 'nobody approved your request in time', textColor: C.err }); return process.exit(1); }
+      armKnock(ev.name); // v0.25: the slow low sound, and one repeat if nobody answers
       return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
     }
     // v0.14: a guest wants to run one of claude's commands (host clients only).
@@ -362,6 +430,7 @@ function connect() {
     opened = true;
     if (dial) clearTimeout(dial);
     backoff = 1000;
+    idleSaid = null; // v0.26: a daemon that just accepted this socket knows nothing about us
     attempts = 0;
     // v0.22B: `invite` is checked before the token and admits under the name the host bound to
     // the link; a refused one is explained and then knocks, so it always rides along.
@@ -373,6 +442,7 @@ function connect() {
     if (ev.t === 'welcome') {
       session = ev.session;
       roster = ev.roster;
+      idle = ev.idle || {}; // v0.26: who is here AND how long since each of them typed
       labelW = labelWidth(roster); // set before the replay, so history aligns with what follows
       // v0.23: the jam's NAME leads, because that is what a human calls the room they just
       // walked into; the session id stays, in the same 8-char form every other surface shows.
@@ -464,6 +534,7 @@ function sendUpload(ev) {
 }
 
 rl.on('line', (raw) => {
+  localActivity(); // v0.26: a submitted line is the whole definition of `active`
   rememberInput(raw); // v0.30-3: before anything else — even a line that turns out to be a typo
   // v0.18-4: /end asked "really end this jam for everyone?", and this is the answer —
   // taken before anything is parsed, so a bare `y` can never become a message to claude.
@@ -488,7 +559,7 @@ rl.on('line', (raw) => {
   switch (act.kind) {
     case 'say': sendMsg({ t: 'say', text: act.text }); break;
     case 'chat': sendMsg({ t: 'chat', text: act.text }); break;
-    case 'who': sys(`here: ${roster.join(', ')}`); break;
+    case 'who': sys(whoReport(roster, idle, { self: NAME })); break;
     case 'help': logOnboarding(); break;
     // The mirror needs a live region to redraw a whole screen into; this renderer only ever
     // appends lines. Same for tool collapse — here every ⚙/⎿ line goes straight to the log.
@@ -577,7 +648,9 @@ rl.on('line', (raw) => {
       const tree = menuTree({ host: IS_HOST, state: {
         roster, pending: [], grants: [], token: session?.token, inviteOnly: session?.inviteOnly,
         view: session?.view, remote: session?.remote, tunnelJoin: session?.tunnelJoin,
-        replay: session?.replay } });
+        replay: session?.replay, notify: prefs, idle, ntfy: !!jamConfig.ntfy,
+        uploads: session?.uploads, exportPolicy: session?.exportPolicy,
+        uploadQuota: session?.uploadQuota, uploadUsed: session?.uploadUsed } });
       sys(`${tree.title} — type the command on the left`);
       for (const sec of tree.sections) {
         sys(`  ${sec.title}: ${sec.desc}`);
@@ -594,6 +667,15 @@ rl.on('line', (raw) => {
       else if (act.mode == null) { sendMsg({ t: 'remote' }); sys(`remote: ${session?.remote || 'off'} — /remote ${REMOTE_MODES.join(' | ')}`); }
       else { sys(`switching remote to ${act.mode}…`); sendMsg({ t: 'remote', mode: act.mode }); }
       break;
+    // v0.26/v0.25: nudge somebody, and this client's own sound switch.
+    case 'ping': sendMsg({ t: 'nudge', to: act.to, text: act.text, escalate: act.escalate }); break;
+    case 'sound': {
+      if (act.on != null) prefs.sound = act.on;
+      const p = notifyPrefs(prefs);
+      sys(`sound ${p.sound ? 'on' : 'off'} · notification ${p.notification ? 'on' : 'off'} · `
+        + `bell ${p.bell ? 'on' : 'off'}${jamConfig.ntfy ? ' · phone configured' : ''}`);
+      break;
+    }
     case 'quit': process.exit(0);
     case 'error': err(act.text); break;
     default: break;
