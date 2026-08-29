@@ -59,7 +59,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   contextLostSignal, rosterKey, briefUpdateDecision,
   // v0.29: peer tasks — the ladder above, with the direction inverted. The HOST asks and the
   // GUEST approves, because the work runs on the guest's machine and spends the guest's quota.
-  PEER_ASK_TTL, peerTools, peerCaps, validPeerPrompt, peerPermissionMode, peerRefusal,
+  PEER_ASK_TTL, PEER_MCP_FILE, buildPeerMcpConfig,
+  peerTools, peerCaps, validPeerPrompt, peerPermissionMode, peerRefusal,
   peerEntry, peerDayKey, peersReport, peerLogLine, parsePeerLog, peerLogReport, peerTag,
   peerQuote, peerWhyText, peerResultForAgent, peerStructured, PEER_PROGRESS_MAX,
 } from './lib.mjs';
@@ -535,6 +536,15 @@ async function launch() {
       + `  daemon: tmux session ${opts.tmux} on socket ${SOCKET} (claude-jam's own — this is what \`claude-jam end\` ends)\n`
       + '  F3 is NOT bound to detach-client: that key table belongs to your tmux server — Ctrl-b d comes back\n'
       + `  ending this jam stops the daemon and leaves the pane, the session and claude exactly as they are`);
+    // v0.29: `--mcp-config` is read at claude's startup and never again, and an adopted claude was
+    // started by somebody else. So the tools cannot be given to it — said out loud rather than
+    // left to be discovered when the agent cannot find them.
+    if (opts.peerTasks) {
+      console.log('  --peer-tasks: this claude was already running, so it CANNOT be given the '
+        + 'list_peers / dispatch_to_peer tools (--mcp-config is read once, at startup). '
+        + 'Everything else works — /peer, /peers, /peers log — but nothing can dispatch. '
+        + 'Start the jam with `claude-jam host --peer-tasks` for the tools.');
+    }
   } else {
     // JAM_NODE: hooks.sh must not depend on whatever PATH tmux/claude inherited.
     const env = ['env', `JAM_STATE=${opts.state}`, `JAM_PORT=${opts.port}`, `JAM_HOOK_SECRET=${opts.hookSecret}`,
@@ -546,10 +556,18 @@ async function launch() {
     // v0.19: written before the window exists, because the flag is read at claude's startup and
     // never again. null when it is off, or when this claude cannot take the flag.
     const sysPrompt = writeSystemPrompt();
+    // v0.29: the two peer-task tools, as a GENERATED MCP config in the jam's own 0700 state dir.
+    // The user's `~/.claude.json`, their project's `.mcp.json` and their global settings are
+    // never read and never written — when the jam ends the file goes with the state dir.
+    // ADDITIVE on purpose (no `--strict-mcp-config`): the host is working in their own repo with
+    // their own servers connected, and turning those off because they enabled a claude-jam
+    // feature would be a regression nobody asked for.
+    const mcpFile = writePeerMcp();
     must(tmux('new-window', '-d', '-t', opts.tmux, '-c', opts.cwd, '-n', 'claude',
       ...env, opts.claude,
       ...(opts.resume ? ['--resume', opts.resume] : ['--session-id', opts.sessionId]),
       ...(sysPrompt ? ['--append-system-prompt-file', sysPrompt] : []),
+      ...(mcpFile ? ['--mcp-config', mcpFile] : []),
       '--settings', path.join(opts.state, 'settings.json'), ...opts.extra));
     // v0.9 addendum: a client bigger than the window (a browser viewer, or anyone who
     // attaches) gets tmux's `·` padding around the TUI, which reads as a broken screen.
@@ -592,6 +610,26 @@ async function launch() {
 // Degrades to exactly the pre-v0.19 behaviour, loudly enough to see in the log and never fatally:
 // a claude that cannot take the flag would refuse to start at all, which is the one outcome that
 // must not happen.
+// v0.29: the generated MCP config, or null when the feature is off (which is the default and the
+// whole point — a jam without `--peer-tasks` hands claude no extra tools at all). The secret goes
+// in the file's `env` block, in a 0700 directory, and never onto an argv.
+function writePeerMcp() {
+  if (!opts.peerTasks) return null;
+  const file = path.join(opts.state, PEER_MCP_FILE);
+  try {
+    secureWrite(file, JSON.stringify(buildPeerMcpConfig({
+      node: process.execPath, script: path.join(HERE, 'peer-mcp.mjs'),
+      port: opts.port, secret: opts.hookSecret,
+    }), null, 2));
+  } catch (e) {
+    console.log(`could not write ${file} (${e.message}) — peer tasks stay off for this jam`);
+    return null;
+  }
+  console.log('--peer-tasks: your claude gets list_peers and dispatch_to_peer. Nothing can be '
+    + 'dispatched to anybody until THEY type /peer on, and each task still waits for their yes.');
+  return file;
+}
+
 function writeSystemPrompt() {
   if (opts.noSystemPrompt) {
     console.log('--no-system-prompt: the shared-session contract stays in the SessionStart hook only');
@@ -599,7 +637,7 @@ function writeSystemPrompt() {
   }
   const file = path.join(opts.state, SYSTEM_PROMPT_FILE);
   try {
-    secureWrite(file, buildSystemPrompt({ hostName: opts.name }));
+    secureWrite(file, buildSystemPrompt({ hostName: opts.name, peerTasks: opts.peerTasks === true }));
   } catch (e) {
     console.log(`could not write ${file} (${e.message}) — the contract stays in the hook`);
     return null;
