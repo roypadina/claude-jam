@@ -1,6 +1,75 @@
 # Changelog
 
-## Unreleased
+## 0.21.0
+
+Two feature batches, and both of them are about a boundary rather than a screen.
+
+**v0.33 adopt** shares the claude you are **already** in — the pane it is already running in, no
+restart, no lost context — which is the first time claude-jam has pointed tmux at a server it does
+not own. **v0.29 peer tasks** lets the host's agent hand work to a guest's own Claude Code, on that
+guest's machine, account and quota, and only ever with that guest's per-task yes.
+
+Also in this release: the npm packaging prep, the upstream Funnel risk written down, and the W3
+Windows decision.
+
+### The ceilings, in one place
+
+Both batches ship with limits that were designed rather than discovered, and the release entry is
+the wrong place to be vague about them.
+
+**On an adopted jam:**
+
+- **The pane is never resized.** It is somebody's own window with a human probably looking at it,
+  so a guest on a smaller terminal sees it letterboxed. That is a decision, not a bug to file.
+- **tmux popups never fire.** The one-key `display-popup` approval needs a client attached to the
+  session it draws on; on an adopted jam the only session claude-jam owns holds the daemon log and
+  nobody attaches to it. Approvals arrive in the client and `/accept` still works — the same
+  behaviour as `--no-popup`. Nothing is written to the adopted server: no status line, no option,
+  no key binding.
+- **No new hooks.** `--settings` is read once at claude's startup, so turn-end and permission-wait
+  on an adopted session come from the v0.31 pane classifier — the authoritative source anyway. For
+  the same reason an adopted jam cannot have the peer-task MCP tools, and says so out loud.
+
+**On peer tasks:**
+
+- **The turn cap is counted, not enforced by a flag.** `--max-turns` **does not exist** on claude
+  2.1.251 (checked in its `--help`, 2026-08-29), so jam counts `{"type":"assistant"}` events in the
+  stream and kills the child by pid. That one such event is one turn comes from the documented
+  event shape and has not yet been measured against a real stream.
+- **`--max-budget-usd` was deliberately NOT adopted.** It exists and it is a real spend cap, but it
+  cannot be tested without spending, and a flag that turns out to be inert or refusing would break
+  every task. So the honest statement stands: **a turn cap is a proxy for spend, not a spend cap.**
+- **The executor has never been a real `claude`.** `smoke-peer` drives `scripts/fake-claude.mjs`,
+  which proves the argv, the stdin, the scratch dir and the kill are what they claim — but nobody
+  has yet watched `--restricted` refuse a read outside the scratch directory. `TESTING.md` carries
+  that, and the rest of what is owed, as named deferrals rather than silence.
+
+### Packaging (prepared, not published)
+
+- **A `files` allowlist and a `prepublishOnly` test gate** in `package.json`, plus a `node >=22`
+  engine floor. Without the allowlist npm would pack the smokes, the pane fixtures, `test.mjs` and
+  the design docs into a package guests install; the tarball is now the two bin entries, the
+  runtime modules, `hooks.sh` and `MANUAL.md` (which `lib.mjs` points the session's system prompt
+  at by name, so it is runtime data rather than documentation).
+- **Nothing has been published to npm.** This is preparation only. Homebrew remains the install
+  path this release ships.
+
+### Docs
+
+- **`--funnel` carries an upstream risk, not merely an unverified path.**
+  [tailscale/tailscale#18827](https://github.com/tailscale/tailscale/issues/18827) (open) reports
+  WebSockets through `tailscale serve`'s HTTP reverse proxy — the layer Funnel rides — closing
+  every 10–40 s with code 1001. A 30 s heartbeat cannot save a 10 s drop. Until one real session
+  has run over it, `--funnel` is a stable-URL convenience with an unproven long-session story, and
+  the docs no longer imply otherwise.
+- **W3 decided**: no native Windows host. WSL2 is the Windows host path (`SPEC.md` W2/W3).
+- **Found by this release's own doc gate**, and fixed here: `--help` and `/menu` had drifted apart
+  on three real flags (`--invite-only` and `--funnel` printed by neither; `--resume` missing from
+  the menu); `SPEC.md`'s smoke recipe invoked sixteen of the eighteen suites, silently skipping the
+  mDNS leak check and the whole peer trust boundary; `MANUAL.md`'s command overview — the text
+  claude itself is given — was missing six commands including `/peer` and `/peers`; and the wiki's
+  entry page still listed five long-shipped features as "not built yet". Two new lints now fail on
+  the first two classes of drift, so the next release cannot repeat them.
 
 ### v0.29 — peer tasks: the wire (step 1 of 5)
 
