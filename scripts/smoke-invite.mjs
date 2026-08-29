@@ -30,7 +30,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const HOST_MJS = path.join(ROOT, 'host.mjs');
 const CLIENT_MJS = path.join(ROOT, 'client.mjs');
-const JAM = path.join(ROOT, 'jam');
+const JAM = path.join(ROOT, 'claude-jam');
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 // Ports of this smoke's own: clear of jam's 7777, the shared smokes' 7799/7801,
 // smoke-transport's 7811-7819, smoke-replay's 7823/7825, smoke-perm's 7831 and
