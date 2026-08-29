@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0
 
 ### A message is never lost, and big pastes stop failing
 
@@ -125,6 +125,10 @@ Observed live (15:26): the status row said `⚠ waiting for permission` while th
   they came in on a link the host is offered its revocation in the same breath.
 - **`claude-jam --help`, `-h`, `help`** print usage and exit 0. `node host.mjs --help` used to
   swallow the next argument and start a real jam.
+- **Fixed: a knock-mode host had no address to hand out.** The invite line used to print nothing
+  at all unless a token was set, so the default (knock) mode showed the "friends knock" hint with
+  no address to knock on. The address is now always in the line; only the `--token` part and the
+  knock hint vary.
 
 ### jam owns its tmux sessions
 
