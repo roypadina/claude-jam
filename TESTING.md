@@ -58,3 +58,9 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
 - 2026-08-29 · `--funnel` (Tailscale) live path unverified — Funnel is not enabled on this
   tailnet and the installed Tailscale is the sandboxed App Store build. Prove: after Roy enables
   Funnel and installs the standalone build, or record it as unsupported here.
+- 2026-08-29 · A mention in `/c` chat never rang the bell in `--basic` clients: `client-basic.mjs`
+  still called `nudge()` after the v0.25 rename to `alert()` — a ReferenceError at runtime, caught
+  by the 0.20.0 release gate (smoke-perm P3), not by any unit test. Prove: a lint or test that
+  every client call site resolves (no undefined identifiers) — a `node --check` passes this file,
+  so it needs more than syntax. Owed to the campaign.
+

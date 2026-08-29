@@ -273,7 +273,7 @@ function render(ev) {
     // Human-only: the agent never sees it, so it renders unmissable — label, prefix and text
     // all in the one color nothing else uses.
     case 'chat': {
-      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) nudge(`${ev.from} in the jam`, ev.text);
+      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) alert(`${ev.from} in the jam`, ev.text);
       return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat });
     }
     case 'agent': {
