@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, FRAME_MIN_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -61,6 +61,11 @@ if (opts.resume) {
 }
 opts.sessionId ||= randomUUID();
 opts.claude ||= resolveClaude(process.env, fs.existsSync); // --claude wins, then JAM_CLAUDE
+// The join command every invite line hands out. Computed once, here, and threaded through to
+// the re-exec'd daemon as --client-cmd (below): tmux new-session does not reliably forward a
+// launcher-only env var (JAM_INSTALLED) to the window it starts, so recomputing this from
+// process.env independently in each process could disagree; an explicit arg cannot.
+opts.clientCmd ||= clientCommand(HERE, process.env);
 // Which claude account/profile the TUI runs as. null = whatever claude defaults to.
 opts.configDir = resolveConfigDir(opts.configDir, process.env);
 if (!validName(opts.name)) { console.error(`bad --name: ${opts.name}`); process.exit(2); }
@@ -106,6 +111,7 @@ function launch() {
   const common = ['--port', String(opts.port), '--host', opts.host, '--name', opts.name,
     ...(opts.token ? ['--token', opts.token] : []),
     '--hook-secret', opts.hookSecret,
+    '--client-cmd', opts.clientCmd,
     '--session-id', opts.sessionId, '--cwd', opts.cwd,
     '--tmux', opts.tmux, '--state', opts.state,
     '--view-port', String(opts.viewPort),
@@ -166,7 +172,7 @@ function launch() {
   // The client is just a window onto the session: closing it leaves the daemon, the TUI and
   // every guest exactly where they were, so say how to come back and how to actually stop.
   console.log(`\nclient closed — the jam is still running.\n` +
-    `  rejoin:  node client.mjs ws://127.0.0.1:${opts.port} --name ${opts.name}` +
+    `  rejoin:  ${opts.clientCmd} ws://127.0.0.1:${opts.port} --name ${opts.name}` +
     `${currentToken ? ` --token ${currentToken}` : ''} --host\n` +
     `  raw TUI: tmux attach -t ${opts.tmux}\n` +
     `  stop:    tmux kill-session -t ${opts.tmux}\n`);
@@ -212,9 +218,9 @@ function externalIp() {
 function joinInfo() {
   const ip = externalIp();
   return {
-    join: buildJoinLine(ip, opts.port, currentToken),
+    join: buildJoinLine(ip, opts.port, currentToken, opts.clientCmd),
     view: buildViewUrl(ip, opts.viewPort, viewKey),
-    tunnelJoin: buildTunnelJoinLine(tunnelHosts.ws, currentToken),
+    tunnelJoin: buildTunnelJoinLine(tunnelHosts.ws, currentToken, opts.clientCmd),
     tunnelView: buildTunnelViewUrl(tunnelHosts.view, viewKey),
   };
 }
