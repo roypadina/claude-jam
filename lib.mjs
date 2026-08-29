@@ -320,6 +320,22 @@ export function parseClientLine(line) {
     const v = validDiffPath(t.slice(5));
     return v.ok ? { kind: 'diff', path: v.path } : { kind: 'error', text: v.error };
   }
+  // v0.17 P2: answering the permission prompt claude is showing. Bare `/answer` asks what the
+  // options are (the daemon reads them off the screen and tells the asker alone); `/answer <n>`
+  // is the request the host approves. A single digit is the ONLY thing that can ever be typed
+  // into the prompt, so a single digit is the only thing this parses.
+  if (t === '/answer' || t.startsWith('/answer ')) {
+    const rest = t.slice(7).trim();
+    if (!rest) return { kind: 'perm', choice: null };
+    return /^[1-9]$/.test(rest) ? { kind: 'perm', choice: Number(rest) }
+      : { kind: 'error', text: 'usage: /answer (list the options) | /answer <1-9>' };
+  }
+  if (t === '/allow-perm' || t.startsWith('/allow-perm ')) {
+    return { kind: 'perm-ok', op: 'allow', ...answerWords(t.slice(11)) };
+  }
+  if (t === '/deny-perm' || t.startsWith('/deny-perm ')) {
+    return { kind: 'perm-ok', op: 'deny', name: t.slice(10).trim() || null, always: false };
+  }
   // v0.14: anything else that looks like a command belongs to claude, not to jam — the host
   // client types it into the real TUI, a guest's becomes a request the host approves.
   if (t.startsWith('/')) {
@@ -348,7 +364,9 @@ export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror',
   '/export', '/allow-export', '/deny-export', '/send', '/paste', '/get',
   '/accept-file', '/deny-file',
   // v0.17 F2/F3: the paths this session touched, and git's own answer about them.
-  '/files', '/diff'];
+  '/files', '/diff',
+  // v0.17 P2: the permission relay — a guest asks, the host allows or denies.
+  '/answer', '/allow-perm', '/deny-perm'];
 
 // Session-lifecycle commands: they end or wipe the conversation for EVERYBODY, so they stay
 // with the host. Hard list, enforced server-side — no guest request, no `/allow-cmd always`
@@ -376,11 +394,27 @@ export function validSlashCommand(text) {
   return { ok: true, text: t };
 }
 
+// v0.17 P1: claude's own read-only commands. They open a panel and change nothing — no turn, no
+// file, no session state — so a guest runs them without waking the host, which removes the single
+// most common piece of friction in a jam (checking `/cost`). Three, and deliberately BARE: `/cost`
+// is on the list, `/cost --anything` is not, because an argument is behaviour this list has never
+// read. Adding to it is a security decision, not a convenience one — anything that can mutate the
+// session, spend a turn or touch a file belongs on the ask path.
+// Their output lands on the shared screen like any other command, so a guest can put the host's
+// `/status` panel in front of everybody; that is the whole cost, and it is documented.
+export const GUEST_SAFE_COMMANDS = ['/cost', '/status', '/context'];
+export function isSafeGuestCommand(text) {
+  const t = String(text ?? '').trim();
+  return !/\s/.test(t) && GUEST_SAFE_COMMANDS.includes(t.toLowerCase());
+}
+
 // What happens to a guest's `/command`. `refuse` = the hard host-only list, no approval path
-// at all; `run` = this guest already has standing approval (`/allow-cmd always`) for this
-// jam; `ask` = default, the host is asked once. Nothing is ever auto-approved.
+// at all; `run` = the read-only allowlist above, or this guest already has standing approval
+// (`/allow-cmd always`) for this jam; `ask` = default, the host is asked once. The hard list is
+// checked FIRST, so neither the allowlist nor `always` can ever widen into it.
 export function guestSlashDecision(text, alwaysAllowed = false) {
   if (HOST_ONLY_COMMANDS.includes(slashName(text))) return 'refuse';
+  if (isSafeGuestCommand(text)) return 'run';
   return alwaysAllowed ? 'run' : 'ask';
 }
 
@@ -429,6 +463,9 @@ export function popupPrompt(kind, name, ip, detail) {
   if (kind === 'cmd') return `⌘ ${name} wants to run ${detail}`;
   if (kind === 'export') return `⇩ ${name} wants the session transcript`;
   if (kind === 'file') return `⇪ ${name} wants to send ${detail}`;
+  // v0.17 P2: the fourth kind. `detail` is already "answer 2: Yes, and don't ask again", built
+  // from the options the daemon read off the real screen — never from anything the guest typed.
+  if (kind === 'permission') return `⏎ ${name} wants to ${detail}`;
   return `⚑ ${name} wants to join${ip ? ` (${ip})` : ''}`;
 }
 
@@ -460,6 +497,9 @@ export const APPROVAL_COMMANDS = {
   cmd: { allow: '/allow-cmd', deny: '/deny-cmd' },
   export: { allow: '/allow-export', deny: '/deny-export' },
   file: { allow: '/accept-file', deny: '/deny-file' },
+  // v0.17 P2: the fourth ladder kind. One key on the bar allows the ONE digit that was asked
+  // for, exactly as it allows one command or one file — `always` still needs the typed command.
+  permission: { allow: '/allow-perm', deny: '/deny-perm' },
 };
 
 // `2:00`, `0:07`, `0:00` — a request's own expiry, counted down live in the bar.
@@ -605,10 +645,24 @@ export function claudeTarget(session) {
 
 // Stable per-participant color: hash the name into a curated palette, not join order, so
 // colors survive reconnects and roster churn. Self overrides to green and [Claude] stays
-// orange in client.mjs — this pool never has to produce either. Blue/teal/cyan/purple/gold
+// orange in client.mjs — this pool never has to produce either. Blue/teal/cyan/purple/gold/rose
 // family, readable on a dark background; excludes claude-orange 208, chat-magenta 213,
 // err-red 203, and the dim greys (240/245).
-export const COLOR_PALETTE = [39, 44, 78, 81, 110, 141, 178, 183];
+// v0.17 P7, the contrast/color-blind pass. Measured (WCAG relative luminance, sRGB): every entry
+// clears 6.1:1 on #1e1e1e and 7.7:1 on pure black, so contrast was never the problem and nothing
+// moved for it. ONE entry was genuinely weak: **78 `#5FD787` sat ΔE 11.2 (CIE76) from the self
+// green 114 `#87D787`** — nearest normal-vision pair in the whole set by a factor of two, and the
+// worst possible collision to have, because it makes somebody else's name look like your own.
+// It is now 211 `#FF87AF` (rose), a family nothing else here uses: ΔE 36 from its nearest
+// neighbour (err-red 203) and the best dichromat separation of any candidate that cleared the
+// contrast floor. Everything else stayed: the remaining close pairs (39/141 and 81/183 collapse
+// under deuteranopia) are inherent to holding eight fixed hues in a space a dichromat sees in two
+// dimensions, and colour here is redundant by construction — the `[Name]` label is always printed
+// next to it, so the colour is a hint, never the identity.
+// The hash is untouched, so a name's colour is as stable as it ever was; only slot index 2 moved,
+// i.e. names whose hash lands there are rose now instead of pale green. The list is deliberately
+// NOT re-sorted back into numeric order — that would shift every index and re-colour everybody.
+export const COLOR_PALETTE = [39, 44, 211, 81, 110, 141, 178, 183];
 export function userColor(name) {
   let h = 0;
   for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -1306,6 +1360,139 @@ export function historyDivider(count = 0, width = ONBOARD_W) {
   const label = ` history above (${n} replayed) · live from here `;
   const pad = Math.max(2, Math.floor((width - label.length) / 2));
   return `${'─'.repeat(pad)}${label}${'─'.repeat(pad)}`;
+}
+
+// ------------------------------- v0.17 P2: the permission prompt, read off the screen ----
+// The ceiling this lifts: "guests cannot answer permission prompts". The tempting fix — give a
+// guest F3's raw key passthrough — is a real security regression (arbitrary bytes into the host's
+// TUI from off-box), so it is an anti-feature. What IS safe is much narrower: the only structured
+// thing about a Claude Code permission prompt, seen from outside, is that its choices are
+// NUMBERED. So the daemon reads those numbers off a `capture-pane`, shows them to the guest who
+// asked, and — once the host approves that exact choice — types ONE validated digit. Never raw
+// bytes, never a digit that is not on the screen, never without `status.waiting` and an approval.
+//
+// Everything here is the parsing half; the ladder, the re-validation and the typing live in
+// host.mjs. Returning [] is the refusal: a screen this cannot read cleanly is a screen nothing
+// gets typed into.
+export const PERM_OPTIONS_MAX = 9; // one digit, because one digit is all that is ever typed
+export const PERM_TEXT_MAX = 80;
+export const PERM_ROW_GAP = 3; // rows an option may sit below the previous one (its text wraps)
+// The prompt is drawn inside a box, so the frame characters come with the capture.
+const PERM_BOX_RE = /^[\s│┃|╎┆┊╭╰]+|[\s│┃|╎┆┊╮╯]+$/g;
+// `❯ 1. Yes` / `2) No, and tell Claude…` — an optional cursor marker, the number, `.` or `)`,
+// then text. A row with a number and nothing after it is not an option.
+const PERM_OPTION_RE = /^(?:([❯▶>*])\s*)?([1-9])[.)]\s+(\S.*)$/;
+
+export function parsePermOptions(screen) {
+  const hits = [];
+  const lines = String(screen ?? '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = PERM_OPTION_RE.exec(lines[i].replace(PERM_BOX_RE, ''));
+    if (m) hits.push({ i, n: Number(m[2]), marked: !!m[1], text: m[3].trim().slice(0, PERM_TEXT_MAX) });
+  }
+  // The options are the BOTTOM-most numbered block on the screen, counting up from the last
+  // numbered row to `1.` with no number missing and no big gap between rows. Strict on purpose:
+  // a numbered list further up (a file being read, a plan, `git log --oneline`) must never be
+  // mistaken for a set of options, and anything we cannot read this cleanly is a refusal — the
+  // host still has F3.
+  const run = [];
+  for (let k = hits.length - 1; k >= 0; k--) {
+    const h = hits[k];
+    const below = run[0];
+    if (!below) {
+      if (h.n < 2) break; // the last row must be the LAST option, so a lone `1.` is not a prompt
+      run.unshift(h);
+      continue;
+    }
+    if (h.n !== below.n - 1 || below.i - h.i > PERM_ROW_GAP) break;
+    run.unshift(h);
+    if (h.n === 1) break;
+  }
+  if (run.length < 2 || run.length > PERM_OPTIONS_MAX || run[0].n !== 1) return [];
+  return run.map(({ n, text, marked }) => ({ n, text, marked }));
+}
+
+// What the guest who asked is shown. Read-only: it describes a screen they are already watching
+// in the mirror, so it costs no approval — the approval is on TYPING, which is the part that acts.
+export function permOptionsReport(options = []) {
+  if (!options.length) return 'no numbered options are on claude\'s screen right now';
+  return ['claude is waiting for an answer — the options on its screen:',
+    ...options.map((o) => `  ${o.marked ? '❯' : ' '} ${o.n}. ${o.text}`),
+    'pick one with /answer <number> — the host has to approve it before anything is typed'].join('\n');
+}
+
+// The trust boundary, both ways: a choice that is not a single digit is unparseable, and a digit
+// that is not on the screen right now is out of range. Both refuse; neither guesses.
+export function validPermChoice(choice, options = []) {
+  const raw = String(choice ?? '').trim();
+  const range = options.length ? `1-${options.length}` : 'a number';
+  if (!/^[1-9]$/.test(raw)) {
+    return { ok: false, error: `${JSON.stringify(raw.slice(0, 12))} is not one of the numbered options — /answer ${range}` };
+  }
+  const n = Number(raw);
+  const hit = options.find((o) => o.n === n);
+  if (!hit) {
+    return { ok: false, error: options.length
+      ? `there is no option ${n} on claude's screen — it is showing ${options.length} (${range})`
+      : `there is nothing numbered on claude's screen, so ${n} would answer nothing` };
+  }
+  return { ok: true, n, text: hit.text };
+}
+
+// ------------------------------- v0.17 P3: the bell ----
+// The most actionable moment in a jam — "claude wants a permission answer", or somebody saying
+// your name — is silent for anyone not looking at the window. `\x07` is the whole dependency:
+// every terminal turns it into whatever the user already configured (a dock bounce, a flash, an
+// OS notification), which is strictly better than jam inventing a policy.
+export const BELL = '\x07';
+export const BELL_MIN_GAP = 3000;
+
+// A burst of mentions is one bell, not five. A clock that went backwards rings rather than
+// staying silent until it catches up.
+export function bellAllowed(lastAt, now, gap = BELL_MIN_GAP) {
+  const since = Number(now) - Number(lastAt);
+  return !(Number(lastAt) > 0) || !(since >= 0) || since >= gap;
+}
+
+// Is this text talking to me? Whole-word, case-insensitive, `@Name` included — so "Dana" and
+// "@dana," hit while "Danae" and "bandana" do not. The name comes from the roster (NAME_RE), but
+// it is escaped anyway: a name is data, and this builds a regex out of it.
+export function mentionsMe(text, name) {
+  const n = String(name ?? '').trim();
+  const t = String(text ?? '');
+  if (!n || !t) return false;
+  const esc = n.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+  return new RegExp(`(?:^|[^A-Za-z0-9_])@?${esc}(?![A-Za-z0-9_])`, 'i').test(t);
+}
+
+// ------------------------------- v0.17 P5: connection quality ----
+// T2's heartbeat already round-trips every 30 s; the daemon times the pong and tells that one
+// client its own number. This is the whole indicator: one dim figure, no graph, no history.
+// Stale is expressed in heartbeats, not seconds, so `--heartbeat` in a test does not make every
+// client look broken.
+export const RTT_STALE_AFTER = 2.5; // × the heartbeat interval
+export function rttText(net, now = 0, heartbeatMs = HEARTBEAT_MS) {
+  const at = Number(net?.at) || 0;
+  const rtt = Number(net?.rtt);
+  if (!at || !Number.isFinite(rtt)) return ''; // nothing measured yet: say nothing
+  const age = Number(now) - at;
+  const stale = Math.max(1000, (Number(heartbeatMs) || HEARTBEAT_MS) * RTT_STALE_AFTER);
+  return age > stale ? `⚠ stale ${Math.round(age / 1000)}s` : `~${Math.max(0, Math.round(rtt))}ms`;
+}
+
+// ------------------------------- v0.17 P6: slash-command autocomplete ----
+// jam's own commands only. claude's are unknowable client-side (they come from the host's
+// plugins, MCP servers and version), and guessing at them would be worse than showing nothing.
+// A space ends the list: from there on the words are arguments, not a command name.
+export const COMMAND_HINTS_MAX = 8;
+export function commandMatches(input, commands = JAM_COMMANDS, max = COMMAND_HINTS_MAX) {
+  const t = String(input ?? '');
+  if (!t.startsWith('/') || /\s/.test(t)) return [];
+  const q = t.toLowerCase();
+  const hits = commands.filter((c) => c.startsWith(q));
+  // Nothing to suggest once what is typed IS the only command it can be.
+  if (hits.length === 1 && hits[0] === q) return [];
+  return hits.slice(0, max);
 }
 
 export function buildSettings(hooksPath) {
