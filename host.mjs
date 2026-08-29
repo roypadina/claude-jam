@@ -379,8 +379,10 @@ function writeSystemPrompt() {
     console.log(`could not write ${file} (${e.message}) — the contract stays in the hook`);
     return null;
   }
-  // A claude that answers neither way inside the timeout counts as "no": the fallback works.
-  const probe = spawnSync(opts.claude, systemPromptProbeArgs(file), { encoding: 'utf8', timeout: 8000 });
+  // Option parsing is instant (commander refuses before it does anything), so a binary still
+  // thinking after 3s is one that does NOT refuse unknown flags — it is starting up. Killing it
+  // and reading that as "no" is both the safe answer and the fast one: the fallback always works.
+  const probe = spawnSync(opts.claude, systemPromptProbeArgs(file), { encoding: 'utf8', timeout: 3000 });
   const said = `${probe.stdout || ''}${probe.stderr || ''}`.trim();
   const ok = !probe.error && systemPromptSupported(said);
   try {
