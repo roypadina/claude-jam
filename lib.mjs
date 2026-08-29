@@ -335,6 +335,18 @@ export function parseClientLine(line) {
     return /^[1-9]$/.test(rest) ? { kind: 'perm', choice: Number(rest) }
       : { kind: 'error', text: 'usage: /answer (list the options) | /answer <1-9>' };
   }
+  // v0.22B: invite links — mint one, list them, take one back. Host-only (the daemon enforces
+  // it): a link is a credential, and minting one is admitting somebody in advance.
+  if (t === '/invites') return { kind: 'invites' };
+  if (t === '/invite' || t.startsWith('/invite ')) {
+    const v = parseInviteCommand(t.slice(7));
+    return v.ok ? { kind: 'invite', ...v } : { kind: 'error', text: v.error };
+  }
+  // v0.22C: remove somebody who is already in — the one thing /deny never could do.
+  if (t === '/kick' || t.startsWith('/kick ')) {
+    const v = parseKickCommand(t.slice(5));
+    return v.ok ? { kind: 'kick', name: v.name, revoke: v.revoke } : { kind: 'error', text: v.error };
+  }
   // v0.18-4: end the whole jam — the daemon, the TUI, the tmux session, everyone's client. The
   // one jam command that asks twice (see confirmYes), and host-only both here and in the daemon.
   if (t === '/end') return { kind: 'end' };
@@ -376,7 +388,9 @@ export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror',
   // v0.17 P2: the permission relay — a guest asks, the host allows or denies.
   '/answer', '/allow-perm', '/deny-perm',
   // v0.18-4: the host ends the jam for everybody.
-  '/end'];
+  '/end',
+  // v0.22B/C: invite links, and removing somebody who is already in.
+  '/invite', '/invites', '/kick'];
 
 // Session-lifecycle commands: they end or wipe the conversation for EVERYBODY, so they stay
 // with the host. Hard list, enforced server-side — no guest request, no `/allow-cmd always`
@@ -1822,6 +1836,355 @@ export function sessionsJson(rows = [], now = 0) {
     state_dir: r.dir ?? null,
     cleanable: cleanable(r),
   }));
+}
+
+// ------------------------------- v0.22B: invite links ----
+// A link is the guest's WHOLE command: `claude-jam join cjam1_…` — no name to type, no token to
+// paste, no host to wake up for an approval. So the link is a credential, and everything here is
+// written as one: the daemon stores only a HASH of the secret, the record is name-bound, expiring
+// and individually revocable, and every rejection has its own reason instead of a shrug.
+//
+// Format: `cjam1_<base64url(json)>`, json = {v, jam, name, secret, ws:[…], exp}. The version
+// lives in the PREFIX as well as in the payload, so a future format is a clean "update
+// claude-jam" instead of a JSON parse error — and a v2 link cannot be silently read as a v1 one.
+export const INVITE_V = 1;
+export const INVITE_PREFIX = `cjam${INVITE_V}_`;
+// Any version, so a cjam2_ link is recognised as an invite and refused as a version, not
+// dismissed as gibberish.
+export const INVITE_LINK_RE = /^cjam(\d{1,3})_([A-Za-z0-9_-]{8,4096})$/;
+export const INVITE_SECRET_LEN = 24;
+export const INVITE_SECRET_RE = /^[A-Za-z0-9_-]{16,64}$/;
+export const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // the default expiry: a day
+export const INVITE_TTL_MAX = 30 * 24 * 60 * 60 * 1000;
+export const INVITE_MAX_USES = 1000;
+export const INVITE_ADDR_MAX = 4;
+// Host and optional port only — an invite address becomes a WebSocket URL, never a path or a
+// query, and never something with a credential in it.
+export const INVITE_ADDR_RE = /^wss?:\/\/[A-Za-z0-9][A-Za-z0-9.-]{0,252}(?::\d{1,5})?$/;
+// v0.22B: how long the client waits for ONE address before trying the next.
+export const INVITE_CONNECT_MS = 3000;
+
+export function validInviteSecret(s) {
+  return typeof s === 'string' && INVITE_SECRET_RE.test(s);
+}
+
+// The address list, in the order it will be tried: whatever the caller put first. Invalid or
+// duplicate entries drop out rather than becoming a connect attempt that cannot work.
+export function inviteAddresses(list = []) {
+  const out = [];
+  for (const a of Array.isArray(list) ? list : []) {
+    const s = typeof a === 'string' ? a.trim() : '';
+    if (!INVITE_ADDR_RE.test(s) || out.includes(s)) continue;
+    out.push(s);
+    if (out.length >= INVITE_ADDR_MAX) break;
+  }
+  return out;
+}
+
+// Tunnel first, then LAN — the tunnel is the one that works from anywhere, and the LAN address is
+// what keeps a link alive after a cloudflared respawn changed the hostname (v0.22B's caveat).
+export function inviteWsAddresses({ tunnelHost = null, ip = null, port = 0 } = {}) {
+  return inviteAddresses([
+    tunnelHost ? `wss://${tunnelHost}` : null,
+    ip && port ? `ws://${ip}:${port}` : null,
+  ]);
+}
+
+// `exp` is epoch SECONDS in the link (it is a wire format, and seconds keep it short); every
+// record and every check inside jam uses epoch milliseconds like the rest of the codebase.
+export function encodeInvite({ jam = '', name, secret, ws = [], expires = 0 }) {
+  if (!validName(name)) throw new Error(`bad invite name: ${JSON.stringify(String(name).slice(0, 40))}`);
+  if (!validInviteSecret(secret)) throw new Error('bad invite secret: 16-64 chars of [A-Za-z0-9_-]');
+  const addrs = inviteAddresses(ws);
+  if (!addrs.length) throw new Error('an invite link needs at least one ws:// or wss:// address');
+  const exp = Math.floor(Math.max(0, Number(expires) || 0) / 1000);
+  const payload = { v: INVITE_V, jam: String(jam ?? '').slice(0, 12), name, secret, ws: addrs, exp };
+  return INVITE_PREFIX + Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+}
+
+// The guest's side. Every refusal carries its own `reason` so the client can say something true
+// instead of "could not join", and an EXPIRED link still hands back its decoded contents: the
+// addresses and the name are exactly what a fall-through knock needs.
+export function decodeInvite(link, now = Date.now()) {
+  const s = typeof link === 'string' ? link.trim() : '';
+  const m = INVITE_LINK_RE.exec(s);
+  if (!m) {
+    return { ok: false, reason: 'not-a-link',
+      error: 'that is not a claude-jam invite link — they look like cjam1_… (a ws:// URL works too)' };
+  }
+  const v = Number(m[1]);
+  if (v !== INVITE_V) {
+    return { ok: false, reason: 'bad-version',
+      error: `this is a cjam${v} invite link and this claude-jam speaks cjam${INVITE_V} — `
+        + 'update claude-jam, or ask the host for a ws:// URL' };
+  }
+  let o;
+  try { o = JSON.parse(Buffer.from(m[2], 'base64url').toString('utf8')); } catch {
+    return { ok: false, reason: 'bad-payload',
+      error: 'this invite link is damaged — it did not decode. Ask the host for a fresh one' };
+  }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) {
+    return { ok: false, reason: 'bad-payload', error: 'this invite link decoded to nothing usable' };
+  }
+  // The payload carries the version too: a hand-edited link that kept the cjam1_ prefix and
+  // changed `v` is a tampered link, not a v2 one.
+  if (o.v !== INVITE_V) {
+    return { ok: false, reason: 'bad-version',
+      error: `this invite link says it is format ${JSON.stringify(o.v)}, not ${INVITE_V} — ask the host for a fresh one` };
+  }
+  if (!validName(o.name)) {
+    return { ok: false, reason: 'bad-name', error: 'this invite link carries no usable name — ask the host for a fresh one' };
+  }
+  if (!validInviteSecret(o.secret)) {
+    return { ok: false, reason: 'bad-secret', error: 'this invite link carries no usable secret — ask the host for a fresh one' };
+  }
+  const ws = inviteAddresses(o.ws);
+  if (!ws.length) {
+    return { ok: false, reason: 'no-address', error: 'this invite link carries no address I can connect to' };
+  }
+  const invite = { v: INVITE_V, jam: typeof o.jam === 'string' ? o.jam.slice(0, 12) : '',
+    name: o.name, secret: o.secret, ws, exp: Math.floor(Number(o.exp) || 0) };
+  if (invite.exp && invite.exp * 1000 <= Number(now)) {
+    // Still usable for a knock: the addresses and the name are right, only the credential is old.
+    return { ok: false, reason: 'expired', invite,
+      error: `this invite for ${invite.name} expired ${new Date(invite.exp * 1000).toISOString().slice(0, 16).replace('T', ' ')}Z `
+        + '— connecting anyway, and knocking instead' };
+  }
+  return { ok: true, invite };
+}
+
+// The daemon never stores a secret, only its hash — so a state dir (or a stray backup of one)
+// cannot hand somebody a working link.
+export function inviteHash(secret) {
+  return createHash('sha256').update(String(secret ?? ''), 'utf8').digest('hex');
+}
+// Short handle for `/invite revoke <id>` and the listing. The hash's own first 8 hex chars: it
+// identifies a record without being a credential.
+export function inviteId(hash) { return String(hash ?? '').slice(0, 8); }
+
+// Two hex digests, compared without leaking where they first differ.
+export function hashEq(a, b) {
+  const x = Buffer.from(String(a ?? ''), 'utf8');
+  const y = Buffer.from(String(b ?? ''), 'utf8');
+  return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
+}
+
+// One stored invite. `maxUses: 0` is unlimited, which is the default on purpose: a guest whose
+// laptop slept reconnects, and a one-shot link would lock them out of the jam they are in.
+export function inviteRecord({ name, secret = null, hash = null, uses = 0, maxUses = 0,
+  expires = 0, revoked = false, createdAt = 0 } = {}) {
+  const h = hash || inviteHash(secret);
+  return {
+    id: inviteId(h),
+    hash: h,
+    name: String(name ?? ''),
+    uses: Math.max(0, Math.floor(Number(uses) || 0)),
+    maxUses: Math.max(0, Math.floor(Number(maxUses) || 0)),
+    expires: Math.max(0, Math.floor(Number(expires) || 0)),
+    revoked: revoked === true,
+    createdAt: Math.max(0, Math.floor(Number(createdAt) || 0)),
+  };
+}
+
+// What survives a restart, and what comes back off disk. A record that is not jam's own shape is
+// dropped rather than half-trusted — an invite is a credential, so "close enough" is not a thing.
+export function parseInvitesFile(text) {
+  let o;
+  try { o = JSON.parse(String(text ?? '')); } catch { return []; }
+  const list = Array.isArray(o) ? o : Array.isArray(o?.invites) ? o.invites : null;
+  if (!list) return [];
+  const out = [];
+  for (const r of list) {
+    if (!r || typeof r !== 'object') continue;
+    if (typeof r.hash !== 'string' || !/^[0-9a-f]{64}$/.test(r.hash)) continue;
+    if (!validName(r.name)) continue;
+    out.push(inviteRecord(r));
+  }
+  return out;
+}
+
+// THE admission decision for an invite. Five things have to hold, and each failure says which:
+// the secret is one we could have issued, it matches a record, that record is not revoked, not
+// expired, not used up — and nobody is already here under that name. Anything else falls through
+// to the knock path, which is the point: an invite is a shortcut past the approval, never past
+// the door.
+export function checkInvite(records, secret, { now = Date.now(), liveNames = [] } = {}) {
+  if (!validInviteSecret(secret)) {
+    return { ok: false, reason: 'malformed', why: 'that is not the shape of an invite secret I issue' };
+  }
+  const hash = inviteHash(secret);
+  const rec = (Array.isArray(records) ? records : []).find((r) => r && hashEq(r.hash, hash));
+  if (!rec) {
+    return { ok: false, reason: 'unknown',
+      why: 'this invite is not one of mine — the jam may have been restarted or the link re-issued' };
+  }
+  if (rec.revoked) return { ok: false, reason: 'revoked', rec, why: `the invite for ${rec.name} was revoked` };
+  if (rec.expires && rec.expires <= Number(now)) {
+    return { ok: false, reason: 'expired', rec, why: `the invite for ${rec.name} expired` };
+  }
+  if (rec.maxUses && rec.uses >= rec.maxUses) {
+    return { ok: false, reason: 'used-up', rec,
+      why: `the invite for ${rec.name} has been used ${rec.uses} of ${rec.maxUses} times` };
+  }
+  if (nameTaken(rec.name, liveNames)) {
+    return { ok: false, reason: 'name-taken', rec, why: `somebody is already here as ${rec.name}` };
+  }
+  return { ok: true, rec, name: rec.name };
+}
+
+// What a refused invite is told, and what the host sees in the log. One wording per reason, so a
+// guest can say "it says revoked" and the host knows exactly which of the five gates closed.
+export function inviteRefusal(reason, why = '') {
+  const tail = 'knocking instead — the host can still let you in';
+  const known = {
+    malformed: 'that invite link is not one I can read',
+    unknown: 'that invite is not one of this jam\'s',
+    revoked: 'that invite was revoked',
+    expired: 'that invite has expired',
+    'used-up': 'that invite has been used as many times as it was allowed',
+    'name-taken': 'somebody is already connected under that invite\'s name',
+  };
+  return `${known[reason] || 'that invite was refused'}${why ? ` (${why})` : ''} — ${tail}`;
+}
+
+// `/invite revoke <Name|id>` and `claude-jam invite revoke …`. An id matches exactly, a name
+// matches every live link issued to that person — revoking "Yossi" takes back Yossi's links, all
+// of them, which is what somebody typing that means.
+export function resolveInvites(records, target) {
+  const t = typeof target === 'string' ? target.trim() : '';
+  if (!t) return { ok: false, why: 'name an invite: /invite revoke <Name|id>' };
+  const list = (Array.isArray(records) ? records : []).filter((r) => r && !r.revoked);
+  const byId = list.filter((r) => String(r.id).toLowerCase() === t.toLowerCase());
+  if (byId.length) return { ok: true, hits: byId };
+  const byName = list.filter((r) => String(r.name).toLowerCase() === t.toLowerCase());
+  if (byName.length) return { ok: true, hits: byName };
+  return { ok: false, why: `no live invite matches "${t}" — /invites lists them` };
+}
+
+// `2h left` / `expired` / `no expiry`, for the listing.
+export function inviteLeft(expires, now = Date.now()) {
+  const e = Math.max(0, Math.floor(Number(expires) || 0));
+  if (!e) return 'no expiry';
+  const left = e - Number(now);
+  return left <= 0 ? 'expired' : `${uptimeText(left)} left`;
+}
+
+export function inviteState(rec, now = Date.now()) {
+  if (!rec) return 'gone';
+  if (rec.revoked) return 'revoked';
+  if (rec.expires && rec.expires <= Number(now)) return 'expired';
+  if (rec.maxUses && rec.uses >= rec.maxUses) return 'used-up';
+  return 'live';
+}
+
+// `/invites` and `claude-jam invites`. Never the secret and never the link — a listing is read in
+// a shared terminal, and the link is the credential. Re-mint to hand one out again.
+export function invitesReport(records = [], now = Date.now()) {
+  const list = Array.isArray(records) ? records : [];
+  if (!list.length) return 'no invite links yet — /invite <Name> mints one';
+  const rows = list.map((r) => {
+    const used = r.maxUses ? `${r.uses}/${r.maxUses} uses` : `${r.uses} use${r.uses === 1 ? '' : 's'}`;
+    return `  ${r.id}  ${r.name}  ${inviteState(r, now)}  ${used}  ${inviteLeft(r.expires, now)}`;
+  });
+  return [`${list.length} invite link(s) — id, name, state, uses, expiry:`, ...rows,
+    '  (the links themselves are never printed twice: /invite <Name> mints a new one)'].join('\n');
+}
+
+// What the host is shown the moment a link exists: the guest's whole command, on its own line, so
+// it can be selected and sent as one thing.
+export function inviteMintedLines(rec, link, clientCmd = 'node client.mjs', now = Date.now()) {
+  return [
+    `invite for ${rec.name} (${rec.id}) — ${rec.maxUses ? `${rec.maxUses} use(s)` : 'multi-use'}, ${inviteLeft(rec.expires, now)}:`,
+    `${clientCmd} ${link}`,
+    'that link is a password: it joins as that name with no approval. Send it privately, '
+      + `and /invite revoke ${rec.name} when you are done.`,
+  ];
+}
+
+// `30m`, `24h`, `7d`, `90s`, or a bare number of hours-less seconds… no: a bare number is
+// AMBIGUOUS, so it is refused. null = "I did not understand that", never a silent default.
+export const DURATION_RE = /^(\d{1,6})([smhd])$/i;
+export function parseDuration(text) {
+  const m = DURATION_RE.exec(String(text ?? '').trim());
+  if (!m) return null;
+  const n = Number(m[1]);
+  const unit = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2].toLowerCase()];
+  const ms = n * unit;
+  return ms > 0 && ms <= INVITE_TTL_MAX ? ms : null;
+}
+
+// `/invite …` in the client and `claude-jam invite …` on the command line parse identically, so
+// the two surfaces cannot drift. Returns the op the daemon is asked for, or one usage error.
+export const INVITE_USAGE = 'usage: /invite <Name> [--uses N] [--expires 24h] | '
+  + '/invite revoke <Name|id> | /invites';
+export function parseInviteCommand(rest) {
+  const words = String(rest ?? '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return { ok: false, error: INVITE_USAGE };
+  const head = words[0].toLowerCase();
+  if (head === 'revoke') {
+    const target = words.slice(1).join(' ');
+    return target ? { ok: true, op: 'revoke', target } : { ok: false, error: 'usage: /invite revoke <Name|id>' };
+  }
+  if (head === 'list') return { ok: true, op: 'list' };
+  const flagAt = words.findIndex((w) => w.startsWith('--'));
+  const name = (flagAt < 0 ? words : words.slice(0, flagAt)).join(' ');
+  if (!validName(name)) {
+    return { ok: false, error: `${JSON.stringify(name)} is not a name I can invite — letters, `
+      + 'digits, space, _ or -, up to 24 characters' };
+  }
+  let maxUses = 0;
+  let ttl = INVITE_TTL_MS;
+  for (let i = flagAt < 0 ? words.length : flagAt; i < words.length; i += 2) {
+    const f = words[i];
+    const v = words[i + 1];
+    if (f === '--uses') {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > INVITE_MAX_USES) {
+        return { ok: false, error: `--uses wants a whole number from 1 to ${INVITE_MAX_USES}, got ${JSON.stringify(String(v ?? ''))}` };
+      }
+      maxUses = n;
+    } else if (f === '--expires') {
+      const ms = parseDuration(v);
+      if (ms == null) return { ok: false, error: `--expires wants a duration like 30m, 24h or 7d, got ${JSON.stringify(String(v ?? ''))}` };
+      ttl = ms;
+    } else {
+      return { ok: false, error: `${JSON.stringify(f)} is not an option I know. ${INVITE_USAGE}` };
+    }
+  }
+  return { ok: true, op: 'new', name, maxUses, ttl };
+}
+
+// ------------------------------- v0.22C: /kick ----
+// The one thing `/deny` never could do: remove somebody who is already in. 4406 is inside the
+// 4400-4429 band every client already treats as final, so a kicked guest leaves and does not
+// spend the next ten minutes reconnecting.
+export const KICK_CODE = 4406;
+export function resolveKick(name, liveNames = [], self = null) {
+  const asked = typeof name === 'string' ? name.trim() : '';
+  if (!asked) return { ok: false, why: 'usage: /kick <name> [revoke]' };
+  if (self && asked.toLowerCase() === String(self).toLowerCase()) {
+    return { ok: false, why: 'you cannot kick yourself — /quit closes your own client' };
+  }
+  const hit = (Array.isArray(liveNames) ? liveNames : []).find((n) => String(n).toLowerCase() === asked.toLowerCase());
+  if (!hit) return { ok: false, why: `nobody here is called "${asked}" — /who lists who is` };
+  return { ok: true, name: hit };
+}
+
+// `/kick Yossi` / `/kick Yossi revoke`. The trailing word is the one-shot form of the offer the
+// client makes afterwards, so a script (and a smoke) needs no interactive answer.
+export function parseKickCommand(rest) {
+  const words = String(rest ?? '').trim().split(/\s+/).filter(Boolean);
+  const revoke = words.at(-1)?.toLowerCase() === 'revoke';
+  const name = (revoke ? words.slice(0, -1) : words).join(' ');
+  return name ? { ok: true, name, revoke } : { ok: false, error: 'usage: /kick <name> [revoke]' };
+}
+
+// After a kick that landed: the offer to take their way back in with them. Only asked when the
+// person actually joined on an invite — a knock-approved guest has nothing to revoke.
+export function kickOffer(name, via) {
+  return via === 'invite'
+    ? `${name} is out. Also revoke their invite link so it cannot let them back in? [y/N]`
+    : `${name} is out. They joined by ${via || 'approval'}, so there is no link to revoke.`;
 }
 
 export function buildSettings(hooksPath) {
