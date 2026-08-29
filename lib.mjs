@@ -51,11 +51,14 @@ export function clientCommand(dirname, env = {}) {
   return String(dirname ?? '').includes('/Cellar/claude-jam/') ? 'jam join' : 'node client.mjs';
 }
 
-// The friend-facing invite command, or null while no token is set — then the host sees
-// NO_TOKEN_HINT instead and friends get in by knocking. `clientCmd` is clientCommand()'s answer;
+// The friend-facing invite command. Without a token the guest still needs the address — they
+// knock and the host accepts — so only the `--token` part is conditional; returning null here
+// left a knock-mode host with no URL to send at all. `clientCmd` is clientCommand()'s answer;
 // the default keeps every caller that does not care (most tests) on the from-source form.
 export function buildJoinLine(ip, port, token, clientCmd = 'node client.mjs') {
-  return token ? `${clientCmd} ws://${ip}:${port} --name <You> --token ${token}` : null;
+  if (!ip || !port) return null;
+  const base = `${clientCmd} ws://${ip}:${port} --name <You>`;
+  return token ? `${base} --token ${token}` : base;
 }
 
 // The read-only browser view of the real claude TUI (ttyd), basic auth baked into the URL
@@ -66,8 +69,10 @@ export function buildViewUrl(ip, port, key) {
 
 // Everything the host can hand out, same order and wording wherever it is shown: the
 // daemon log, the host client's welcome, `/join` and every `/token` reply.
-export function joinLines(join, view) {
-  const lines = [join ? `invite: ${join}` : NO_TOKEN_HINT];
+export function joinLines(join, view, token) {
+  const lines = join ? [`invite: ${join}`] : [];
+  // The address is useful with or without a token; the hint says which way the guest gets in.
+  if (!token) lines.push(NO_TOKEN_HINT);
   if (view) lines.push(`view: ${view}`);
   return lines;
 }
@@ -900,7 +905,9 @@ export function parseTunnelUrl(text) {
 // null until the tunnel has resolved a hostname, or (join only) while no token is set — same
 // "nothing to hand out while knocking" rule as the LAN line.
 export function buildTunnelJoinLine(host, token, clientCmd = 'node client.mjs') {
-  return host && token ? `${clientCmd} wss://${host} --name <You> --token ${token}` : null;
+  if (!host) return null;
+  const base = `${clientCmd} wss://${host} --name <You>`;
+  return token ? `${base} --token ${token}` : base;
 }
 export function buildTunnelViewUrl(host, key) {
   return host && key ? `https://jam:${key}@${host}` : null;
@@ -920,7 +927,8 @@ export function tunnelJoinLines(tunnelJoin, tunnelView) {
 // One helper for the daemon console, the host client's welcome, `/join` and every `/token`
 // reply, so those four can never drift — the client used to drop the tunnel lines entirely.
 export function inviteLines(info = {}) {
-  return [...tunnelJoinLines(info.tunnelJoin, info.tunnelView), ...joinLines(info.join, info.view)];
+  return [...tunnelJoinLines(info.tunnelJoin, info.tunnelView),
+    ...joinLines(info.join, info.view, info.token)];
 }
 
 // ------------------------------- v0.12 / v0.13: export and file transfers ----
