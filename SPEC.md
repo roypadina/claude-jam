@@ -1312,10 +1312,16 @@ handing an agent just the repo URL is enough to install and run the tool.
    `@jam-owned` marker → `@claude-jam-owned`, env vars stay `JAM_*` (internal, documented) to
    avoid a pointless churn, but every user-visible surface says claude-jam. Subcommands
    unchanged: `claude-jam host|join|sessions|end|clean`.
-   `jam` remains installed as a **thin alias** (same libexec entry) so muscle memory and the
-   existing tap install keep working; help output and docs use `claude-jam`, and the alias is
-   documented as such. (If the alias should go, that's a one-line formula change later.)
-   The formula installs both bins; CHANGELOG notes the rename.
+   **Roy re-confirmed 2026-08-29: the product is `claude-jam` everywhere — bin, package, app,
+   repo, tap, session names, docs.** The real executable becomes `claude-jam`; `jam` stays only
+   as a thin alias pointing at the same entry so existing muscle memory and installs do not
+   break, and it is absent from all help output and docs (mentioned once in the README as a
+   deprecated alias). The formula installs both bins. CHANGELOG notes the rename.
+   Also rename: default tmux session `jam` → `claude-jam`, socket `claude-jam-<port>` (already
+   right), `@jam-owned` → `@claude-jam-owned`, every printed attach line, every usage string,
+   every error/hint mentioning the command, the launcher's own name in `sessions`/`end`/`clean`
+   output, and the wiki/README/MANUAL prose. Internal `JAM_*` env vars stay (documented).
+   A test asserts no user-visible string emits a bare `jam ` command form.
 2. **Repo wiki** (`git@github-padina:roypadina/claude-jam.wiki.git`, already initialized with a
    Home page). Clone to `~/Code/Padina/claude-jam.wiki` (sibling, like AgentCliMenu.wiki) and
    build these pages, each short and task-shaped, cross-linked from Home:
