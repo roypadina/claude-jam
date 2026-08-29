@@ -43,11 +43,12 @@ const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 // smoke-replay's 7823/7825, smoke-perm's 7831, smoke-lifecycle's 7851-7855, smoke-invite's 7861.
 const PORT = 7871;
 const NAME = 'jamanswer';
-if (!NAME.startsWith('jamanswer')) throw new Error('the session name is this smoke\'s own or nothing');
+const INK = 'jamanswerink'; // a REAL ink client, to see what a human would see
+for (const n of [NAME, INK]) if (!n.startsWith('jamanswer')) throw new Error(`${n} is not this smoke's own name`);
 const SOCKET = `claude-jam-${PORT}`;
 const tmux = (...a) => spawnSync(TMUX, ['-L', SOCKET, ...a], { encoding: 'utf8' });
 // Only ever the one session name this script made up itself, one exact name.
-const killMine = (n) => { if (n === NAME) tmux('kill-session', '-t', `=${n}`); };
+const killMine = (n) => { if (n === NAME || n === INK) tmux('kill-session', '-t', `=${n}`); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let failed = 0;
@@ -244,6 +245,36 @@ try {
     eq(status(guest).waiting, false, 'the ⚠ clears when the picker does');
   });
 
+  await step('6c a REAL client shows the question and its options — in BOTH views', async () => {
+    // The spec's own wording: "a guest in transcript view must see it". So: a real ink client on
+    // a real pty, looked at in the mirror view and then in the transcript.
+    setMode('question-single');
+    await until('the question', () => status(guest)?.prompt?.kind === 'question', 12000);
+    killMine(INK);
+    tmux('new-session', '-d', '-s', INK, '-x', '110', '-y', '40', '-c', ROOT,
+      `${process.execPath} ${path.join(ROOT, 'client.mjs')} ws://127.0.0.1:${PORT} --name Ink --token ${TOKEN}`);
+    const paneOf = () => (tmux('capture-pane', '-p', '-t', INK).stdout || '');
+    for (const view of ['mirror (the default view)', 'transcript (F2)']) {
+      const seen = await until(`the question block in the ${view}`, () => {
+        const p = paneOf();
+        return /claude is asking: Do you prefer tabs or spaces/.test(p) && /1\. Tabs/.test(p) ? p : null;
+      }, 20000);
+      const rows = seen.split('\n').map((r) => r.replace(/\s+$/, ''));
+      const at = rows.findIndex((r) => /claude is asking:/.test(r));
+      console.log(`      ${view}:`);
+      for (const r of rows.slice(at, at + 8)) console.log(`        ${r}`);
+      ok(/answer it with \/answer <1-5>/.test(seen), 'and it says how to answer it');
+      ok(/the host types this one/.test(seen), 'and marks the free-text option');
+      // The input row must still be BELOW the block: a picker that pushed it off the bottom of
+      // the screen would be a poor way to ask somebody a question.
+      const inputAt = rows.findLastIndex((r) => /Ink\s*❯/.test(r));
+      ok(inputAt > at, `the input row is still under the block (block ${at}, input ${inputAt} of ${rows.length})`);
+      console.log(`        …input row at ${inputAt} of ${rows.length}, block at ${at}`);
+      if (view.startsWith('mirror')) tmux('send-keys', '-t', INK, '-H', '1b', '4f', '51'); // F2
+    }
+    killMine(INK);
+  });
+
   await step('6b a question carries its text and its options to every client', async () => {
     setMode('question-single');
     await until('the question', () => status(guest)?.prompt?.kind === 'question', 12000);
@@ -346,6 +377,7 @@ try {
   console.error(`tui log tail:\n${tuiLog().split('\n').slice(-25).join('\n')}`);
   exitCode = 1;
 } finally {
+  killMine(INK);
   try { host.ws.close(); } catch { /* already gone */ }
   try { guest.ws.close(); } catch { /* already gone */ }
   await sleep(300);
