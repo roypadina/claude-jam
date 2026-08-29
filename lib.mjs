@@ -2370,6 +2370,18 @@ export function buildSettings(hooksPath) {
 export const PASTE_PLACEHOLDER_RE = /\[pasted\s+text[^\]]{0,64}\]/i;
 export function hasPastePlaceholder(text) { return PASTE_PLACEHOLDER_RE.test(String(text ?? '')); }
 
+// The placeholder carries a COUNT, and the count is the only on-screen evidence that a paste
+// arrived whole. Measured on 2.1.251: the number is the payload's NEWLINE count — a 19-line file
+// (18 newlines) shows `+18 lines`, and `a\nb\nc\n` (3 newlines) shows `+3 lines`. Several pastes
+// into one box leave several placeholders, so the counts sum.
+const PASTE_COUNT_RE = /\[pasted\s+text[^\]]*?\+(\d+)\s+lines?\]/gi;
+export function pastedLines(text) {
+  const re = new RegExp(PASTE_COUNT_RE.source, 'gi');
+  let n = null;
+  for (let m = re.exec(String(text ?? '')); m; m = re.exec(String(text ?? ''))) n = (n ?? 0) + Number(m[1]);
+  return n; // null = no placeholder carried a number we could read
+}
+
 // The input box's own rows — NOT "the last three rows of the pane". Measured on 2.1.251 the last
 // three rows are chrome (`[claude2] | Haiku 4.5 | …`, `⏸ manual mode on`, the corner hint) and the
 // box sits four rows further up; worse, that chrome changes on its own (`⏸ manual mode on · ← for
@@ -2401,15 +2413,25 @@ export function inputAreaRows(screen) {
 // on screen and the live failure was believing only the first one. Returns WHICH one said yes
 // (the daemon logs it, so a future rendering change shows up as "always 'changed'" rather than as
 // somebody's lost message), or null for "not yet".
-export function injectLanded({ probe = '', before = null, after = '' } = {}) {
-  const tail = String(after ?? '').split('\n').slice(-15).join('\n');
-  if (probe && tail.includes(probe)) return 'probe';
+export function injectLanded({ probe = '', before = null, after = '', lines = null } = {}) {
+  const tailOf = (s) => String(s ?? '').split('\n').slice(-15).join('\n');
   const box = inputAreaRows(after);
-  if (box.some(hasPastePlaceholder)) return 'placeholder';
+  const was = before == null ? null : inputAreaRows(before);
+  // A pty drops what a busy TUI does not read in time — measured: an 8 KB `paste-buffer` into a
+  // mid-redraw pane arrived 4.2 KB short, silently. So when the box tells us how many lines it
+  // took, that is the rule: a count short of what was sent is NOT a landing, it is a truncation,
+  // and failing closed here is what turns a silently mangled message into a kept one.
+  const shown = pastedLines(box.join('\n'));
+  if (lines != null && shown != null) return shown === lines ? 'placeholder' : null;
+  // A rule is evidence only if it was NOT already true before the paste. Without that, the
+  // second chunk of a chunked payload "lands" on the first chunk's placeholder, and a repeated
+  // message lands on its own stale echo.
+  if (probe && tailOf(after).includes(probe) && !(before != null && tailOf(before).includes(probe))) return 'probe';
+  if (box.some(hasPastePlaceholder) && !(was && was.some(hasPastePlaceholder))) return 'placeholder';
   // Weakest, and last: the box is not what it was immediately before `paste-buffer`. It is the
   // only rule that survives a rendering jam has never seen, and it is safe to be wrong about
   // because v0.30's other half means the payload is on disk either way.
-  if (before != null && inputAreaRows(before).join('\n') !== box.join('\n')) return 'changed';
+  if (was && was.join('\n') !== box.join('\n')) return 'changed';
   return null;
 }
 
@@ -2428,7 +2450,13 @@ export const CLEAR_TRIES = 6;
 // Concatenating the chunks is the payload byte for byte: the newline stays with the line it ends,
 // so a boundary can never glue two of the sender's lines together. A single line longer than a
 // whole chunk is cut, because nothing else can cut it.
-export const PASTE_CHUNK_MAX = 8 * 1024;
+// The spec said ~8 KB. Measured, it cannot be: a pty hands the TUI 1022 bytes at a time, and an
+// 8 KB `paste-buffer` into a pane that is mid-redraw loses whatever the input queue could not hold
+// — 4.2 KB of a 8 KB chunk, with no error anywhere. 2 KB is comfortably inside the queue, and the
+// per-chunk verification below is what catches it if a slower machine still comes up short.
+// ponytail: measured on macOS 15 / tmux 3.7c. If a payload ever starts arriving short again, this
+// number is the knob, and the line-count check is what will tell you.
+export const PASTE_CHUNK_MAX = 2 * 1024;
 export function chunkPayload(text, max = PASTE_CHUNK_MAX) {
   const s = String(text ?? '');
   const cap = Math.max(1, Math.trunc(max) || PASTE_CHUNK_MAX);
