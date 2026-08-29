@@ -30,7 +30,10 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   BELL, bellAllowed, mentionsMe, rttText, commandMatches, COMMAND_HINTS_MAX,
   // v0.18: the host ended the jam — one line, exit 0, and no reconnect at a daemon that is
   // deliberately gone. /end is the other half, and it asks before it sends.
-  endingNotice, confirmYes } from './lib.mjs';
+  endingNotice, confirmYes,
+  // v0.22B/C: invite links (the address list a link carries, and what a minted one prints) and
+  // the offer that follows a kick.
+  INVITE_CONNECT_MS, inviteMintedLines, kickOffer } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
@@ -41,6 +44,12 @@ const flag = (n) => { const i = argv.indexOf(`--${n}`); return i < 0 ? undefined
 const NAME = flag('name');
 const TOKEN = flag('token');
 const IS_HOST = argv.includes('--host');
+// v0.22B: what an invite link unpacked into (client.mjs did the decoding). The secret rides in
+// the hello; the address list is tried in order — tunnel first, LAN second — with
+// INVITE_CONNECT_MS for each, because the tunnel address is the one that can be dead.
+const INVITE = flag('invite');
+const URLS = (flag('jam-addresses') || '').split(',').map((s) => s.trim()).filter(Boolean);
+let addr = 0;
 // No --token is normal now: the host may run knock-only, and then you wait to be accepted.
 if (!url || !NAME) {
   console.error('usage: jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host] [--basic]');
@@ -296,7 +305,9 @@ function render(ev) {
     case 'roster': {
       store.roster = ev.roster;
       store.labelW = labelWidth(ev.roster); // the column follows the longest name in the room
-      if (ev.joined) sys(`${ev.joined} joined`);
+      // v0.22B: an invite join has no knock to announce it, so the roster line is the only
+      // arrival anybody sees — it says HOW they got in.
+      if (ev.joined) sys(`${ev.joined} joined${ev.via && ev.via !== 'token' ? ` (${ev.via})` : ''}`);
       if (ev.left) sys(`${ev.left} left`);
       return touch();
     }
@@ -403,6 +414,31 @@ function render(ev) {
       if (!store.pending.length) { store.armed = true; store.hiddenKey = null; }
       return touch();
     }
+    // v0.22B: a minted link (to the host who asked for it, never broadcast) or the reason an
+    // invite was refused — which is followed by an ordinary knock, so this is information, not
+    // the end of the road.
+    case 'invite': {
+      if (ev.state === 'refused') return err(ev.text);
+      if (ev.state !== 'minted' || !ev.link) return;
+      toTranscript++; // the link belongs on screen even while the live TUI fills it
+      for (const l of inviteMintedLines(ev.invite || {}, ev.link, 'jam join')) {
+        emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
+      }
+      toTranscript--;
+      return;
+    }
+    // v0.22C: the host removed somebody. The victim gets this line, then a 4406 close (final —
+    // the close handler above prints the reason and exits). The host gets the `kick` frame and,
+    // if that person came in on a link, the offer to take the link back with them.
+    case 'kicked': return err(`${ev.by || 'the host'} removed you from the jam`);
+    case 'kick': {
+      if (ev.state !== 'done') return;
+      if (ev.via === 'invite' && !ev.revoked) {
+        store.confirm = { kind: 'revoke', name: ev.name };
+        return sys(kickOffer(ev.name, ev.via));
+      }
+      return sys(kickOffer(ev.name, ev.via));
+    }
     // v0.18-7: the host ended the jam. One line, exit 0, and no reconnect — there is nothing
     // left to reconnect to, and an orderly end is not a failure.
     case 'ending': {
@@ -418,16 +454,32 @@ function render(ev) {
 }
 
 // ------------------------------------------------------------------ socket ----
+// Which address this dial is aimed at. One entry (a plain ws:// URL) is the ordinary case; an
+// invite link can carry several, and then the list is walked once, fast, before any backoff.
+const target = () => (URLS.length ? URLS[addr % URLS.length] : url);
+
 function connect() {
-  ws = new WebSocket(url);
+  const at = target();
+  ws = new WebSocket(at);
+  let opened = false;
+  // A dead tunnel hostname does not refuse a connection, it hangs — so the only thing that moves
+  // us to the next address is a clock. Only worth arming when there IS a next address.
+  const dial = URLS.length > 1
+    ? setTimeout(() => { if (!opened) { try { ws.close(); } catch { /* already gone */ } } }, INVITE_CONNECT_MS)
+    : null;
+  dial?.unref?.();
   ws.addEventListener('open', () => {
+    opened = true;
+    if (dial) clearTimeout(dial);
     backoff = 1000;
     attempts = 0;
     // `mirror` in the hello subscribes from the very first frame — including through a knock,
     // where the welcome only comes when the host accepts. A reconnect repeats it: the daemon
     // knows nothing about the socket that died.
+    // v0.22B: `invite` is checked BEFORE the token, and admits under the name the host bound to
+    // the link. A refused invite is told to us and then knocks, so it always rides along.
     ws.send(JSON.stringify({
-      t: 'hello', name: NAME, token: TOKEN, host: IS_HOST || undefined, mirror: store.mirror,
+      t: 'hello', name: NAME, token: TOKEN, invite: INVITE, host: IS_HOST || undefined, mirror: store.mirror,
     }));
   });
   ws.addEventListener('message', (m) => {
@@ -463,17 +515,25 @@ function connect() {
     render(ev);
   });
   ws.addEventListener('close', (e) => {
-    // 4400/4401 bad name or token, 4403 denied, 4408 knock expired, 4409 name taken,
-    // 4429 too many knocks — none of them get better by retrying.
+    if (dial) clearTimeout(dial);
+    // 4400/4401 bad name or token, 4403 denied, 4406 removed by the host, 4408 knock expired,
+    // 4409 name taken, 4429 too many knocks — none of them get better by retrying.
     // `leave` is deferred a tick, so this must return: otherwise the retry below is scheduled
     // and a "disconnected, retrying" line lands on top of the rejection first.
     if (e.code >= 4400 && e.code <= 4429) return leave(1, `! rejected: ${e.reason || 'auth'}`);
     // The jam ended on purpose: this close is the expected end of it, not a fault.
     if (ending) return;
     store.status = { busy: false, waiting: false }; // nothing is known while the socket is down
-    sys(reconnectMessage(++attempts, backoff));
-    setTimeout(connect, backoff);
-    backoff = Math.min(backoff * 2, 10000);
+    attempts++;
+    // v0.22B: while the invite's address list has not been walked once, the next address is tried
+    // straight away — a dead tunnel must not cost a backoff before the LAN address gets a turn.
+    // Once one has opened, every later reconnect stays on the address that worked.
+    const more = !opened && attempts < URLS.length;
+    if (more) addr++;
+    const wait = more ? 0 : backoff;
+    sys(more ? `no answer from ${at} — trying ${target()}` : reconnectMessage(attempts, wait));
+    setTimeout(connect, wait);
+    if (!more) backoff = Math.min(backoff * 2, 10000);
   });
   ws.addEventListener('error', () => { /* close handler does the retry */ });
 }
@@ -699,11 +759,19 @@ function sendUpload(ev) {
 // continuation buffer: a trailing `\` collects, the first line without one flushes.
 function submit(raw) {
   // v0.18-4: /end asked "really end this jam for everyone?", and this is the answer — taken
-  // before anything is parsed, so a bare `y` can never become a message to claude.
-  if (store.confirm === 'end') {
+  // before anything is parsed, so a bare `y` can never become a message to claude. v0.22C adds
+  // the second question of the same shape: revoke the link of the person you just kicked?
+  if (store.confirm) {
+    const q = store.confirm;
     store.confirm = null;
-    if (confirmYes(raw)) { sendMsg({ t: 'end' }); sys('ending the jam for everyone…'); }
-    else sys('nothing ended — the jam is still running');
+    const yes = confirmYes(raw);
+    if (q.kind === 'end') {
+      if (yes) { sendMsg({ t: 'end' }); sys('ending the jam for everyone…'); }
+      else sys('nothing ended — the jam is still running');
+    } else if (q.kind === 'revoke') {
+      if (yes) sendMsg({ t: 'invite', op: 'revoke', target: q.name });
+      else sys(`${q.name}'s invite link still works — /invite revoke ${q.name} takes it back later`);
+    }
     return touch();
   }
   const a = parseClientLine(raw);
@@ -792,7 +860,23 @@ function submit(raw) {
     // this is the one jam command that takes the session away from everybody.
     case 'end':
       if (!IS_HOST) err('host only');
-      else { store.confirm = 'end'; sys('really end this jam for everyone? [y/N]'); }
+      else { store.confirm = { kind: 'end' }; sys('really end this jam for everyone? [y/N]'); }
+      break;
+    // v0.22B: mint a link, list them, take one back. Host-only here and in the daemon — a link
+    // joins as that name with no approval, so it is a credential this client hands out.
+    case 'invite':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'invite', op: act.op, name: act.name, maxUses: act.maxUses, ttl: act.ttl, target: act.target });
+      break;
+    case 'invites':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'invites' });
+      break;
+    // v0.22C: remove somebody who is already in. The daemon closes their socket; the offer to
+    // revoke their link comes back on the `kick` frame.
+    case 'kick':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'kick', name: act.name, revoke: act.revoke });
       break;
     case 'quit': return leave(0);
     case 'error': err(act.text); break;

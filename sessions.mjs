@@ -23,7 +23,10 @@ import path from 'node:path';
 import readline from 'node:readline';
 import net from 'node:net';
 import { OWNED_OPTION, SESSION_FILE, portFromStateDir, parseSessionJson, verifyOwned, classifyJam,
-  cleanable, resolveTarget, pickNumber, confirmYes, uptimeText, sessionsTable, sessionsJson } from './lib.mjs';
+  cleanable, resolveTarget, pickNumber, confirmYes, uptimeText, sessionsTable, sessionsJson,
+  // v0.22B: the invite CLI is this file too — it needs exactly what `jam end` needs (find the
+  // jam, POST to it on loopback with the secret out of its 0700 state dir).
+  parseInviteCommand, invitesReport, inviteMintedLines, inviteRecord } from './lib.mjs';
 
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 export const tmux = (...a) => spawnSync(TMUX, a, { encoding: 'utf8' });
@@ -118,6 +121,23 @@ export async function postEnd(port, secret, ms = 3000) {
     });
     const j = await r.json().catch(() => null);
     return j?.ok ? { ok: true } : { ok: false, why: `HTTP ${r.status}${j?.error ? ` ${j.error}` : ''}` };
+  } catch (e) { return { ok: false, why: e.message }; }
+}
+
+// v0.22B: `jam invite|invites|invite revoke` asking the daemon to mint, list or revoke. Same
+// gate as POST /end — loopback plus the hook secret, which only a reader of the 0700 state dir
+// has — and the same inviteOp() a `/invite` frame from the client goes through.
+export async function postInvite(port, secret, body, ms = 5000) {
+  if (!secret) return { ok: false, why: 'no hook secret in session.json' };
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/invite`, {
+      method: 'POST',
+      headers: { 'x-jam-secret': secret, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(ms),
+    });
+    const j = await r.json().catch(() => null);
+    return j?.ok ? { ok: true, ...j } : { ok: false, why: j?.error || `HTTP ${r.status}` };
   } catch (e) { return { ok: false, why: e.message }; }
 }
 
@@ -216,7 +236,10 @@ async function askLine(prompt) {
 function usage() {
   console.error('usage: jam sessions [--json]      list jam\'s own tmux sessions and state dirs\n'
     + '       jam end [name] [--all]     end one jam (or every one, after confirming)\n'
-    + '       jam clean [--yes]          remove orphan state dirs and nothing else');
+    + '       jam clean [--yes]          remove orphan state dirs and nothing else\n'
+    + '       jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]   mint one link\n'
+    + '       jam invites [--json] [--jam NAME]                           list them\n'
+    + '       jam invite revoke <Name|id> [--jam NAME]                    take one back');
   return 2;
 }
 
@@ -296,9 +319,53 @@ async function cmdClean(argv) {
   return bad ? 1 : 0;
 }
 
+// v0.22B: `jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]`, `jam invites [--json]`,
+// `jam invite revoke <Name|id>`. Everything the client's `/invite` does, from a shell — one
+// parser (parseInviteCommand) and one daemon endpoint, so the two surfaces cannot drift.
+async function cmdInvite(argv, forced = null) {
+  // `--jam <name>` picks which jam when several are running; it is not part of the invite syntax.
+  const jamAt = argv.indexOf('--jam');
+  const jamName = jamAt >= 0 ? argv[jamAt + 1] : null;
+  const json = argv.includes('--json');
+  const words = argv.filter((a, i) => i !== jamAt && i !== jamAt + 1 && a !== '--json');
+  const v = forced ? { ok: true, op: forced } : parseInviteCommand(words.join(' '));
+  if (!v.ok) { console.error(v.error); return 2; }
+
+  const rows = await listRows();
+  let target = resolveTarget(rows, jamName);
+  if (!target.ok && target.choices?.length && jamName == null) {
+    console.log(sessionsTable(rows, Date.now()));
+    const pick = pickNumber(await askLine(`which jam? [1-${target.choices.length}] `), target.choices);
+    if (!pick) { console.log('nothing done'); return 1; }
+    target = { ok: true, row: pick };
+  }
+  if (!target.ok) { console.error(target.why); return 1; }
+  const { info } = target.row;
+
+  const r = await postInvite(info.port, info.secret, v);
+  if (!r.ok) { console.error(`refused: ${r.why}`); return 1; }
+  if (v.op === 'list') {
+    if (json) console.log(JSON.stringify(r.invites || [], null, 2));
+    else console.log(r.report || invitesReport(r.invites || []));
+    return 0;
+  }
+  if (v.op === 'revoke') {
+    console.log(`revoked ${(r.revoked || []).length} invite link(s): `
+      + `${(r.revoked || []).map((h) => `${h.id} (${h.name})`).join(', ')}`);
+    return 0;
+  }
+  for (const l of inviteMintedLines(r.invite || inviteRecord({ name: v.name }), r.link, r.clientCmd || 'jam join')) {
+    console.log(l);
+  }
+  return 0;
+}
+
 // Only when this file IS the command being run — host.mjs imports it as a module.
 if (path.resolve(process.argv[1] || '') === path.resolve(new URL(import.meta.url).pathname)) {
   const [cmd, ...rest] = process.argv.slice(2);
-  const run = { list: cmdSessions, sessions: cmdSessions, end: cmdEnd, clean: cmdClean }[cmd];
+  const run = {
+    list: cmdSessions, sessions: cmdSessions, end: cmdEnd, clean: cmdClean,
+    invite: (a) => cmdInvite(a), invites: (a) => cmdInvite(a, 'list'),
+  }[cmd];
   process.exit(run ? await run(rest) : usage());
 }

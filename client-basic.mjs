@@ -7,7 +7,10 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   BELL, bellAllowed, mentionsMe, rttText,
   // v0.18: the host ended the jam — one line, exit 0, and no reconnect at a daemon that is
   // deliberately gone. /end is the other half, and it asks before it sends.
-  endingNotice, confirmYes } from './lib.mjs';
+  endingNotice, confirmYes,
+  // v0.22B/C: invite links (the address list a link carries, what a minted one prints) and the
+  // offer that follows a kick.
+  INVITE_CONNECT_MS, inviteMintedLines, kickOffer } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const argv = process.argv.slice(2);
@@ -16,9 +19,15 @@ const flag = (n) => { const i = argv.indexOf(`--${n}`); return i < 0 ? undefined
 const NAME = flag('name');
 const TOKEN = flag('token');
 const IS_HOST = argv.includes('--host');
+// v0.22B: what an invite link unpacked into (client.mjs decoded it). The secret rides in the
+// hello; the address list is tried in order, tunnel first, with INVITE_CONNECT_MS each.
+const INVITE = flag('invite');
+const URLS = (flag('jam-addresses') || '').split(',').map((s) => s.trim()).filter(Boolean);
+let addr = 0;
 // No --token is normal now: the host may run knock-only, and then you wait to be accepted.
 if (!url || !NAME) {
-  console.error('usage: jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host]');
+  console.error('usage: jam join <invite-link>\n'
+    + '       jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host]');
   process.exit(2);
 }
 
@@ -179,7 +188,8 @@ function render(ev) {
     case 'roster': {
       roster = ev.roster;
       labelW = labelWidth(roster); // the column follows the longest name in the room
-      if (ev.joined) sys(`${ev.joined} joined`);
+      // v0.22B: an invite join has no knock to announce it, so the roster line says HOW.
+      if (ev.joined) sys(`${ev.joined} joined${ev.via && ev.via !== 'token' ? ` (${ev.via})` : ''}`);
       if (ev.left) sys(`${ev.left} left`);
       return;
     }
@@ -233,6 +243,23 @@ function render(ev) {
       if (session) Object.assign(session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin, tunnelView: ev.tunnelView });
       return logJoin();
     }
+    // v0.22B: a minted link (only ever to the host who asked) or why an invite was refused —
+    // which is followed by an ordinary knock, so it is information, not the end of the road.
+    case 'invite': {
+      if (ev.state === 'refused') return err(ev.text);
+      if (ev.state !== 'minted' || !ev.link) return;
+      for (const l of inviteMintedLines(ev.invite || {}, ev.link, 'jam join')) {
+        emit({ glyph: '*', text: l, textColor: C.dim });
+      }
+      return;
+    }
+    // v0.22C: the host removed somebody. The victim gets this, then a 4406 close.
+    case 'kicked': return err(`${ev.by || 'the host'} removed you from the jam`);
+    case 'kick': {
+      if (ev.state !== 'done') return;
+      if (ev.via === 'invite' && !ev.revoked) confirming = { kind: 'revoke', name: ev.name };
+      return sys(kickOffer(ev.name, ev.via));
+    }
     // v0.18-7: the host ended the jam. Print the one line and leave with 0 — there is
     // nothing to reconnect to, and an orderly end is not a failure.
     case 'ending': {
@@ -248,12 +275,27 @@ function render(ev) {
   }
 }
 
+// Which address this dial is aimed at: one plain ws:// URL normally, several when an invite link
+// carried a list (tunnel first, LAN second).
+const target = () => (URLS.length ? URLS[addr % URLS.length] : url);
+
 function connect() {
-  ws = new WebSocket(url);
+  const at = target();
+  ws = new WebSocket(at);
+  let opened = false;
+  // A dead tunnel hostname hangs rather than refusing, so only a clock moves us on.
+  const dial = URLS.length > 1
+    ? setTimeout(() => { if (!opened) { try { ws.close(); } catch { /* already gone */ } } }, INVITE_CONNECT_MS)
+    : null;
+  dial?.unref?.();
   ws.addEventListener('open', () => {
+    opened = true;
+    if (dial) clearTimeout(dial);
     backoff = 1000;
     attempts = 0;
-    ws.send(JSON.stringify({ t: 'hello', name: NAME, token: TOKEN, host: IS_HOST || undefined }));
+    // v0.22B: `invite` is checked before the token and admits under the name the host bound to
+    // the link; a refused one is explained and then knocks, so it always rides along.
+    ws.send(JSON.stringify({ t: 'hello', name: NAME, token: TOKEN, invite: INVITE, host: IS_HOST || undefined }));
   });
   ws.addEventListener('message', (m) => {
     let ev;
@@ -280,8 +322,9 @@ function connect() {
     render(ev);
   });
   ws.addEventListener('close', (e) => {
-    // 4400/4401 bad name or token, 4403 denied, 4408 knock expired, 4409 name taken,
-    // 4429 too many knocks — none of them get better by retrying.
+    if (dial) clearTimeout(dial);
+    // 4400/4401 bad name or token, 4403 denied, 4406 removed by the host, 4408 knock expired,
+    // 4409 name taken, 4429 too many knocks — none of them get better by retrying.
     if (e.code >= 4400 && e.code <= 4429) {
       emit({ glyph: '!', glyphColor: C.err, text: `rejected: ${e.reason || 'auth'}`, textColor: C.err });
       process.exit(1);
@@ -289,9 +332,14 @@ function connect() {
     // The jam ended on purpose: the socket closing is the expected end of it, not a fault.
     if (ending) return;
     setSpinner(false); // nothing is known about the turn while the socket is down
-    sys(reconnectMessage(++attempts, backoff));
-    setTimeout(connect, backoff);
-    backoff = Math.min(backoff * 2, 10000);
+    attempts++;
+    // v0.22B: walk the invite's address list once, fast, before any backoff.
+    const more = !opened && attempts < URLS.length;
+    if (more) addr++;
+    const wait = more ? 0 : backoff;
+    sys(more ? `no answer from ${at} — trying ${target()}` : reconnectMessage(attempts, wait));
+    setTimeout(connect, wait);
+    if (!more) backoff = Math.min(backoff * 2, 10000);
   });
   ws.addEventListener('error', () => { /* close handler does the retry */ });
 }
@@ -346,10 +394,18 @@ function sendUpload(ev) {
 rl.on('line', (raw) => {
   // v0.18-4: /end asked "really end this jam for everyone?", and this is the answer —
   // taken before anything is parsed, so a bare `y` can never become a message to claude.
-  if (confirming === 'end') {
+  // v0.22C adds the second question of the same shape: revoke the kicked person's link?
+  if (confirming) {
+    const q = confirming;
     confirming = null;
-    if (confirmYes(raw)) { sendMsg({ t: 'end' }); sys('ending the jam for everyone…'); }
-    else sys('nothing ended — the jam is still running');
+    const yes = confirmYes(raw);
+    if (q.kind === 'end') {
+      if (yes) { sendMsg({ t: 'end' }); sys('ending the jam for everyone…'); }
+      else sys('nothing ended — the jam is still running');
+    } else if (q.kind === 'revoke') {
+      if (yes) sendMsg({ t: 'invite', op: 'revoke', target: q.name });
+      else sys(`${q.name}'s invite link still works — /invite revoke ${q.name} takes it back later`);
+    }
     return reprompt();
   }
   const a = parseClientLine(raw);
@@ -419,7 +475,21 @@ rl.on('line', (raw) => {
     // v0.18-4: end the whole jam. Host-only here and in the daemon, and it asks first.
     case 'end':
       if (!IS_HOST) err('host only');
-      else { confirming = 'end'; sys('really end this jam for everyone? [y/N]'); }
+      else { confirming = { kind: 'end' }; sys('really end this jam for everyone? [y/N]'); }
+      break;
+    // v0.22B: mint a link, list them, take one back. Host-only here and in the daemon.
+    case 'invite':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'invite', op: act.op, name: act.name, maxUses: act.maxUses, ttl: act.ttl, target: act.target });
+      break;
+    case 'invites':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'invites' });
+      break;
+    // v0.22C: remove somebody who is already in.
+    case 'kick':
+      if (!IS_HOST) err('host only');
+      else sendMsg({ t: 'kick', name: act.name, revoke: act.revoke });
       break;
     case 'quit': process.exit(0);
     case 'error': err(act.text); break;

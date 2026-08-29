@@ -21,7 +21,12 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.18: jam owns the tmux session it made — the marker, the prompts, the way back in.
   OWNED_OPTION, SESSION_FILE, stateDirFor, sessionInfo, parseSessionJson, exitDecision, EXIT_KEYS,
   exitPromptText, reattachLines, TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName,
-  promptChoice } from './lib.mjs';
+  promptChoice,
+  // v0.22B: invite links — one command joins, no name, no token, no approval.
+  INVITE_V, INVITE_SECRET_LEN, INVITE_TTL_MS, inviteWsAddresses, encodeInvite, inviteRecord,
+  parseInvitesFile, checkInvite, inviteRefusal, resolveInvites, inviteLeft, invitesReport,
+  // v0.22C: /kick — the one thing /deny never could do.
+  KICK_CODE, resolveKick } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `jam end` are one code path with one set of gates.
 import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
@@ -479,6 +484,67 @@ function writeRoster(participants) {
   fs.writeFileSync(path.join(opts.state, 'roster.json'),
     JSON.stringify({ hostName: opts.name, sessionId: opts.sessionId, participants }, null, 2));
 }
+
+// -------------------------------------------------- v0.22B: invite links ----
+// One command is the guest's whole join: `claude-jam join cjam1_…`. That makes the link a
+// credential, so this half is written like one — the daemon keeps only the HASH of each secret,
+// in the 0700 state dir beside token.json, and reloads them at boot: a daemon that restarted
+// must not lock out the people it already invited.
+const INVITES_FILE = 'invites.json';
+let invites = [];
+
+const invitesPath = () => path.join(opts.state, INVITES_FILE);
+
+function loadInvites() {
+  try { invites = parseInvitesFile(fs.readFileSync(invitesPath(), 'utf8')); } catch { invites = []; }
+  if (invites.length) console.log(`[invite] ${invites.length} invite(s) reloaded from ${invitesPath()}`);
+}
+
+function saveInvites() {
+  try {
+    fs.writeFileSync(invitesPath(), `${JSON.stringify({ v: INVITE_V, invites }, null, 2)}\n`, { mode: 0o600 });
+  } catch (e) { console.log(`[invite] could not write ${invitesPath()}: ${e.message}`); }
+}
+
+// The randomness lives here, not in lib.mjs: 24 url-safe characters, the length the format says.
+const newInviteSecret = () => randomBytes(24).toString('base64url').slice(0, INVITE_SECRET_LEN);
+
+// Where a link points, in the order the guest tries them: the public relay first (it works from
+// anywhere), then the LAN/Tailscale address — which is what keeps a link alive after a
+// cloudflared respawn changed the tunnel hostname (v0.22B's documented caveat).
+const inviteWs = () => inviteWsAddresses({ tunnelHost: tunnelHosts.ws, ip: externalIp(), port: opts.port });
+
+function mintInvite({ name, maxUses = 0, ttl = INVITE_TTL_MS, now = Date.now() } = {}) {
+  const ws = inviteWs();
+  if (!ws.length) return { ok: false, error: 'there is no address to put in a link yet — check the network' };
+  const secret = newInviteSecret();
+  const expires = ttl > 0 ? now + ttl : 0;
+  let link;
+  try {
+    link = encodeInvite({ jam: String(opts.sessionId).slice(0, 8), name, secret, ws, expires });
+  } catch (e) { return { ok: false, error: e.message }; }
+  const rec = inviteRecord({ name, secret, maxUses, expires, createdAt: now });
+  invites.push(rec);
+  saveInvites();
+  console.log(`[invite] minted ${rec.id} for ${rec.name} `
+    + `(${maxUses ? `${maxUses} use(s)` : 'multi-use'}, ${inviteLeft(expires, now)}) → ${ws.join(' , ')}`);
+  return { ok: true, rec, link, ws };
+}
+
+function revokeInvites(target) {
+  const r = resolveInvites(invites, target);
+  if (!r.ok) return r;
+  for (const rec of r.hits) rec.revoked = true;
+  saveInvites();
+  console.log(`[invite] revoked ${r.hits.map((h) => `${h.id} (${h.name})`).join(', ')}`);
+  return { ok: true, hits: r.hits };
+}
+
+const inviteLabel = (hits) => hits.map((h) => `${h.id} (${h.name})`).join(', ');
+
+// Every name that is spoken for right now — admitted or still knocking. checkInvite refuses on
+// this, because two people answering to one `[Name]:` is the one thing attribution cannot survive.
+const heldNames = () => [...names(), ...[...pending.values()].map((p) => p.name)];
 
 // ------------------------------------------------------------------ daemon ----
 const clients = new Map(); // ws -> {name, host, joinedAt, lastTyping}
@@ -948,6 +1014,9 @@ function daemon() {
   // v0.17 H1: before listen(), on purpose — the ring buffer is full before the first socket can
   // ask for it, so a guest who connects in the same millisecond still gets the backlog.
   seedHistory();
+  // v0.22B: same reason, one gate earlier — a guest whose link is already in flight must not race
+  // an empty invite store. A restarted daemon reloads what it issued instead of locking them out.
+  loadInvites();
   http.listen(opts.port, opts.host, () => {
     console.log(`claude-jam daemon on ${opts.host}:${opts.port}, session ${opts.sessionId}`);
     writeTokenFile();
@@ -1113,6 +1182,25 @@ function onRequest(req, res) {
     endSession('jam end');
     return;
   }
+  // v0.22B: `claude-jam invite|invites|invite revoke` from the command line. Same guard as
+  // /admit and /end — loopback plus the internal secret out of the 0700 state dir — and the same
+  // inviteOp() the client's frame goes through, so the two surfaces cannot drift.
+  if (req.method === 'POST' && req.url === '/invite') {
+    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1e4) req.destroy(); });
+    req.on('end', () => {
+      let m;
+      try { m = JSON.parse(body || '{}'); } catch { return reply(400, { error: 'bad JSON' }); }
+      const r = inviteOp(m);
+      if (!r.ok) return reply(400, { error: r.error });
+      if (r.op === 'list') return reply(200, { ok: true, invites, report: invitesReport(invites) });
+      if (r.op === 'revoke') return reply(200, { ok: true, revoked: r.hits });
+      return reply(200, { ok: true, link: r.link, invite: r.rec, addresses: r.ws, clientCmd: opts.clientCmd });
+    });
+    return;
+  }
   const hook = /^\/hook\/(\w[\w-]*)$/.exec(req.url || '');
   if (req.method === 'POST' && hook) {
     if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
@@ -1152,8 +1240,10 @@ const isLoopback = (ip) => { const s = String(ip || ''); return s.endsWith('127.
 // `loopback` is remembered per socket, not re-derived later: everything that can reach the
 // real TUI (F3 keys, slash passthrough, window resize) needs host AND loopback, and a
 // `host:true` claim from off-box was already downgraded to a friend by classifyHello.
-function admitSocket(ws, name, host, loopback = false) {
-  const me = { name, host, loopback, joinedAt: Date.now(), lastTyping: 0 };
+// `via` (v0.22B) is how this person got in — 'host', 'token', 'knock' or 'invite'. It is what the
+// roster line says out loud, and what `/kick` reads to know whether there is a link to take back.
+function admitSocket(ws, name, host, loopback = false, via = 'token') {
+  const me = { name, host, loopback, via, joinedAt: Date.now(), lastTyping: 0 };
   clients.set(ws, me);
   send(ws, {
     t: 'welcome', id: nextId++, ts: Date.now(), you: name, roster: names(),
@@ -1168,7 +1258,7 @@ function admitSocket(ws, name, host, loopback = false) {
       ...(host ? { ...joinInfo(), tmux: opts.tmux } : {}),
     },
   });
-  rosterChanged({ joined: name });
+  rosterChanged({ joined: name, via });
   send(ws, { t: 'status', id: nextId++, ts: Date.now(), busy: status.busy, waiting: status.waiting });
   // Knocks and approval requests stay out of `history`, so a host client that connects (or
   // reconnects) while somebody is waiting would otherwise never hear about them.
@@ -1201,7 +1291,7 @@ function admit(name, ok) {
   clearTimeout(p.timer);
   pending.delete(sock);
   if (ok) {
-    admitSocket(sock, p.name, false, isLoopback(p.ip));
+    admitSocket(sock, p.name, false, isLoopback(p.ip), 'knock');
     // The mirror wish rode in on the hello that knocked; a client whose default view is the
     // mirror (v0.14) must not have to ask again after being let in.
     if (p.mirror) setMirror(sock, true);
@@ -1245,6 +1335,71 @@ function onToken(ws, m) {
   printJoin();
 }
 
+// `/invite <Name>`, `/invites`, `/invite revoke <Name|id>` from a host client — and the same three
+// ops from `claude-jam invite …` through POST /invite. Handing out a credential is at least as
+// sensitive as rotating the token, so the gate is F3's: host AND loopback.
+function onInvite(ws, me, m) {
+  if (!trusted(me)) return sendError(ws, 'invite links are the host\'s to hand out, on loopback only');
+  const r = inviteOp(m);
+  if (!r.ok) return sendError(ws, r.error);
+  if (r.op === 'new') {
+    // Only ever to the asker: the link IS the credential, and a host client is loopback by
+    // construction. Nothing about a minted link is broadcast or kept in history.
+    return send(ws, { t: 'invite', id: nextId++, ts: Date.now(), state: 'minted',
+      link: r.link, invite: r.rec, addresses: r.ws });
+  }
+  if (r.op === 'revoke') {
+    return send(ws, { t: 'sys', id: nextId++, ts: Date.now(),
+      text: `revoked ${r.hits.length} invite link(s): ${inviteLabel(r.hits)} — that link cannot let anybody in again` });
+  }
+  return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: invitesReport(invites) });
+}
+
+// The one place the three ops actually happen, shared by the WS frame and the HTTP endpoint so
+// `/invite` in the client and `claude-jam invite` on the command line cannot behave differently.
+function inviteOp(m = {}) {
+  if (m.op === 'list') return { ok: true, op: 'list' };
+  if (m.op === 'revoke') {
+    const r = revokeInvites(m.target);
+    return r.ok ? { ok: true, op: 'revoke', hits: r.hits } : { ok: false, error: r.why };
+  }
+  if (m.op === 'new' || m.op == null) {
+    const minted = mintInvite({ name: m.name, maxUses: Number(m.maxUses) || 0,
+      ttl: m.ttl == null ? INVITE_TTL_MS : Number(m.ttl) });
+    return minted.ok ? { ok: true, op: 'new', ...minted } : { ok: false, error: minted.error };
+  }
+  return { ok: false, error: `unknown invite op: ${JSON.stringify(String(m.op).slice(0, 20))}` };
+}
+
+// v0.22C: `/kick <name> [revoke]`. `/deny` could never reach somebody already admitted; this can.
+// Told, closed 4406 (inside the band every client treats as final, so they do not reconnect), and
+// dropped from the roster by the socket's own close handler — the one path that cannot leave a
+// ghost behind. Revoking their link is offered, never assumed: it is a second, wider action.
+function onKick(ws, me, m) {
+  if (!trusted(me)) return sendError(ws, 'removing somebody is the host\'s, on loopback only');
+  const r = resolveKick(m.name, names(), me.name);
+  if (!r.ok) return sendError(ws, r.why);
+  const hit = [...clients.entries()].find(([, c]) => c.name === r.name);
+  if (!hit) return sendError(ws, `${r.name} just left`);
+  const [sock, victim] = hit;
+  send(sock, { t: 'kicked', id: nextId++, ts: Date.now(), by: me.name });
+  broadcast({ t: 'sys', text: `${victim.name} was removed from the jam by ${me.name}` });
+  sock.close(KICK_CODE, `removed by ${me.name}`);
+  let revoked = 0;
+  if (m.revoke === true) {
+    const rv = revokeInvites(victim.name);
+    revoked = rv.ok ? rv.hits.length : 0;
+    send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: rv.ok
+      ? `revoked ${inviteLabel(rv.hits)} — that link cannot let ${victim.name} back in`
+      : `nothing to revoke for ${victim.name}: ${rv.why}` });
+  }
+  // The client raises the offer off this frame, and only when there is a link to take back.
+  send(ws, { t: 'kick', id: nextId++, ts: Date.now(), state: 'done', name: victim.name,
+    via: victim.via || 'approval', revoked });
+  console.log(`[kick] ${victim.name} (via ${victim.via}) removed by ${me.name}`
+    + `${revoked ? `, ${revoked} invite(s) revoked` : ''}`);
+}
+
 function onSocket(ws, req) {
   const ip = String(req.socket.remoteAddress || '');
   // v0.17 T2: the other half of startHeartbeat's sweep. The browser-standard WebSocket every
@@ -1270,6 +1425,26 @@ function onSocket(ws, req) {
       // the other participants.
       if (pending.has(ws)) return sendError(ws, 'waiting for host approval');
       if (m.t !== 'hello') return sendError(ws, 'say hello first');
+      // v0.22B: an invite link is the guest's WHOLE command, so it gets the first look — and it
+      // admits under the name the host bound to the link, never the one the hello claimed.
+      // Anything wrong with it falls through to the knock below, with the reason said out loud:
+      // a link is a shortcut past the approval, never past the door.
+      if (typeof m.invite === 'string' && m.invite) {
+        const v = checkInvite(invites, m.invite, { now: Date.now(), liveNames: heldNames() });
+        if (v.ok) {
+          v.rec.uses++;
+          saveInvites();
+          admitSocket(ws, v.rec.name, false, isLoopback(ip), 'invite');
+          // The mirror wish rode in on the same hello (v0.14 opens on the live TUI).
+          if (m.mirror === true) setMirror(ws, true);
+          console.log(`[invite] ${v.rec.name} joined on ${v.rec.id} from ${ip} `
+            + `(use ${v.rec.uses}${v.rec.maxUses ? ` of ${v.rec.maxUses}` : ''})`);
+          return;
+        }
+        send(ws, { t: 'invite', id: nextId++, ts: Date.now(), state: 'refused', reason: v.reason,
+          text: inviteRefusal(v.reason, v.why) });
+        console.log(`[invite] refused from ${ip}: ${v.reason} — ${v.why}`);
+      }
       const c = classifyHello(m, currentToken, isLoopback(ip));
       if (!c.ok) { sendError(ws, c.error); return ws.close(c.code, c.error); }
       // Attribution is by name, and a knocker's name is reserved while it waits.
@@ -1280,7 +1455,7 @@ function onSocket(ws, req) {
       // `hello {mirror:true}` starts a client straight in mirror mode; the runtime
       // {t:'mirror'} frame (F2 / `/mirror`) is the same switch.
       if (c.admit === 'token') {
-        admitSocket(ws, c.name, c.host, isLoopback(ip));
+        admitSocket(ws, c.name, c.host, isLoopback(ip), c.host ? 'host' : 'token');
         if (m.mirror === true) setMirror(ws, true);
         return;
       }
@@ -1385,6 +1560,15 @@ function onSocket(ws, req) {
     } else if (m.t === 'token') {
       if (!me.host) return sendError(ws, 'host only');
       onToken(ws, m);
+      // v0.22B/C: minting a link admits somebody in advance, and kicking removes somebody who is
+      // already in. Both wear F3's gate — host AND loopback, i.e. the client the launcher spawned.
+    } else if (m.t === 'invite') {
+      onInvite(ws, me, m);
+    } else if (m.t === 'invites') {
+      if (!trusted(me)) return sendError(ws, 'invite links are the host\'s, on loopback only');
+      send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: invitesReport(invites) });
+    } else if (m.t === 'kick') {
+      onKick(ws, me, m);
       // v0.18-4: `/end`. This ends the session for everybody and kills the tmux session it runs
       // in, so it wears F3's gate — host AND loopback, i.e. the client the launcher spawned —
       // and the client asks its own `really end this jam for everyone?` before it ever gets here.
