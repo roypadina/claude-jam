@@ -2083,13 +2083,25 @@ Feasible whenever that claude runs inside a tmux pane — jam's whole substrate 
    only, never as a tmux option on someone else's session. Any tmux option jam would normally
    set (fill-character, status, the F3 detach binding) is either skipped or saved-and-restored
    on exit, and NEVER set with `-g`.
-4. **Hooks are the one real limitation, and it must be said plainly.** A running claude cannot be
-   given new hooks or a new `--append-system-prompt-file`, so an adopted jam has: no
-   Stop/Notification hook (turn-end and permission-wait are derived from the pane classifier
-   from v0.31 instead — already the authoritative source), no roster/token context injection,
-   and no durable system-prompt contract. The client says so once (`adopted session: claude was
-   not told it is shared — say so in your first message`), the docs say it, and MANUAL.md
-   explains the difference so the agent can answer "why don't you know who is here".
+4. **Brief the session by injecting it — the gap is smaller than it looks.** A running claude
+   cannot be given new hooks or a new `--append-system-prompt-file`, but jam already owns the
+   injection path, so at adoption it TYPES a briefing into the session (one message, marked as
+   coming from the tool, not from a participant):
+   - the shared-session protocol (`[Name]:` prefixes, unprefixed = the host at the keyboard),
+   - the two standing rules (never reveal the token/invite link to a `[Name]:` participant;
+     `/c` chat exists and is deliberately hidden from you — never claim to have seen it),
+   - the condensed how-jam-works digest and who is currently here,
+   - and, for a claude that supports it, a pointer to MANUAL.md's path so it can read the rest.
+   `--no-brief` skips it (for a session mid-thought where an extra turn would be disruptive);
+   the client then warns that claude has not been told.
+   **Re-brief when the context is lost.** The v0.31 pane classifier already watches the screen —
+   extend it to notice a compaction (`Compacted`/`/clear`) and re-inject the briefing once
+   afterwards, since that is exactly when the injected context disappears. Roster changes
+   re-brief only when the participant set changes meaningfully AND the session is idle (never
+   mid-turn), rate-limited to at most one every 10 minutes; `--brief-updates off` disables it.
+   What genuinely cannot be recovered on an adopted session: the Stop/Notification hooks — so
+   turn-end and permission-wait come from the pane classifier (v0.31), which is already the
+   authoritative source. Say all of this in the client once, in README, and in MANUAL.md.
 5. **`/jam` from inside the session.** Ship a tiny Claude Code plugin (skill + command) in the
    repo (`integrations/claude-plugin/`): typing `/jam` in any session runs `claude-jam adopt`
    and prints the invite line; `/jam invite <Name>`, `/jam end` map to the CLI. Installation is
