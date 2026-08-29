@@ -5,7 +5,11 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   exportFileName, resumeInstructions, stripTokenBlock, clientCommand,
   // v0.15 adaptive cadence, v0.16 approval bar.
   frameCadence, FRAME_FAST_GAP, FRAME_RATE_CAP, FRAME_ACTIVE_MS,
-  countdownText, approvalBar, barKeyAction, APPROVAL_COMMANDS } from './lib.mjs';
+  countdownText, approvalBar, barKeyAction, APPROVAL_COMMANDS,
+  // v0.17 Batch T: relay respawn, socket heartbeat, reconnect tiering, Tailscale Funnel.
+  respawnDelay, RESPAWN_MIN_MS, RESPAWN_MAX_MS, heartbeatSweep, HEARTBEAT_MS,
+  reconnectMessage, RECONNECT_TIER, resolveTailscale, TAILSCALE_PATHS, funnelHost,
+  parseFunnelUrl, FUNNEL_URL_RE, funnelPrecheck, FUNNEL_CAP, FUNNEL_PORTS } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -1321,4 +1325,179 @@ test('APPROVAL_COMMANDS: one key per ladder kind, and every one is a real jam co
       assert.equal(act.name, 'Dana', cmd);
     }
   }
+});
+
+// --- v0.17 Batch T: transport survives two hours ---------------------------------
+
+test('T1 respawnDelay: 1s doubling to a 30s ceiling, unlimited attempts', () => {
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((n) => respawnDelay(n)),
+    [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  // The ceiling really is a ceiling: a relay that has been flapping for an hour still retries.
+  assert.equal(respawnDelay(500), RESPAWN_MAX_MS);
+  assert.equal(respawnDelay(1e6), RESPAWN_MAX_MS);
+  // Nothing below the floor: a respawn storm can never become a busy loop.
+  for (const bad of [0, -1, -99, NaN, undefined, null, 'x', {}]) {
+    assert.equal(respawnDelay(bad), RESPAWN_MIN_MS, JSON.stringify(bad));
+  }
+  assert.equal(respawnDelay(1), RESPAWN_MIN_MS);
+});
+
+test('T1 respawnDelay: the caller resets the counter, so a long-lived relay waits 1s not 30', () => {
+  // What host.mjs does: attempts++ on every death, attempts=0 the moment a URL resolves.
+  let attempt = 0;
+  const deaths = [];
+  for (let i = 0; i < 4; i++) deaths.push(respawnDelay(++attempt)); // four deaths in a row
+  assert.deepEqual(deaths, [1000, 2000, 4000, 8000]);
+  attempt = 0; // …then one of them actually came up
+  assert.equal(respawnDelay(++attempt), RESPAWN_MIN_MS);
+});
+
+test('T2 heartbeatSweep: pings whoever pongd, terminates whoever missed the round', () => {
+  const live = { alive: true };
+  const dead = { alive: false };
+  assert.deepEqual(heartbeatSweep([['a', live], ['b', dead], ['c', live]]),
+    { ping: ['a', 'c'], terminate: ['b'] });
+  // A brand new socket has no record yet in host.mjs (`ws.jamAlive !== false`), so the shape
+  // that reaches here is alive:true — a first tick must never terminate somebody who just joined.
+  assert.deepEqual(heartbeatSweep([['new', { alive: true }]]), { ping: ['new'], terminate: [] });
+});
+
+test('T2 heartbeatSweep: nothing to sweep, and a record that is not a record at all', () => {
+  assert.deepEqual(heartbeatSweep([]), { ping: [], terminate: [] });
+  assert.deepEqual(heartbeatSweep(), { ping: [], terminate: [] });
+  // Missing/garbage state counts as dead rather than immortal: a socket we cannot vouch for
+  // must not be able to sit in the roster forever.
+  for (const bad of [null, undefined, {}, { alive: 'yes' }]) {
+    assert.deepEqual(heartbeatSweep([['x', bad]]), { ping: [], terminate: ['x'] }, JSON.stringify(bad));
+  }
+});
+
+test('T2 the 30s interval stays well under Cloudflare\'s documented 100s WS idle cap', () => {
+  assert.equal(HEARTBEAT_MS, 30000);
+  // Two full missed rounds is the worst case before a terminate, and even that has to fit:
+  // the rule of thumb is ~75% of the intermediary's window per keepalive, not per detection.
+  assert.ok(HEARTBEAT_MS < 100000 * 0.75, `${HEARTBEAT_MS}ms is not comfortably under 100s`);
+});
+
+test('T3 reconnectMessage: the first four keep the old line, the fifth names the URL change', () => {
+  assert.equal(reconnectMessage(1, 1000), 'disconnected, retrying in 1s');
+  assert.equal(reconnectMessage(4, 8000), 'disconnected, retrying in 8s');
+  const tiered = reconnectMessage(RECONNECT_TIER, 16000);
+  assert.match(tiered, /still retrying \(5 failed\) in 16s/);
+  assert.match(tiered, /join URL changed/);
+  assert.match(tiered, /\/join/); // and how to get the new one
+  // It stays tiered from there on, never falls back to the blip wording.
+  for (const n of [6, 20, 400]) assert.match(reconnectMessage(n, 10000), /still retrying/, String(n));
+});
+
+test('T3 reconnectMessage: a missing or odd attempt count degrades to the blip wording', () => {
+  for (const bad of [0, undefined, null, NaN, 'x']) {
+    assert.equal(reconnectMessage(bad, 1000), 'disconnected, retrying in 1s', JSON.stringify(bad));
+  }
+  assert.equal(RECONNECT_TIER, 5); // ~31s of 1-2-4-8-16 backoff before the tier flips
+});
+
+test('T4 resolveTailscale: the flag wins, then the env var, then the app bundle, then PATH', () => {
+  const exists = (p) => p === TAILSCALE_PATHS[0];
+  assert.equal(resolveTailscale('/my/ts', { JAM_TAILSCALE: '/env/ts' }, exists), '/my/ts');
+  assert.equal(resolveTailscale(null, { JAM_TAILSCALE: '/env/ts' }, exists), '/env/ts');
+  // macOS: nothing on PATH, the CLI lives inside Tailscale.app — the case that makes --funnel
+  // work at all on the machine most likely to be running Tailscale.
+  assert.equal(resolveTailscale(null, {}, exists), '/Applications/Tailscale.app/Contents/MacOS/Tailscale');
+  // Linux/brew: fall through to a plain PATH lookup.
+  assert.equal(resolveTailscale(null, {}, () => false), 'tailscale');
+  assert.equal(resolveTailscale(null, {}, (p) => p === '/opt/homebrew/bin/tailscale'), '/opt/homebrew/bin/tailscale');
+});
+
+test('T4 funnelHost: 443 is implicit, any other funnel port is spelled out', () => {
+  const dns = 'roys-macbook-pro.tail7bd91e.ts.net.'; // status --json includes the trailing dot
+  assert.equal(funnelHost(dns, 443), 'roys-macbook-pro.tail7bd91e.ts.net');
+  assert.equal(funnelHost(dns), 'roys-macbook-pro.tail7bd91e.ts.net'); // 443 is the default
+  assert.equal(funnelHost(dns, 8443), 'roys-macbook-pro.tail7bd91e.ts.net:8443');
+  assert.equal(funnelHost('a.b.ts.net', 10000), 'a.b.ts.net:10000');
+  for (const bad of ['', '  ', null, undefined]) assert.equal(funnelHost(bad, 443), null, JSON.stringify(bad));
+});
+
+test('T4 funnelHost feeds buildTunnelJoinLine/buildTunnelViewUrl unchanged', () => {
+  // The whole reason the funnel needs no new frame, no new token.json field and no client
+  // change: its host string is a drop-in for a trycloudflare one.
+  const ws = funnelHost('m.t.ts.net.', FUNNEL_PORTS.ws);
+  const view = funnelHost('m.t.ts.net.', FUNNEL_PORTS.view);
+  assert.equal(buildTunnelJoinLine(ws, 'smoketoken', 'jam join'),
+    'jam join wss://m.t.ts.net --name <You> --token smoketoken');
+  assert.equal(buildTunnelViewUrl(view, 'smoketoken'), 'https://jam:smoketoken@m.t.ts.net:8443');
+  // Same "nothing to hand out while knocking" rule as every other join line.
+  assert.equal(buildTunnelJoinLine(ws, null), null);
+  assert.deepEqual(tunnelJoinLines(buildTunnelJoinLine(ws, 't0kent0ken'), buildTunnelViewUrl(view, 't0kent0ken')),
+    ['tunnel invite: node client.mjs wss://m.t.ts.net --name <You> --token t0kent0ken',
+      'tunnel view: https://jam:t0kent0ken@m.t.ts.net:8443']);
+});
+
+test('T4 FUNNEL_PORTS: only ports Funnel actually opens, and the client one is 443', () => {
+  // Tailscale Funnel serves 443, 8443 and 10000 and nothing else.
+  for (const p of Object.values(FUNNEL_PORTS)) assert.ok([443, 8443, 10000].includes(p), `${p} is not a funnel port`);
+  assert.equal(FUNNEL_PORTS.ws, 443); // so the join line carries no port, like the cloudflared one
+  assert.notEqual(FUNNEL_PORTS.ws, FUNNEL_PORTS.view); // two targets, never one port twice
+});
+
+test('T4 parseFunnelUrl: pulls the host out of the real foreground funnel banner', () => {
+  const banner = 'Available on the internet:\n\n'
+    + 'https://roys-macbook-pro.tail7bd91e.ts.net/\n'
+    + '|-- proxy http://127.0.0.1:7777\n\nPress Ctrl+C to exit.';
+  assert.equal(parseFunnelUrl(banner), 'roys-macbook-pro.tail7bd91e.ts.net');
+  // The view target lands on 8443, and the port has to survive into the host string.
+  assert.equal(parseFunnelUrl('https://roys-macbook-pro.tail7bd91e.ts.net:8443/'),
+    'roys-macbook-pro.tail7bd91e.ts.net:8443');
+  assert.match('https://a-b.c.ts.net', FUNNEL_URL_RE);
+});
+
+test('T4 parseFunnelUrl: null until the banner shows up, never throws on garbage', () => {
+  for (const chunk of ['', null, undefined, 42, {}, 'Available on the internet:',
+    'https://example.com/', 'wss://a.b.ts.net', 'a.b.ts.net']) {
+    assert.equal(parseFunnelUrl(chunk), null, JSON.stringify(chunk));
+  }
+  // The real failure this machine produced: a sandboxed CLI that never prints a URL at all.
+  assert.equal(parseFunnelUrl('The Tailscale GUI failed to start: The operation couldn’t be '
+    + 'completed. (Tailscale.CLIError error 3.)'), null);
+});
+
+test('T4 funnelPrecheck: a ready tailnet gives back the stable hostname', () => {
+  const status = JSON.stringify({
+    BackendState: 'Running',
+    Self: { DNSName: 'roys-macbook-pro.tail7bd91e.ts.net.', CapMap: { [FUNNEL_CAP]: null } },
+  });
+  assert.deepEqual(funnelPrecheck(status), { ok: true, dns: 'roys-macbook-pro.tail7bd91e.ts.net' });
+});
+
+test('T4 funnelPrecheck: the three startup failures are told apart, each with its own fix', () => {
+  // No CLI / no daemon: whatever the spawn printed is not JSON.
+  const noCli = funnelPrecheck('tailscale: command not found');
+  assert.equal(noCli.ok, false);
+  assert.match(noCli.error, /Tailscale app running/);
+  // Installed but not connected.
+  const stopped = funnelPrecheck(JSON.stringify({ BackendState: 'Stopped' }));
+  assert.equal(stopped.ok, false);
+  assert.match(stopped.error, /tailscale is Stopped, not Running/);
+  // Connected, but Funnel is a node attribute an admin has to grant — the real state of this
+  // tailnet on 2026-08-29, and the CLI cannot fix it for you.
+  const noCap = funnelPrecheck(JSON.stringify({
+    BackendState: 'Running',
+    Self: { DNSName: 'roys-macbook-pro.tail7bd91e.ts.net.', CapMap: { 'https://tailscale.com/cap/is-admin': null } },
+  }));
+  assert.equal(noCap.ok, false);
+  assert.equal(noCap.dns, 'roys-macbook-pro.tail7bd91e.ts.net'); // still worth reporting
+  assert.match(noCap.error, /Funnel is not enabled for this tailnet/);
+  assert.match(noCap.error, /nodeAttrs/);
+  assert.match(noCap.error, /admin\/acls/);
+  assert.match(noCap.error, /--tunnel \(cloudflared\) meanwhile/); // the way forward today
+  // MagicDNS off: there is no hostname to hand anybody.
+  const noDns = funnelPrecheck(JSON.stringify({ BackendState: 'Running', Self: { CapMap: { [FUNNEL_CAP]: null } } }));
+  assert.equal(noDns.ok, false);
+  assert.match(noDns.error, /MagicDNS/);
+});
+
+test('T4 funnelPrecheck: a status blob with no BackendState at all is still judged on the cap', () => {
+  // Older/odd CLI output: absence of BackendState must not read as "not Running".
+  const ok = funnelPrecheck(JSON.stringify({ Self: { DNSName: 'a.b.ts.net.', CapMap: { [FUNNEL_CAP]: null } } }));
+  assert.deepEqual(ok, { ok: true, dns: 'a.b.ts.net' });
 });
