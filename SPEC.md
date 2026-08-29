@@ -1190,3 +1190,52 @@ this machine (Roy runs many). So:
 4. Docs: MANUAL.md, README, CHANGELOG — F3 in/F3 out, the dedicated socket, and that
    `tmux attach` from outside now needs `tmux -L jam-<port> attach -t <name>` (print that exact
    line in `jam sessions` and in the client's "keep it running" message from v0.18).
+
+## v0.21 — one name, and docs an agent can install from
+
+Three asks: canonical naming, a repo wiki, and docs kept current for humans AND agents so that
+handing an agent just the repo URL is enough to install and run the tool.
+
+1. **Rename `jam` → `claude-jam` everywhere.** The command, every usage/help/error string,
+   every doc, the tmux session default (`claude-jam` instead of `jam`, socket
+   `claude-jam-<port>`), the state dir (`$TMPDIR/claude-jam-<port>` — already right), the
+   `@jam-owned` marker → `@claude-jam-owned`, env vars stay `JAM_*` (internal, documented) to
+   avoid a pointless churn, but every user-visible surface says claude-jam. Subcommands
+   unchanged: `claude-jam host|join|sessions|end|clean`.
+   `jam` remains installed as a **thin alias** (same libexec entry) so muscle memory and the
+   existing tap install keep working; help output and docs use `claude-jam`, and the alias is
+   documented as such. (If the alias should go, that's a one-line formula change later.)
+   The formula installs both bins; CHANGELOG notes the rename.
+2. **Repo wiki** (`git@github-padina:roypadina/claude-jam.wiki.git`, already initialized with a
+   Home page). Clone to `~/Code/Padina/claude-jam.wiki` (sibling, like AgentCliMenu.wiki) and
+   build these pages, each short and task-shaped, cross-linked from Home:
+   - `Home` — what it is, 60-second quickstart, page index.
+   - `Install` — brew (tap) and from-source paths, prerequisites (node, tmux; optional ttyd,
+     cloudflared, tailscale), verification commands and expected output.
+   - `Agent-Install` — **the page an agent is pointed at**: a numbered, copy-pasteable,
+     non-interactive script of exactly what to run to install and verify, what to check after
+     each step, what may prompt a human (Tailscale admin, Funnel enablement, first-run trust
+     dialog), and what must never be done (no `tmux kill-server`, no pattern kills). Ends with
+     a self-test block whose expected output is stated.
+   - `Hosting-a-Jam` — host flow, flags, access modes, ending a jam.
+   - `Joining-a-Jam` — guest flow, all client commands, mirror/F2/F3, multi-line keys.
+   - `Remote-Access` — LAN/Tailscale, `--tunnel`, `--funnel` (incl. the two admin steps),
+     what breaks over 2 hours and what we do about it.
+   - `Files-and-Export` — `/send`, `/paste`, `/get`, `/export` + resume recipe.
+   - `Security-Model` — the gates that are real (knock/approval ladder, host+loopback checks,
+     digit-only permission relay) vs the guards that are only instructions to the model
+     (system-prompt rules, token-in-context), secret masking honesty, `bypassPermissions`
+     warning.
+   - `Architecture` — tmux + WS + JSONL tail, the frame pipeline, ladders, hooks; pointers to
+     SPEC.md sections rather than duplicating them.
+   - `Troubleshooting` — the real ones we hit: F3/`Ctrl-b d`, trust dialog, cmux `claude` shim,
+     spend limits, sandboxed Tailscale, orphan sessions, dot-fill.
+3. **`AGENTS.md` in the repo root** — the in-repo counterpart of `Agent-Install`: how an agent
+   should work ON this project (layout, `node --test test.mjs`, the ten smokes and their order,
+   the commit-per-change convention, the hard tmux/kill rules, where SPEC.md fits) plus a
+   pointer to the wiki. README gets a short "For agents" section linking both.
+4. **STANDING RULE (extends v0.8's MANUAL.md rule).** Every change that alters a user-visible
+   surface — flag, command, key, access mode, install step — updates in the SAME change:
+   `README.md`, `MANUAL.md` (claude's own copy), `CHANGELOG.md` (unreleased section), and the
+   affected wiki page(s). A doc-drift check belongs in the release step: before tagging, verify
+   every command in README/wiki Install/Agent-Install actually runs. Stale docs are a defect.
