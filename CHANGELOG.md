@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.0
 
 ### v0.23 — named jams, and finding one on your network
 
