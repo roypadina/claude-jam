@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Tests — the peer stand-in now emits the shape it claims to model (campaign F4)
+
+`scripts/fake-claude.mjs` emitted one stream event per turn. Claude 2.1.251 emits one per
+**content block**, all of a turn's blocks sharing a `message.id` — which is why the turn cap fired
+at about a third of its value for a whole release and eighteen smoke runs never noticed: the only
+path the stand-in could reach was the fallback. Every mode now emits the measured shape, and a run
+that finishes writes a `receipt` line recording how many assistant events under how many ids it
+actually sent, which `smoke-peer` step 9b asserts against. The result frame carries the measured
+`num_turns`, `duration_ms` and `total_cost_usd` too — nothing reads them yet, and `num_turns` is
+the obvious next thing a turn cap would reach for.
+
 ### Fixed — a real `/clear` could be swallowed on an adopted session (campaign F7)
 
 An adopted claude is re-briefed when the context its briefing was injected into goes away, and
