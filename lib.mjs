@@ -425,6 +425,68 @@ export function popupKey(ch) {
   return null;
 }
 
+// ------------------------------------- v0.16: the in-client approval bar ----
+// Since v0.14 the host's tmux session is detached, so `display-popup` usually has no client to
+// draw on and a knock was only a line of text. The bar brings the one-keypress feel into the
+// host's own client — same requests, same ladder, same wording as the popup.
+
+// Which jam command one key stands for. The bar answers by running the command the host would
+// have typed (see submit() in client-ink.mjs), so there is exactly ONE ladder path and no
+// second mechanism to keep in step.
+export const APPROVAL_COMMANDS = {
+  knock: { allow: '/accept', deny: '/deny' },
+  cmd: { allow: '/allow-cmd', deny: '/deny-cmd' },
+  export: { allow: '/allow-export', deny: '/deny-export' },
+  file: { allow: '/accept-file', deny: '/deny-file' },
+};
+
+// `2:00`, `0:07`, `0:00` — a request's own expiry, counted down live in the bar.
+export function countdownText(ms) {
+  const s = Math.max(0, Math.ceil((Number(ms) || 0) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// Anything that would land in the input line if it were typed. Control bytes (Enter, Ctrl-C,
+// the body of an arrow-key sequence) are not typing and leave the single keys armed.
+const VISIBLE_RE = /[^\x00-\x1f\x7f]/;
+
+// What one stdin chunk means while the bar is up. `armed` is single-key mode: it starts on,
+// any visible character turns it off (so a message that begins with `d` can never deny
+// somebody), and Esc turns it back on. Esc while armed dismisses the bar instead — the
+// request stays pending and `/accept` still works. Returns the action plus whatever text
+// still has to reach the input line.
+export function barKeyAction(chunk, { armed = false, input = '' } = {}) {
+  const s = String(chunk ?? '');
+  if (s === '\x1b') return { act: armed ? 'ignore' : 'rearm', text: '' };
+  // An escape sequence (an arrow, an F-key the client does not claim) is a keypress, not
+  // typing: it reaches the input untouched and leaves the single keys armed.
+  if (s.startsWith('\x1b')) return { act: null, text: s };
+  if (armed && input === '' && [...s].length === 1 && VISIBLE_RE.test(s)) {
+    const c = s.toLowerCase();
+    if (c === 'a') return { act: 'accept', text: '' };
+    if (c === 'd') return { act: 'deny', text: '' };
+    if (c === 'i') return { act: 'ignore', text: '' };
+  }
+  return { act: VISIBLE_RE.test(s) ? 'disarm' : null, text: s };
+}
+
+// One pending request as the bar's single line, or null when nothing is waiting. `items` is
+// the daemon's whole pending set, newest last; the bar shows the FIRST one and counts the
+// rest. Wording comes from popupPrompt, so the bar and the tmux popup cannot drift apart.
+export function approvalBar(items = [], now = 0, armed = true) {
+  const first = Array.isArray(items) ? items[0] : null;
+  if (!first) return null;
+  const detail = first.kind === 'file' ? `${first.detail ?? ''} (${humanBytes(first.size)})` : first.detail ?? '';
+  const more = Math.max(0, items.length - 1);
+  const parts = [
+    popupPrompt(first.kind, first.name, first.ip, detail),
+    armed ? '[a]ccept  [d]eny  [i]gnore' : 'keys off while you type — Esc re-arms',
+    countdownText((Number(first.expires) || 0) - now),
+  ];
+  if (more) parts.push(`+${more} more`);
+  return { text: parts.join('  ·  '), kind: first.kind, name: first.name, armed, more };
+}
+
 // ------------------------------------------------ v0.4b: profile (--config-dir) ----
 
 // CLAUDE_CONFIG_DIR for the claude window: `~` expanded, made absolute, trailing slash
@@ -574,6 +636,25 @@ export function frameDecision({ rows, prev = null, now = 0, lastAt = 0, minGap =
   return now - lastAt < minGap ? 'wait' : 'send';
 }
 
+// --------------------------------------- v0.15: adaptive frame cadence ----
+
+// How often the daemon may look at the pane. Fast while somebody is actually watching AND
+// something is happening (a turn running, somebody typing, the screen itself moving), the old
+// 250 ms once it goes quiet, and null when nobody is watching at all — then the poll stops
+// entirely and an idle jam costs no tmux calls. The fast gap IS the per-client rate cap: one
+// frame per 40 ms is 25 frames/s, which is where the spec's cap comes from. Change detection
+// (frameDecision) still decides whether a polled frame is worth any bytes.
+export const FRAME_FAST_GAP = 40;
+export const FRAME_RATE_CAP = Math.round(1000 / FRAME_FAST_GAP); // 25 frames/s/client
+export const FRAME_ACTIVE_MS = 2000;
+export function frameCadence({ viewers = 0, lastActivityAt = 0, now = 0, activeMs = FRAME_ACTIVE_MS } = {}) {
+  if (!(Number(viewers) > 0)) return null;
+  // A clock that went backwards counts as active: erring fast for one tick is cheaper than
+  // freezing the mirror at 250 ms because Date.now() jumped.
+  const since = now - lastActivityAt;
+  return lastActivityAt > 0 && since < activeMs ? FRAME_FAST_GAP : FRAME_MIN_GAP;
+}
+
 // Rows a client spends on its own chrome in the mirror view: the chat strip (3), the status
 // row and the input row. Everything else is frame.
 export const MIRROR_CHROME = 5;
@@ -695,12 +776,14 @@ export const ONBOARD_W = 54;
 export function onboardingLines(name = 'You', host = false) {
   const head = `── claude-jam ${'─'.repeat(Math.max(3, ONBOARD_W - 14))}`;
   // v0.14: the screen above is the real Claude Code TUI, so both blocks lead with the view
-  // keys. The host's copy adds F3 — the one thing only the host can do.
+  // keys. The host's copy adds F3 — the one thing only the host can do — and, since v0.16,
+  // the single keys that answer the approval bar.
   const rows = host
     ? [`plain line        → claude (attributed [${name}])`,
       '/c <text>         → humans only — claude never sees it',
       'F2                → transcript ⇄ live TUI (this screen)',
-      'F3                → type INTO the TUI (permissions, /model)',
+      'F3                → attach the real TUI (Ctrl-b d back)',
+      'a / d             → answer the ⚑ bar · i/Esc hides it',
       '/model /compact…  → run any claude command in the TUI',
       '/send <path>      → offer a file to everyone · /export',
       '/help /who /join  → this block · participants · invite line']
