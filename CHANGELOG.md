@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### jam owns its tmux sessions
+
+- **`jam sessions`** (`jam ls`) lists the jams jam itself started — name, port, state, uptime,
+  session id, who is connected, which relays are on, cwd — with a `!` against an orphaned state
+  dir or a session whose daemon has died. `--json` for scripting.
+- **`jam end [name]`** (`jam kill`) ends a jam properly: every client is told and exits cleanly
+  instead of trying to reconnect, the daemon stops its children (ttyd, tunnel, popups), the tmux
+  session is killed and its state dir removed. `--all` ends every one, after confirmation.
+- **`jam clean`** removes leftover state dirs from sessions that are gone, and nothing else.
+- **`/end` in the host's client** ends the jam for everybody, after a `[y/N]` confirmation.
+- **Closing the host's client now asks** `keep it running · end it · cancel` instead of silently
+  leaving a daemon, a TUI and a browser view running with no hint of how to stop them.
+  `--no-prompt`, `--keep-on-exit` and `--end-on-exit` answer it up front; a non-interactive stdin
+  keeps the jam.
+- **`jam host --attach`** reopens your client on a jam that is already running, and `jam host` on
+  a name that is already a jam offers to attach, start a second one (auto-named, on a free port),
+  end it and start fresh, or cancel — instead of the old flat refusal.
+- **jam ends only what jam created.** Every session it starts is stamped with an `@jam-owned`
+  marker pointing at its own state dir, and nothing is ever killed unless that marker and the
+  `session.json` in that directory agree, for the exact name given. No name patterns, no sweeps
+  over `tmux list-sessions`, no `kill-server`: your other tmux sessions are invisible to jam and
+  stay that way.
+
 ## 0.17.0
 
 ### Host TUI control

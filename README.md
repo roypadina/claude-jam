@@ -65,14 +65,18 @@ attached to tmux — the window size is jam's to pick, so the mirror fills your 
    the mirror of the claude window · chat strip · status · input
 ```
 
-Closing your client kills nothing — the daemon, the TUI and every guest stay where they were,
-and the launcher prints how to rejoin (`tmux kill-session -t jam` is how you actually stop).
+Closing your client does not end the jam: you are asked
+`this jam is still running (2 guests connected) — [k]eep it running · [e]nd it · [c]ancel`.
+Keep it and the daemon, the TUI and every guest stay exactly where they were —
+`jam host --attach` reopens your client, `jam sessions` lists what is running, `jam end` stops
+it. See **Session lifecycle** below.
 
 Useful flags: `--port`, `--tmux <name>` (a second jam), `--token <value>`, `--view`,
 `--tunnel`, `--funnel`, `--resume <session-id>` (continue an existing session),
 `--replay <N>` (how much of an existing transcript a joining guest is shown, default 300 events,
 `0` for none), `--config-dir <dir>` (run
-the TUI as another claude profile), `--no-attach`, `--no-token-in-context`, `--no-popup`,
+the TUI as another claude profile), `--no-attach`, `--attach`, `--no-prompt`,
+`--keep-on-exit`, `--end-on-exit`, `--no-token-in-context`, `--no-popup`,
 `-- <extra claude args>`. `jam` with no arguments prints the usage line; `MANUAL.md` explains
 the ones you will actually reach for.
 
@@ -125,6 +129,32 @@ Tailscale, a LAN you trust, an SSH tunnel (`ssh -L 7777:127.0.0.1:7777 host`), o
 quick tunnel whose URL you keep private. Never a public IP you advertise. If Tailscale is
 installed the printed join line already uses the Tailscale IP.
 
+## Session lifecycle
+
+jam creates the tmux session, so jam cleans it up — no `tmux kill-session` line to remember.
+
+| command | what it does |
+| --- | --- |
+| `jam sessions`, `jam ls` | jam's own sessions: name, port, state, uptime, session id, who is here, which relays are on, cwd. `--json` for scripting. A `!` marks an `orphan` state dir (its tmux session is gone) or a `no-daemon` session (nothing answers on its port) |
+| `jam end [name]`, `jam kill` | end one jam: every client is told and exits 0, the daemon stops its children (ttyd, tunnel, popups), the tmux session is killed and its state dir removed. No name and one jam → that one; several → a numbered picker; `--all` after an explicit confirmation |
+| `jam clean` | remove state dirs whose session is gone, and only those, after listing exactly what will go |
+| `jam host --attach` | reopen your client on a jam that is already running |
+| `/end` (host, in the client) | the same end, from inside, after `really end this jam for everyone? [y/N]` |
+
+Closing the host's client asks `[k]eep it running · [e]nd it · [c]ancel`; `--no-prompt`,
+`--keep-on-exit` and `--end-on-exit` answer it up front, and a stdin that is not a terminal
+counts as **keep**. `jam host` on a name already held by one of jam's own offers
+`[a]ttach as host · [n]ew session (jam-2) · [e]nd it and start fresh · [c]ancel`.
+
+**jam only ever ends a tmux session it created.** On creation it stamps
+`@jam-owned <state-dir>` on the session and writes `session.json` into that dir; ending anything
+requires that pair to line up, for the exact name you gave (or picked out of jam's own list).
+There is no name pattern, no filtered sweep over `tmux list-sessions`, no `kill-server`, and
+`--all` re-verifies every session it touches. Your own tmux sessions — and a session carrying a
+hand-written `@jam-owned` marker — are refused, never listed, and never touched; a session
+started before v0.18 has no marker, so it is jam's to leave alone too
+(`tmux kill-session -t <name>` remains yours to run).
+
 ## Commands
 
 jam owns the commands below; **everything else starting with a slash belongs to claude** — from
@@ -144,6 +174,7 @@ approves.
 | `/diff [path]` | anyone | `git diff --stat` of the host's working tree, or the real hunks for one path |
 | `/answer`, `/answer <n>` | anyone | list the options on claude's permission prompt · offer one of them (the host approves before a key is typed) |
 | `/join`, `/token new\|set\|off` | host | reprint the invite lines · rotate or drop the token |
+| `/end` | host | end the jam for everybody — asks `[y/N]` first, then every client prints `<Host> ended the jam` and exits |
 | `/accept [name]`, `/deny <name>` | host | answer a knock |
 | `/allow-cmd [name] [always]`, `/deny-cmd <name>` | host | answer a guest's claude command |
 | `/allow-perm [name] [always]`, `/deny-perm <name>` | host | answer a guest's permission answer |
@@ -197,9 +228,11 @@ your own name in a message or in `/c` chat. At most one per three seconds. The s
 carries this connection's own round trip, measured by the 30 s heartbeat: a dim `~120ms`, or
 `⚠ stale Ns` once a pong is overdue.
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **199 tests**. Ten
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **221 tests**. Eleven
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
-in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs` and `smoke-perm.mjs` bring their own).
+in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs`, `smoke-perm.mjs` and
+`smoke-lifecycle.mjs` bring their own — the last of those runs under a `TMPDIR` of its own and
+starts by proving it will not touch a session it did not create).
 
 ## Known ceilings (deliberate)
 
@@ -268,6 +301,20 @@ in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs` and `smoke-perm.mjs` bri
   `funnel` node attribute in Access Controls), and the macOS App Store build of Tailscale.app
   cannot change funnel config at all — its CLI answers `The Tailscale GUI failed to start …
   (Tailscale.CLIError error 3.)`. Use the standalone build from tailscale.com.
+- **jam's ownership of a session is a marker on disk, not a capability.** `@jam-owned` plus a
+  matching `session.json` is what authorises an end, so anybody who can already set a tmux
+  option on their own session and write a directory can make jam end *that* session — which
+  they could have killed themselves anyway. What the pair rules out is the accident: a name
+  pattern, a session jam did not create, a stale marker, a `session.json` copied in from
+  somewhere else.
+- `jam sessions`/`end`/`clean` enumerate jam's OWN namespace — the `$TMPDIR/claude-jam-<port>`
+  state dirs — so a jam-owned session whose state dir was deleted by hand is invisible to them
+  (and `tmux kill-session` is then the way out). A jam started before v0.18 has neither, and is
+  likewise none of their business.
+- `jam clean` decides "the session is gone" from `tmux has-session` plus a TCP probe of that
+  port. A state dir whose port is held by something else is flagged, not deleted.
+- The exit prompt is the launcher's, so it exists only for the host client the launcher spawned.
+  A `jam join --host` client started by hand just closes, and the jam keeps running.
 - The live view, tool collapse, F2/F3 and the newline keys are ink-only — `--basic` is a
   transcript-only client.
 - No rate limiting, no web client, one session per host, no Windows.
