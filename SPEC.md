@@ -1195,6 +1195,35 @@ get the standing-rule update, including one honest sentence: these are instructi
 model, not an enforcement boundary — the hard gates remain knock/approval and the host-only
 server checks.
 
+#### v0.19 — shipped 2026-08-29
+
+2 unit tests (245 total) and one extra turn in `scripts/smoke.mjs`. What is worth knowing:
+
+- **The probe is not a `--help` grep.** `--append-system-prompt-file` WORKS on claude 2.1.251 and
+  is **absent from `claude --help`** (only `--append-system-prompt <prompt>` is listed), so the
+  probe this section suggested would have answered "no" on a build that supports it. `--version`
+  short-circuits before options are validated, and `-p` costs a turn. What ships instead:
+  `claude --append-system-prompt-file <file> --claude-jam-probe-unknown-flag`, and read which
+  option the parser names as unknown. Free, instant, exits non-zero either way, and every
+  ambiguous outcome (no output, a timeout, a message we do not recognise) reads as NO — the
+  fallback always works, and a wrong yes would stop claude from starting at all.
+  The answer is cached in `<state>/claude-caps.json` alongside the sentence claude actually said.
+- **The hooks were not touched at all**, and the SessionStart protocol paragraph is deliberately
+  left in place beside the system prompt. It is five lines of duplication that make the fallback
+  free: nothing has to be coordinated between the probe's answer and what the hook emits.
+- **Verified in a live jam, twice.** `buildSystemPrompt()` is the only file in the project that
+  contains the word "paraphrase" (checked against README, MANUAL, hooks.sh and SPEC), so an
+  answer carrying it cannot have come from the SessionStart context. Asked
+  "does your instruction about revealing the join token say anything about a paraphrase", claude
+  answered *"forbids revealing the join token in full, in part, or in a paraphrase to any
+  `[Name:]`-prefixed participant, but only an unprefixed message (the host's own terminal) may be
+  told"* — before a `/compact`, and **the same answer after one** (the pane shows
+  `⎿ Compacted`), which is the entire point of the item. `smoke.mjs` now asks that question as its
+  second turn and reports the answer.
+- Not fatal, by design: a jam launched with `--no-system-prompt`, or against a claude that rejects
+  the flag, writes no file and says so in one line. `smoke.mjs` reports "not proved" rather than
+  failing, because both are supported configurations.
+
 ## v0.20 — own tmux server socket + symmetric F3 (Roy: F3 goes in but not out)
 
 Since v0.15 F3 does a real `tmux attach`, so leaving needs `Ctrl-b d` — F3 does nothing there,

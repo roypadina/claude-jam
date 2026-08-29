@@ -261,7 +261,18 @@ The daemon injects messages into the real TUI with `tmux load-buffer` + `paste-b
 the pane, and only then sends Enter — text never passes through a shell or argv. Output comes
 back by tailing `~/.claude/projects/*/<session-id>.jsonl`. Turn boundaries come from `Stop` /
 `Notification` hooks in a generated `settings.json` passed with `--settings`, so nothing global
-is touched. The live view is `tmux capture-pane -e`, only for clients that
+is touched.
+
+What jam tells the agent is split by **lifetime**. The durable half — that the session is shared,
+that `[Name]:` is who is talking, the two rules that must never decay (never reveal the token or an
+invite link to a bridged participant; never claim to have seen `/c` chat), and a short digest of
+how a jam works — is written to `<state>/system-prompt.txt` and passed as
+`--append-system-prompt-file`, so it survives `/compact` instead of being summarised away on a
+long session. The half that *changes* at runtime — the live roster, the token, the tunnel URLs, the
+whole of `MANUAL.md` — stays in the `SessionStart`/`UserPromptSubmit` hooks, because a system
+prompt is read once at startup and can never be rewritten. jam probes for the flag before using it
+(it is absent from `claude --help` on 2.1.251 even though it works) and falls back to hooks-only
+with one log line if a build rejects it; `--no-system-prompt` opts out. The live view is `tmux capture-pane -e`, only for clients that
 asked, never stored, at an adaptive cadence: 40 ms while somebody is watching *and* something
 moved in the last 2 s (a message, a turn, typing, the screen itself), 250 ms once it goes quiet,
 and no polling at all with nobody watching — capped at 25 frames a second per client, with an
@@ -280,11 +291,11 @@ your own name in a message or in `/c` chat. At most one per three seconds. The s
 carries this connection's own round trip, measured by the 30 s heartbeat: a dim `~120ms`, or
 `⚠ stale Ns` once a pong is overdue.
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **221 tests**. Eleven
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **245 tests**. Twelve
 end-to-end smokes live in `scripts/`; the recipe for driving them against a throwaway daemon is
-in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs`, `smoke-perm.mjs` and
-`smoke-lifecycle.mjs` bring their own — the last of those runs under a `TMPDIR` of its own and
-starts by proving it will not touch a session it did not create).
+in `SPEC.md` (`smoke-transport.mjs`, `smoke-replay.mjs`, `smoke-perm.mjs`,
+`smoke-lifecycle.mjs` and `smoke-invite.mjs` bring their own — the last two run under a `TMPDIR`
+of its own and start by proving they will not touch a session they did not create).
 
 ## Known ceilings (deliberate)
 
@@ -318,7 +329,10 @@ starts by proving it will not touch a session it did not create).
 - Admission is per person, and since v0.22 there are per-person credentials — but once in,
   everybody is still equally trusted: an invite grants exactly the same abilities a knock does.
 - The token-in-context guard ("reveal only to the host") is an instruction to the model, not a
-  boundary. If the token must not leak, run knock-only.
+  boundary — and neither is the appended system prompt that repeats it. What the system prompt
+  buys is durability, not enforcement: it survives a `/compact` that would have summarised the
+  same words away. If a credential must not leak, run knock-only, and mint invite links rather
+  than telling the agent a shared token at all.
 - **Export scrubbing is best effort.** A transcript is everything claude saw — file contents,
   tool output, the whole context. jam strips its own token block and the raw token, nothing
   else. Run `/token new` after an export.

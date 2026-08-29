@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 // End-to-end smoke: talk to a running jam daemon as "Tester", ask for "pong", and
 // assert the round trip (injection -> JSONL -> agent text -> Stop hook status).
+//
+// v0.19: then ONE more turn, which is the only way to prove an appended system prompt is really
+// in effect — ask claude about the rule and look for a word that exists NOWHERE else in anything
+// jam hands it. "paraphrase" appears in buildSystemPrompt() and in no other file (README, MANUAL,
+// hooks.sh, SPEC), so an answer carrying it cannot have come from the SessionStart context.
 // usage: node scripts/smoke.mjs <ws-url> <token> [prompt]
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,7 +14,13 @@ import path from 'node:path';
 const [url, token, prompt = 'reply with the single word pong and nothing else'] = process.argv.slice(2);
 if (!url || !token) { console.error('usage: node scripts/smoke.mjs <ws-url> <token> [prompt]'); process.exit(2); }
 
-const got = { agent: null, statusIdle: null, sessionId: null, jsonl: false };
+const got = { agent: null, statusIdle: null, sessionId: null, jsonl: false, sysprompt: null };
+
+// v0.19: the second turn. Deliberately asks about the SHAPE of the rule rather than for its text —
+// a request to quote instructions is a prompt-injection shape and gets refused, and quite right.
+const SYS_Q = 'One sentence, no preamble: does your instruction about revealing the join token '
+  + 'say anything about a paraphrase, and who may be told? Use the word paraphrase if it appears.';
+const SYS_RE = /paraphras/i;
 
 // The injected message must have reached the real transcript with its attribution.
 function jsonlHasTester(id) {
@@ -17,6 +28,7 @@ function jsonlHasTester(id) {
   return !!f && fs.readFileSync(f, 'utf8').includes('[Tester]: ');
 }
 let sentAt = 0;
+let asked = false;
 const ws = new WebSocket(url);
 
 ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'Tester', token })));
@@ -32,8 +44,15 @@ ws.addEventListener('message', (m) => {
   if (ev.t === 'agent' && ev.kind === 'text' && /pong/i.test(ev.text) && !got.agent) got.agent = ev;
   // Only the Stop that lands after our message counts.
   if (ev.t === 'status' && ev.busy === false && sentAt && ev.ts > sentAt && !got.statusIdle) got.statusIdle = ev;
-  if (got.agent && got.statusIdle) {
+  if (got.agent && got.statusIdle && !asked) {
     got.jsonl = jsonlHasTester(got.sessionId);
+    asked = true;
+    ws.send(JSON.stringify({ t: 'say', text: SYS_Q }));
+    return;
+  }
+  // The system-prompt answer: any agent text after the question that carries the marker word.
+  if (asked && ev.t === 'agent' && ev.kind === 'text' && SYS_RE.test(ev.text) && !got.sysprompt) {
+    got.sysprompt = ev.text;
     finish(got.jsonl ? 0 : 1);
   }
 });
@@ -45,6 +64,11 @@ function finish(code) {
   console.log('agent event    :', got.agent ? JSON.stringify(got.agent) : 'MISSING');
   console.log('status busy:false:', got.statusIdle ? JSON.stringify(got.statusIdle) : 'MISSING');
   console.log('jsonl [Tester]:  :', got.jsonl ? 'found' : 'MISSING');
+  // v0.19: not fatal on its own — a jam launched with --no-system-prompt, or against a claude that
+  // cannot take the flag, is a supported configuration and says so in the daemon log.
+  console.log('system prompt    :', got.sysprompt
+    ? `IN EFFECT — ${JSON.stringify(got.sysprompt.slice(0, 220))}`
+    : 'not proved (check the daemon log for "shared-session contract →", or --no-system-prompt)');
   process.exit(code);
 }
 setTimeout(() => { console.error('\nTIMEOUT'); finish(1); }, Number(process.env.SMOKE_TIMEOUT || 150000));
