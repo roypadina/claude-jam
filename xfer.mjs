@@ -128,3 +128,17 @@ export function clipboardPng() {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
+
+// v0.22A/v0.24: put one line on the clipboard. An invite link is a credential the host has to
+// GET SOMEWHERE — into Slack, into a DM — and re-typing 200 base64url characters is not a plan.
+// The text goes in on stdin, never on a command line (a link on an argv is a link in `ps`).
+// Returns whether it landed, so the caller can say "copy this by hand" instead of lying.
+export function copyToClipboard(text) {
+  const cmd = process.platform === 'darwin' ? ['pbcopy', []]
+    : process.platform === 'win32' ? ['clip', []]
+      : ['xclip', ['-selection', 'clipboard']];
+  try {
+    const r = spawnSync(cmd[0], cmd[1], { input: String(text ?? ''), encoding: 'utf8' });
+    return !r.error && r.status === 0;
+  } catch { return false; }
+}

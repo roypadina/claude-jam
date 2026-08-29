@@ -6,6 +6,8 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
+  echo "usage: claude-jam                  (no arguments) the launcher menu: host, join,"
+  echo "                                   my jams, end a jam. --no-menu prints this instead."
   echo "usage: jam host [--port N] [--name X] [--cwd DIR] [--tmux NAME] [--token V]"
   echo "                [--view] [--tunnel] [--config-dir D] [--tmux-socket default]"
   echo "                [--no-system-prompt] [--answers host|anyone] [-- <claude args>]"
@@ -32,8 +34,15 @@ usage() {
   echo "         end one jam: everyone is told, then the tmux session and its state dir go."
   echo "       jam clean [--yes]"
   echo "         remove state dirs whose session is gone. Never touches a live one."
+  echo "       claude-jam remote <off|tunnel|funnel> [--jam NAME]"
+  echo "         put a running jam on a public relay, or take it back off. Same thing"
+  echo "         /menu -> Access -> Remote does, over the loopback control endpoint."
   exit "${1:-2}"
 }
+
+# v0.22A: no arguments at all is the launcher menu. ANY argument (including --no-menu) means the
+# caller already knows what they want, so nothing below this line changes.
+if [ "$#" -eq 0 ]; then exec node "$DIR/menu.mjs"; fi
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
@@ -47,6 +56,10 @@ case "$cmd" in
   # v0.22B: invite links, from the command line as well as from `/invite` in the client.
   invite) exec node "$DIR/sessions.mjs" invite "$@" ;;
   invites) exec node "$DIR/sessions.mjs" invites "$@" ;;
+  # v0.24.1: the relay switch from a shell — the same daemon path /menu drives.
+  remote) exec node "$DIR/sessions.mjs" remote "$@" ;;
+  # v0.22A: the menu is what a bare `claude-jam` runs; --no-menu asks for the usage instead.
+  --no-menu) usage 0 ;;
   # -h/--help/help is a question, not a mistake: the same text, exit 0, and never a jam.
   -h|--help|help) usage 0 ;;
   *) usage 2 ;;
