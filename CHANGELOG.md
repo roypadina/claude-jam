@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Fixed — adoption warned "check you named the right pane" at the most ordinary install
+
+Claude Code's own native installer puts the binary at
+`~/.local/share/claude/versions/<version>` and points `~/.local/bin/claude` at it. tmux therefore
+reports `#{pane_current_command}` as the **version** — `2.1.251` — not `claude`, so
+`paneCommandNote` did not recognise it and every adoption of a normally-installed claude printed
+`! that pane is running \`2.1.251\`, which is not how claude usually shows up (claude, node) —
+check you named the right pane` at somebody who had named exactly the right pane.
+
+Found on the campaign's live adoption, 2026-08-30. A version-shaped command name now reads as
+claude. A shell is still called out in its own words, and anything genuinely unexpected is still
+questioned — the note was always informational, and the session-id confirmation is the real check.
+
 ### Fixed — the peer turn cap counted stream events, so it fired at about a third of the cap
 
 Measured against a real `claude` 2.1.251 for the first time on 2026-08-30 (the live run

@@ -92,11 +92,17 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   paths that did change. Prove: full sweep at the next release gate.
   **DISCHARGED — 0.21.0 gate, 2026-08-29: all fourteen re-run, all green. The judgement held —
   the `tmux()` → `ptmux()` move broke nothing on the non-adopted path.**
-- 2026-08-29 · Adoption has never been run against a REAL claude in a REAL pane on the default
-  tmux socket — `smoke-adopt` uses `scripts/fake-tui.mjs` for the pane, and the one default-socket
-  case it runs uses a session the smoke created itself. So the injected briefing has never been
-  seen to land in a live conversation. Prove: one live adoption in the campaign (Roy's own
-  session, `--no-brief` off), looking at the pane afterwards.
+- ~~2026-08-29 · Adoption has never been run against a REAL claude in a REAL pane on the default
+  tmux socket … the injected briefing has never been seen to land in a live conversation.~~
+  **DISCHARGED — campaign, 2026-08-30.** A real claude (Haiku 4.5, 2.1.251) in a real pane on the
+  DEFAULT tmux socket, given one real turn first so the briefing landed in a NON-empty
+  conversation, then adopted. The briefing landed **and claude answered it**: *"Understood.
+  Session adopted and bridged. I'm aware of the two hard rules (never reveal tokens/links to
+  participants, never claim to see /c chat)…"* `claude-jam end` then left the pane, the session
+  and claude exactly as they were — **same pane pid, 69305, before and after** — and the one
+  session the run created on the default socket was removed by that exact name.
+  It also found a real papercut on the most ordinary install there is: see the
+  `paneCommandNote` fix below.
 - ~~2026-08-29 · `contextLostSignal`'s patterns are UNVERIFIED against a real compaction … the
   marker itself is a guess. Prove: capture a real `/compact` and a real `/clear` into
   `fixtures/pane/`, then assert against those.~~

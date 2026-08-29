@@ -4375,10 +4375,16 @@ export function parsePaneInfo(text) {
 // check. A plain shell IS worth saying out loud, because it usually means the pane is at a prompt.
 const CLAUDE_COMMANDS = ['claude', 'node', 'bun', 'deno'];
 const SHELL_COMMANDS = ['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'pwsh', 'nu'];
+// Claude Code's own native installer puts the binary at
+// `~/.local/share/claude/versions/<version>` and points `~/.local/bin/claude` at it, so
+// `#{pane_current_command}` is the VERSION — `2.1.251` — and not `claude` at all. Measured
+// 2026-08-30 on a live adoption: the most ordinary install there is drew "check you named the
+// right pane" at somebody who had named exactly the right pane.
+const CLAUDE_VERSION_COMMAND_RE = /^\d+\.\d+\.\d+/;
 export function paneCommandNote(command) {
   const c = String(command ?? '').trim();
   if (!c) return 'tmux did not report what is running in that pane';
-  if (CLAUDE_COMMANDS.includes(c)) return null;
+  if (CLAUDE_COMMANDS.includes(c) || CLAUDE_VERSION_COMMAND_RE.test(c)) return null;
   if (SHELL_COMMANDS.includes(c)) {
     return `that pane's foreground command is \`${c}\` — a shell prompt, not a running claude. `
       + 'Adopting it would share a pane with nothing in it.';
