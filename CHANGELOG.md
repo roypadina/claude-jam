@@ -85,6 +85,15 @@ approving.
   name ran together in the gutter.
 - Both clients now report their idle state when the welcome arrives instead of at the next
   30-second tick, so `/who` is useful from the first second.
+- **A re-announce could orphan an mDNS advertisement** (v0.23, found during a smoke sweep on
+  2026-08-29: a `dns-sd -R` for a jam that had been gone for minutes was still up, ppid 1, still
+  telling the LAN the jam existed). A re-announce is stop-then-start, and the "we killed it" flag
+  was one variable shared by every child the daemon ever spawned — so the old child's `exit`
+  arrived after the flag had been cleared for the new one, read its own death as a crash, and
+  respawned. That respawn overwrote `announceProc`, leaving the first child untracked and
+  therefore unkillable on shutdown. The flag now belongs to the child, where a successor cannot
+  clear it, and `scripts/smoke-discover.mjs` gained a step that counts the `dns-sd -R` processes
+  for one port across a real re-announce: it sees 2 on the old code and 1 on the new.
 
 ### Internal
 

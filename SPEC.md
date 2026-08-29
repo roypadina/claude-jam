@@ -752,8 +752,8 @@ The public README keeps a short list. This is all of them.
 
 ## Running the end-to-end smokes
 
-Fifteen end-to-end smokes; the first fourteen verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
-ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
+Fifteen end-to-end smokes, all fifteen verified 2026-08-29 on node 24.15 / tmux 3.7c /
+claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
 ```sh

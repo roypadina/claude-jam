@@ -1031,7 +1031,6 @@ function stopTunnels() {
 let announceProc = null;      // our own child, killed by pid only
 let announceAttempts = 0;     // consecutive deaths, reset once it registers
 let announceTimer = null;     // a pending respawn, cleared on shutdown
-let announceStopping = false; // our own SIGTERM is not a death
 let announceOn = opts.announce !== false; // runtime state; --no-announce is only its starting value
 let announceWhy = '';         // why it is not running, when it is not — never a silent nothing
 let announceTxtLive = null;   // the record currently registered, so a re-announce that would change nothing does nothing
@@ -1059,6 +1058,15 @@ function spawnAnnounce() {
     return;
   }
   announceWhy = '';
+  // PER CHILD, not per module. The "we killed it" flag used to be one variable shared by every
+  // advertisement this daemon ever started, and reannounce() — which is stop-then-start — set it
+  // back to false the instant after the stop. The OLD child's `exit` then arrived with the flag
+  // already cleared, read its own death as a crash, and scheduled a respawn that overwrote
+  // `announceProc` with a second dns-sd. The first was then untracked, so `stopAnnounce()` could
+  // not kill it and it outlived the daemon: observed 2026-08-29 as an orphaned
+  // `dns-sd -R claude-jam … port 7799` with ppid 1, still telling the LAN about a jam that had
+  // been gone for minutes. A flag that belongs to the child cannot be cleared by its successor.
+  r.child.jamStopping = false;
   announceProc = r.child;
   announceTxtLive = txt.join(' ');
   console.log(`announce: "${opts.jamName}" on ${DISCOVERY_TYPE} port ${opts.port} (pid ${r.child.pid}) — ${txt.join(' ')}`);
@@ -1079,7 +1087,10 @@ function spawnAnnounce() {
   r.child.stderr.on('data', onOut);
   r.child.on('exit', (code) => {
     if (announceProc === r.child) announceProc = null;
-    if (announceStopping || !announceOn) return;
+    // Three ways this is not a death to recover from: we killed it, announcing was turned off,
+    // or a newer child has already replaced it (reannounce). Only the last of those was ever
+    // wrong, and it was wrong in the direction that leaks an advertisement.
+    if (r.child.jamStopping || !announceOn || (announceProc && announceProc !== r.child)) return;
     console.log(`announce: exited (code ${code}) — this jam is no longer on the network`);
     if (buf.trim()) console.log(`announce said: ${buf.trim().split('\n').slice(-3).join(' | ').slice(0, 400)}`);
     const delay = respawnDelay(++announceAttempts);
@@ -1092,7 +1103,6 @@ function spawnAnnounce() {
 
 function startAnnounce() {
   if (!announceOn || announceProc) return;
-  announceStopping = false; // a previous stop must not swallow this run's respawns
   spawnAnnounce();
 }
 
@@ -1101,13 +1111,13 @@ function startAnnounce() {
 // so killing the child IS the deregistration, and that is why this is called on every exit path
 // (the signal handlers, `process.on('exit')` and finishEnd) exactly like stopTunnels.
 function stopAnnounce() {
-  announceStopping = true;
   if (announceTimer) { clearTimeout(announceTimer); announceTimer = null; }
   announceAttempts = 0;
   const child = announceProc;
   announceTxtLive = null;
   if (!child) return;
   announceProc = null;
+  child.jamStopping = true; // this child's own flag: a successor cannot clear it back to false
   try { child.kill('SIGTERM'); } catch { /* already gone */ }
 }
 
@@ -1123,7 +1133,6 @@ function reannounce() {
   if (!announceOn || !announceProc) return;
   if (announceTxt().join(' ') === announceTxtLive) return;
   stopAnnounce();
-  announceStopping = false;
   spawnAnnounce();
 }
 

@@ -115,7 +115,9 @@ Then, in any order, the ones that bring their own everything:
     sessions `jamdisco*`. ~1 min, costs nothing. **It really does advertise on the local network
     while it runs** — that is the thing under test. Every registration is a child of a daemon it
     started, its teardown FAILS the run if anything is left advertising, and it needs
-    `/usr/bin/dns-sd` (it skips cleanly when there is none).
+    `/usr/bin/dns-sd` (it skips cleanly when there is none). Step 9 counts the `dns-sd -R`
+    processes for one port across a real re-announce, because a leaked advertisement is the one
+    failure this project can inflict on somebody else's network.
 
 15. `smoke-nudge.mjs` — no arguments, no real claude. Own `$TMPDIR` **and own cwd** (so
     `jam-uploads/` is the smoke's), port 7881, sessions `jamnudge*`. ~15 s, costs nothing. It

@@ -299,6 +299,36 @@ try {
     killMine('jamdiscoui');
   });
 
+  // ------------------- 9: a RE-announce replaces the child, it does not add one ----
+  // The bug this exists for, found 2026-08-29 during a smoke sweep: a `dns-sd -R` for a jam that
+  // had been gone for minutes was still up, orphaned, telling the LAN about it. A re-announce is
+  // stop-then-start, and the "we killed it" flag was one variable shared by every child the
+  // daemon ever spawned — so the OLD child's `exit` arrived after the flag had been cleared for
+  // the NEW one, read its own death as a crash, and respawned. The respawn overwrote
+  // `announceProc`, which left the first child untracked and therefore unkillable on shutdown.
+  // Counting is the assertion: one advertising jam, one `dns-sd -R` for its port, always.
+  await step('9  a re-announce (the token changed) replaces the child rather than adding one', async () => {
+    const adverts = () => (spawnSync('/bin/ps', ['-o', 'pid=,command=', '-ax'], { encoding: 'utf8' }).stdout || '')
+      .split('\n').filter((l) => l.includes('dns-sd -R') && l.includes(` ${PORT_A} `));
+    eq(adverts().length, 1, `advertisements for :${PORT_A} before the re-announce`);
+    // The daemon re-registers when what the record SAYS changes, and `access` is one of the six
+    // fields — so setting a token on a knock-only jam is a real re-announce with a real change.
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT_A}`);
+    await new Promise((done, fail) => {
+      ws.addEventListener('open', () => { ws.send(JSON.stringify({ t: 'hello', name: 'Roy', host: true })); done(); });
+      ws.addEventListener('error', () => fail(new Error(`could not reach the daemon on :${PORT_A}`)));
+    });
+    ws.send(JSON.stringify({ t: 'token', op: 'set', value: 'discoreannounce1' }));
+    await sleep(3000);
+    try { ws.close(); } catch { /* already gone */ }
+    const now = adverts();
+    eq(now.length, 1, `advertisements for :${PORT_A} after it — ${now.map((l) => l.trim()).join(' | ')}`);
+    console.log(`      one child, and it carries the new record: ${now[0].trim().slice(-60)}`);
+    // …and the network really is told the new thing, or "one child" would be one STALE child.
+    const rec = mine(discoveredJams(parseDnssdZone(await browseRaw(3000)))).find((r) => r.port === PORT_A);
+    eq(rec?.access, 'token', 'the re-announced access mode');
+  });
+
   // ------------------------------------------ 5: a stale advertisement goes ----
   await step('5  a jam that ended stops advertising', async () => {
     const before = mine(discoveredJams(parseDnssdZone(await browseRaw(3000))));
