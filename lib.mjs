@@ -2501,3 +2501,196 @@ export function serializeHistory(list = [], max = HISTORY_FILE_MAX) {
   const out = [...list].reverse().slice(-max);
   return out.length ? `${out.join('\n')}\n` : '';
 }
+
+// ================== v0.31: questions are not permissions — classify the CURRENT pane ====
+// Observed live 2026-08-29 15:26: the status row said `waiting for permission` while the pane
+// was showing an AskUserQuestion picker, and stayed up after the questions were answered. One
+// `waiting` boolean, fed by the Notification hook whatever the prompt was, cleared only when the
+// next assistant record happened to arrive. So: the STATUS is whatever the screen says.
+//
+// Measured against claude 2.1.251 (the captures in fixtures/pane/). An AskUserQuestion picker
+// draws a checkbox header, its question, its options with a description under each, and a
+// "Type something." free-text option; a permission prompt draws the tool's name, the command,
+// "Do you want to proceed?" and Yes/Yes-always/No. With several questions the header becomes a
+// tab bar whose answered tabs flip from an empty box to a crossed one, focus advancing to the
+// first unanswered on its own. See fixtures/pane/question-*.txt and permission-bash.txt.
+export const PROMPT_KINDS = ['none', 'question', 'permission', 'dialog'];
+const TAB_GLYPH_RE = /[☐☑☒]/; // empty / checked / crossed ballot box
+const TAB_ITEM_RE = /^([☐☑☒])\s*(.+)$/;
+const Q_FREETEXT_RE = /^(?:type something|other)\b/i;
+const Q_NAV_RE = /to navigate/i;
+const PROMPT_LOOKUP = 14; // rows above option 1 that can still be this prompt's own chrome
+// The dialogs that need a human at the real keyboard: no numbered options to relay, so no digit
+// jam could ever safely type. Scanned over the bottom of the screen only - the same words in a
+// transcript further up are somebody talking about a dialog, not a dialog.
+const DIALOG_RE = /trust this folder|is this a project you created|choose the text style|select login method|enter to confirm/i;
+const DIALOG_ROWS = 20;
+const FIRST_OPTION_RE = /^(?:[❯▶>*]\s*)?([1-9])[.)]\s+\S/;
+
+function tabsFromRow(row) {
+  return String(row ?? '').split(/\s{2,}/).map((s) => s.trim()).filter(Boolean)
+    .map((s) => TAB_ITEM_RE.exec(s)).filter(Boolean)
+    .map((m) => ({ title: m[2].trim().slice(0, PERM_TEXT_MAX), done: m[1] !== '☐' }));
+}
+
+const blankPrompt = (kind) => ({ kind, header: '', question: '', options: [], tabs: [], focus: null, sig: kind });
+
+export function classifyPrompt(screen) {
+  const lines = (Array.isArray(screen) ? screen : String(screen ?? '').split('\n'))
+    .map((r) => String(r).replace(/\s+$/, ''));
+  const options = parsePermOptions(lines.join('\n'));
+  if (!options.length) {
+    const tail = lines.slice(-DIALOG_ROWS).join('\n');
+    return DIALOG_RE.test(tail) ? blankPrompt('dialog') : blankPrompt('none');
+  }
+  // Where the block starts on screen, so its own chrome can be read and nothing above it can.
+  // parsePermOptions already picked the BOTTOM-most numbered block, so the last `1.` is its.
+  let first = -1;
+  for (let k = lines.length - 1; k >= 0; k--) {
+    const m = FIRST_OPTION_RE.exec(lines[k].replace(PERM_BOX_RE, ''));
+    if (m && Number(m[1]) === 1) { first = k; break; }
+  }
+  if (first < 0) first = 0;
+  const above = lines.slice(Math.max(0, first - PROMPT_LOOKUP), first);
+  const tabRow = [...above].reverse().find((l) => TAB_GLYPH_RE.test(l)) || '';
+  const tabs = tabsFromRow(tabRow);
+  const footer = lines.slice(first, first + options.length * 3 + 6).join('\n');
+  const free = options.map((o) => Q_FREETEXT_RE.test(o.text));
+  // Any ONE of the three is enough. A picker with none of them is treated as a permission, which
+  // is the safe way to be wrong: the worst case is that the host has to approve a question.
+  const isQuestion = tabs.length > 0 || free.some(Boolean) || Q_NAV_RE.test(footer);
+  const kind = isQuestion ? 'question' : 'permission';
+  const question = [...above].reverse()
+    .find((l) => l.trim() && !RULE_ROW_RE.test(l.trim()) && !TAB_GLYPH_RE.test(l)) || '';
+  const focus = tabs.length ? ((tabs.findIndex((t) => !t.done) + 1) || null) : (isQuestion ? 1 : null);
+  const opts = options.map((o, i) => ({ ...o, free: free[i] }));
+  const q = question.trim().slice(0, PERM_TEXT_MAX * 2);
+  return {
+    kind,
+    // A question's header is the tab it is focused on; the review step at the end of a form has
+    // no focused tab, and naming the last one there would be a lie ("Shell" for "Ready to submit?").
+    header: (isQuestion ? (focus ? (tabs[focus - 1]?.title ?? '') : '') : headerRow(lines, first)).trim(),
+    question: q,
+    options: opts,
+    tabs,
+    focus,
+    sig: promptSig(kind, q, opts, focus),
+  };
+}
+
+// A permission prompt names its tool on the first row inside the rule that opens it.
+function headerRow(lines, first) {
+  if (first < 1) return '';
+  for (let k = first - 1; k >= Math.max(0, first - PROMPT_LOOKUP); k--) {
+    if (!RULE_ROW_RE.test(lines[k].trim())) continue;
+    for (let j = k + 1; j < first; j++) if (lines[j].trim()) return lines[j].trim();
+    return '';
+  }
+  return '';
+}
+
+// The identity of THIS prompt: what it asks and what it offers. First-answer-wins is keyed on it,
+// and so is "the screen changed under your answer" - a picker that advanced to its next question
+// has a different signature, so the next answer is a fresh one rather than a stale duplicate.
+export function promptSig(kind, question, options = [], focus = null) {
+  return [kind, focus ?? '-', question, ...options.map((o) => `${o.n}:${o.text}`)].join('');
+}
+
+// What every client shows, in BOTH views, when claude is asking rather than requesting: the
+// question, its options, and how to answer it. Free-text options are marked, because they are the
+// one kind a guest cannot pick.
+export function questionBlock(p = {}, { answers = 'anyone', host = false } = {}) {
+  if (!p || p.kind !== 'question') return '';
+  const many = (p.tabs || []).length > 1;
+  const head = many
+    ? `claude is asking (${p.focus ?? p.tabs.length} of ${p.tabs.length}${p.header ? ` · ${p.header}` : ''}): `
+    : 'claude is asking: ';
+  const canAnswer = answers !== 'host' || host;
+  const rows = (p.options || []).map((o) => `  ${o.marked ? '❯' : ' '} ${o.n}. ${o.text}`
+    + (o.free ? '  (the host types this one)' : ''));
+  const how = canAnswer
+    ? `answer it with /answer <1-${(p.options || []).length}>${many ? ' — or /answer <question> <n>' : ''}`
+    : 'the host answers this one (--answers host) — /answer <n> asks them';
+  return [`${head}${p.question || p.header}`, ...rows, how].join('\n');
+}
+
+// The status row, in one line, for whatever is on the pane right now. Distinct and honest per
+// kind: v0.31's whole complaint was one wording for three different things.
+export function promptStatusText(p = {}, { host = false, answers = 'anyone' } = {}) {
+  const kind = p?.kind || 'none';
+  if (kind === 'none') return '';
+  if (kind === 'dialog') return '⚠ claude needs the host at the keyboard — F3';
+  if (kind === 'permission') {
+    return `⚠ waiting for permission${p.header ? ` (${p.header})` : ''}`
+      + (host ? ' — F3 attaches the TUI (F3 or Ctrl-b d back)' : ' — /answer shows the options');
+  }
+  const q = (p.question || p.header || '').split('\n')[0];
+  const tail = answersMode(answers) === 'host' && !host ? ' — the host answers' : ' — /answer <n>';
+  return `⚠ claude is asking: ${q}${tail}`;
+}
+
+// `--answers host|anyone`, and the one place that decides. A question is a product decision, so
+// anyone may answer it; a permission is a security grant, so it stays on the host's ladder; and
+// typing free text into the TUI is raw keyboard access, so it stays the host's whatever the mode.
+export const ANSWERS_MODES = ['anyone', 'host'];
+export function answersMode(v) { return ANSWERS_MODES.includes(String(v ?? '')) ? String(v) : 'anyone'; }
+export function answerDecision({ kind = 'none', host = false, answers = 'anyone', free = false } = {}) {
+  if (kind === 'question') {
+    if (host) return 'run';
+    if (free) return 'ask'; // the host sees the text before it is typed
+    return answersMode(answers) === 'anyone' ? 'run' : 'ask';
+  }
+  if (kind === 'permission') return host ? 'run' : 'ask';
+  return 'refuse';
+}
+
+// `/answer 2`, `/answer 1 2` (question 1, option 2), `/answer other <text>` - parsed here so the
+// client, the daemon and the docs cannot drift apart. A digit is the only thing ever typed into a
+// picker, and `other` is the only thing that is not a digit.
+export const ANSWER_USAGE = 'usage: /answer (show the options) | /answer <1-9> | '
+  + '/answer <question> <1-9> | /answer other <text> (host)';
+export const ANSWER_TEXT_MAX = 400;
+export function parseAnswerCommand(rest) {
+  const t = String(rest ?? '').trim();
+  if (!t) return { ok: true, choice: null, q: null };
+  const other = /^other\s+(\S[\s\S]*)$/i.exec(t);
+  if (other) {
+    const text = other[1].trim().slice(0, ANSWER_TEXT_MAX);
+    return text ? { ok: true, choice: 'other', text, q: null } : { ok: false, error: ANSWER_USAGE };
+  }
+  if (/^other$/i.test(t)) return { ok: false, error: 'usage: /answer other <what to type>' };
+  const two = /^([1-9])\s+([1-9])$/.exec(t);
+  if (two) return { ok: true, q: Number(two[1]), choice: Number(two[2]) };
+  if (/^[1-9]$/.test(t)) return { ok: true, q: null, choice: Number(t) };
+  return { ok: false, error: ANSWER_USAGE };
+}
+
+// Which question a `/answer <q> <n>` is aimed at, against the form that is actually on screen.
+// Only the focused one can be answered: moving between tabs is a Tab keypress, i.e. raw keyboard,
+// which is exactly what a guest never gets. Refusing says which one is up rather than guessing.
+export function resolveAnswerTarget(p = {}, q = null) {
+  const tabs = p?.tabs || [];
+  const focus = p?.focus ?? null;
+  if (q == null) return { ok: true, q: focus };
+  if (!tabs.length) {
+    return q === 1 ? { ok: true, q: 1 }
+      : { ok: false, error: 'claude is asking one question, so /answer <n> is the whole of it' };
+  }
+  if (q > tabs.length) {
+    return { ok: false, error: `claude is asking ${tabs.length} question${tabs.length > 1 ? 's' : ''}, so there is no question ${q}` };
+  }
+  if (q !== focus) {
+    const name = tabs[q - 1]?.title || `question ${q}`;
+    const up = tabs[(focus || 1) - 1]?.title || '—';
+    return { ok: false, error: `question ${focus ?? '?'} (${up}) is the one on screen — `
+      + `${name} comes next, and only the host can Tab between them (F3)` };
+  }
+  return { ok: true, q };
+}
+
+// First answer wins. The lock is the prompt's signature, so it lifts on its own the moment the
+// picker moves on - no timer, no cleanup, and a form's second question is a fresh question.
+export function answerLock(state = {}, sig = '', who = '') {
+  if (state.sig === sig && state.by) return { ok: false, by: state.by };
+  return { ok: true, state: { sig, by: who } };
+}

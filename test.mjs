@@ -46,6 +46,10 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   OUTBOX_DIR, OUTBOX_KEEP, outboxSlug, outboxName, parseOutboxName, outboxEntries, resolveOutbox,
   outboxReport, keptMessageText,
   historyPush, historyMove, parseHistoryFile, serializeHistory, HISTORY_LIVE, HISTORY_FILE_MAX,
+  // v0.31: classify the pane, and let anyone answer a question.
+  PROMPT_KINDS, classifyPrompt, promptSig, questionBlock, promptStatusText,
+  ANSWERS_MODES, answersMode, answerDecision, parseAnswerCommand, ANSWER_USAGE, ANSWER_TEXT_MAX,
+  resolveAnswerTarget, answerLock,
 } from './lib.mjs';
 import fs from 'node:fs';
 
@@ -3097,4 +3101,180 @@ test('v0.30-3 ↑/↓ walk your own submissions and never eat the draft', () => 
   assert.equal(parseHistoryFile(many.join('\n')).length, HISTORY_FILE_MAX);
   assert.equal(serializeHistory(many).split('\n').filter(Boolean).length, HISTORY_FILE_MAX);
   assert.equal(HISTORY_LIVE, 50);
+});
+
+// ============ v0.31: questions are not permissions — the classifier and who may answer ====
+
+test('v0.31-1 the classifier reads the CURRENT pane, on real captures of all four kinds', () => {
+  const q = classifyPrompt(pane('question-single'));
+  assert.equal(q.kind, 'question', 'an AskUserQuestion picker is a question, not a permission');
+  assert.equal(q.header, 'Indentation');
+  assert.equal(q.question, 'Do you prefer tabs or spaces for indentation?');
+  assert.deepEqual(q.options.map((o) => o.n), [1, 2, 3, 4, 5]);
+  assert.equal(q.options[0].text, 'Tabs');
+  assert.equal(q.options[0].marked, true, 'claude marks the row it is on');
+  assert.equal(q.options[3].free, true, '"Type something." is the free-text option');
+  assert.equal(q.options[4].text, 'Chat about this', 'the option below the rule is still an option');
+  assert.equal(q.focus, 1);
+
+  const p = classifyPrompt(pane('permission-bash'));
+  assert.equal(p.kind, 'permission', 'a tool-approval prompt stays host-gated');
+  assert.equal(p.header, 'Bash command', 'and the status row can name the tool');
+  assert.equal(p.question, 'Do you want to proceed?');
+  assert.deepEqual(p.options.map((o) => o.text), ['Yes', 'Yes, and always allow access to /tmp from this project', 'No']);
+  assert.ok(p.options.every((o) => !o.free), 'a permission prompt has no free-text option');
+
+  assert.equal(classifyPrompt(pane('dialog-trust')).kind, 'dialog', 'the trust dialog needs a human');
+  for (const f of ['box-empty', 'box-short', 'box-wrapped', 'box-placeholder', 'box-multiline-small', 'box-busy-idle']) {
+    assert.equal(classifyPrompt(pane(f)).kind, 'none', f);
+  }
+  for (const junk of ['', null, undefined, 'hello', '1. one']) {
+    assert.equal(classifyPrompt(junk).kind, 'none', JSON.stringify(junk));
+  }
+});
+
+test('v0.31-4 a multi-question form reports its tabs, and focus follows the answered ones', () => {
+  const one = classifyPrompt(pane('question-multi'));
+  assert.equal(one.kind, 'question');
+  assert.deepEqual(one.tabs, [{ title: 'Editor', done: false }, { title: 'Shell', done: false }]);
+  assert.equal(one.focus, 1);
+  assert.equal(one.header, 'Editor');
+  assert.equal(one.question, 'Which editor?');
+  // Measured: answering a tab flips its box and focus advances on its own.
+  const two = classifyPrompt(pane('question-multi-2'));
+  assert.deepEqual(two.tabs, [{ title: 'Editor', done: true }, { title: 'Shell', done: false }]);
+  assert.equal(two.focus, 2);
+  assert.equal(two.question, 'Which shell?');
+  // The review step at the end: every tab done, so no focused question to name.
+  const done = classifyPrompt(pane('question-submit'));
+  assert.equal(done.kind, 'question');
+  assert.equal(done.focus, null);
+  assert.equal(done.header, '', 'naming the last tab there would be a lie');
+  assert.equal(done.question, 'Ready to submit your answers?');
+  assert.deepEqual(done.options.map((o) => o.text), ['Submit answers', 'Cancel']);
+  // Each state is its own prompt, so an answer to one can never be replayed into the next.
+  const sigs = new Set([one.sig, two.sig, done.sig, classifyPrompt(pane('permission-bash')).sig]);
+  assert.equal(sigs.size, 4);
+});
+
+test('v0.31-4 /answer <q> <n> targets the focused question and refuses the rest by name', () => {
+  const two = classifyPrompt(pane('question-multi-2'));
+  assert.deepEqual(resolveAnswerTarget(two, null), { ok: true, q: 2 }, 'bare /answer means the one on screen');
+  assert.deepEqual(resolveAnswerTarget(two, 2), { ok: true, q: 2 });
+  const back = resolveAnswerTarget(two, 1);
+  assert.equal(back.ok, false);
+  assert.match(back.error, /question 2 \(Shell\) is the one on screen/);
+  assert.match(back.error, /only the host can Tab between them/);
+  const over = resolveAnswerTarget(two, 3);
+  assert.equal(over.ok, false);
+  assert.match(over.error, /asking 2 questions, so there is no question 3/);
+  // A single question takes no index at all.
+  const one = classifyPrompt(pane('question-single'));
+  assert.deepEqual(resolveAnswerTarget(one, null), { ok: true, q: 1 });
+  assert.equal(resolveAnswerTarget(one, 2).ok, false);
+  assert.match(resolveAnswerTarget(one, 2).error, /asking 1 question, so there is no question 2/);
+  // And with no tab bar at all (a permission prompt, or an older build) there is only ever one.
+  assert.deepEqual(resolveAnswerTarget(classifyPrompt(pane('permission-bash')), 1), { ok: true, q: 1 });
+  assert.match(resolveAnswerTarget(classifyPrompt(pane('permission-bash')), 2).error, /asking one question/);
+});
+
+test('v0.31-3 who may answer what: a question is a decision, a permission is a grant', () => {
+  // A question: anybody, unless the host locked it, and never the free-text option.
+  assert.equal(answerDecision({ kind: 'question', host: false }), 'run');
+  assert.equal(answerDecision({ kind: 'question', host: true }), 'run');
+  assert.equal(answerDecision({ kind: 'question', host: false, answers: 'host' }), 'ask');
+  assert.equal(answerDecision({ kind: 'question', host: true, answers: 'host' }), 'run');
+  assert.equal(answerDecision({ kind: 'question', host: false, free: true }), 'ask',
+    'typing arbitrary text into the TUI is raw keyboard access');
+  assert.equal(answerDecision({ kind: 'question', host: true, free: true }), 'run');
+  // A permission: the v0.17 ladder, unchanged, whatever --answers says.
+  assert.equal(answerDecision({ kind: 'permission', host: false }), 'ask');
+  assert.equal(answerDecision({ kind: 'permission', host: false, answers: 'anyone' }), 'ask');
+  assert.equal(answerDecision({ kind: 'permission', host: true }), 'run');
+  // Nothing on screen, or a dialog: there is no digit to type.
+  for (const kind of ['none', 'dialog', 'nonsense']) {
+    assert.equal(answerDecision({ kind, host: true }), 'refuse', kind);
+  }
+  assert.deepEqual(ANSWERS_MODES, ['anyone', 'host']);
+  assert.equal(answersMode('host'), 'host');
+  for (const v of ['', 'yes', null, undefined, 'HOST']) assert.equal(answersMode(v), 'anyone', JSON.stringify(v));
+});
+
+test('v0.31-3 first answer wins, and the lock lifts when the picker moves on', () => {
+  const one = classifyPrompt(pane('question-multi'));
+  const two = classifyPrompt(pane('question-multi-2'));
+  let state = {};
+  const first = answerLock(state, one.sig, 'Dana');
+  assert.equal(first.ok, true);
+  state = first.state;
+  const second = answerLock(state, one.sig, 'Roy');
+  assert.deepEqual(second, { ok: false, by: 'Dana' }, 'the room is told who got there first');
+  // The form advanced: a different prompt, so a fresh answer.
+  assert.equal(answerLock(state, two.sig, 'Roy').ok, true);
+});
+
+test('v0.31-2 the wording is distinct and honest per kind, and never stale', () => {
+  const q = classifyPrompt(pane('question-single'));
+  assert.match(promptStatusText(q, { host: true }), /^⚠ claude is asking: Do you prefer tabs/);
+  assert.match(promptStatusText(q, { host: false }), /\/answer <n>/);
+  assert.match(promptStatusText(q, { host: false, answers: 'host' }), /the host answers/);
+  const p = classifyPrompt(pane('permission-bash'));
+  assert.match(promptStatusText(p, { host: true }), /^⚠ waiting for permission \(Bash command\)/,
+    'the v0.17 wording, plus the tool it is actually about');
+  assert.match(promptStatusText(p, { host: true }), /F3 attaches the TUI/);
+  assert.match(promptStatusText(p, { host: false }), /\/answer shows the options/);
+  assert.match(promptStatusText(classifyPrompt(pane('dialog-trust'))), /needs the host at the keyboard — F3/);
+  // Nothing on screen is an EMPTY row, which is the whole point: it cannot go stale.
+  assert.equal(promptStatusText(classifyPrompt(pane('box-empty'))), '');
+  assert.equal(promptStatusText(), '');
+});
+
+test('v0.31-2 the question block shows the question and its options, for every client', () => {
+  const b = questionBlock(classifyPrompt(pane('question-single')));
+  assert.match(b, /^claude is asking: Do you prefer tabs or spaces for indentation\?/);
+  assert.match(b, /❯ 1\. Tabs/);
+  assert.match(b, /2\. Spaces/);
+  assert.match(b, /4\. Type something\. {2}\(the host types this one\)/);
+  assert.match(b, /answer it with \/answer <1-5>/);
+  // A form says which of how many, and offers the targeted form.
+  const m = questionBlock(classifyPrompt(pane('question-multi-2')));
+  assert.match(m, /^claude is asking \(2 of 2 · Shell\): Which shell\?/);
+  assert.match(m, /\/answer <question> <n>/);
+  // Locked down, a guest is told who answers instead of being offered a command that refuses.
+  const locked = questionBlock(classifyPrompt(pane('question-single')), { answers: 'host', host: false });
+  assert.match(locked, /the host answers this one/);
+  assert.match(questionBlock(classifyPrompt(pane('question-single')), { answers: 'host', host: true }), /answer it with/);
+  // Anything that is not a question renders nothing at all.
+  for (const f of ['permission-bash', 'dialog-trust', 'box-empty']) {
+    assert.equal(questionBlock(classifyPrompt(pane(f))), '', f);
+  }
+  assert.equal(questionBlock(), '');
+});
+
+test('v0.31-3 /answer parses a digit, a question+digit, and the host-only free text', () => {
+  assert.deepEqual(parseAnswerCommand(''), { ok: true, choice: null, q: null });
+  assert.deepEqual(parseAnswerCommand('  '), { ok: true, choice: null, q: null });
+  assert.deepEqual(parseAnswerCommand('3'), { ok: true, q: null, choice: 3 });
+  assert.deepEqual(parseAnswerCommand('2 1'), { ok: true, q: 2, choice: 1 });
+  assert.deepEqual(parseAnswerCommand('other  ship it as is '), { ok: true, choice: 'other', text: 'ship it as is', q: null });
+  assert.deepEqual(parseAnswerCommand('OTHER yes'), { ok: true, choice: 'other', text: 'yes', q: null });
+  assert.equal(parseAnswerCommand('other').ok, false);
+  assert.match(parseAnswerCommand('other').error, /what to type/);
+  for (const bad of ['0', '10', 'yes', '1 0', '1 2 3', '-1', '1.5', 'other\t']) {
+    assert.equal(parseAnswerCommand(bad).ok, false, JSON.stringify(bad));
+  }
+  assert.equal(parseAnswerCommand(`other ${'x'.repeat(999)}`).text.length, ANSWER_TEXT_MAX);
+  assert.match(ANSWER_USAGE, /\/answer other <text> \(host\)/);
+});
+
+test('v0.31-1 an unreadable picker is treated as a permission, which is the safe way to be wrong', () => {
+  // A numbered picker with none of the three question signals: no checkbox header, no free-text
+  // option, no "to navigate" footer. Being wrong here costs the host one approval; being wrong
+  // the other way would hand a guest a tool grant.
+  const odd = ['────────────────────────────────', ' Some future prompt', '', ' Pick one',
+    ' ❯ 1. Alpha', '   2. Beta', '', ' Esc to cancel'].join('\n');
+  const c = classifyPrompt(odd);
+  assert.equal(c.kind, 'permission');
+  assert.equal(c.header, 'Some future prompt');
+  assert.equal(answerDecision({ kind: c.kind, host: false }), 'ask');
 });
