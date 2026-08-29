@@ -741,14 +741,17 @@ The public README keeps a short list. This is all of them.
   while claude is still booting still lands.
 
 
-## Running the nine end-to-end smokes
+## Running the ten end-to-end smokes
 
-Nine end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
+Ten end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
 ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
 ```sh
-# zsh: `command -v claude` prints the alias text, not a path — ask for the binary.
+# zsh: `command -v claude` prints the alias text, not a path — ask for the binary. And check what
+# comes back: on a machine running cmux, `whence -p claude` is a SHIM in $TMPDIR, not claude —
+# `$HOME/.local/bin/claude` (which is also resolveClaude's own first choice) is the real one, and
+# is what the 2026-08-29 run used.
 # Run the launcher inside a tmux session of your own so it has a real terminal size, and
 # --no-attach so no host client of its own opens (the smokes bring their own clients).
 tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
@@ -787,6 +790,14 @@ node scripts/smoke-transport.mjs
 # (tmux session jamreplaypane) and its own two daemons on 7823/7825, and runs the real ink
 # client in tmux session jamreplayguest. Needs git; no claude, no cloudflared. ~1 min.
 node scripts/smoke-replay.mjs
+
+# v0.17 Batch P: the tenth smoke. Also NO arguments and no daemon of yours — but it DOES need a
+# real claude, because it drives a real permission prompt. Its own port (7831), its own tmux
+# sessions (jampermdrive, jampermtest), its own temp cwd, and it starts the claude window with
+# `--permission-mode manual`: this machine's settings.json says "defaultMode": "bypassPermissions",
+# and with that (or --dangerously-skip-permissions) nothing ever asks and there is no prompt to
+# relay. If the prompt does not appear it says which setting to look at. ~2 min, costs a haiku turn.
+node scripts/smoke-perm.mjs
 ```
 
 ## v0.15 — native-speed host TUI control + faster frames (Roy: F3 typing feels remote)
@@ -1004,3 +1015,73 @@ total. What is worth knowing beyond the item descriptions:
 - **P6 (E3)** slash-command autocomplete: dim filtered list of jam's own commands while the
   input starts with `/`.
 - **P7 (E5)** contrast/color-blind pass over `COLOR_PALETTE`.
+
+#### Batch P — shipped 2026-08-29
+
+All seven, plus `scripts/smoke-perm.mjs` (9 steps, the tenth smoke) and 17 unit tests — 199 total.
+New frames, all additive: client → host `{t:'perm', choice?}` and `{t:'permok', op, name?,
+always?}`; host → clients `{t:'permreq', name, choice, option, options}` (host clients only) and
+`{t:'net', rtt, heartbeat}` (to one client). This retires the v1 Security line "Friends cannot
+answer permission prompts" — with the exact scope below, and nothing wider.
+
+- **P2 is the only load-bearing item, and its shape is a refusal to do the obvious thing.** The
+  obvious thing is to let a guest have F3's raw key passthrough; that is arbitrary bytes into the
+  host's real TUI from off-box, it stays an anti-feature, and `{t:'key'}` from a guest is still
+  refused (asserted in the smoke *after* the relay has worked, so nothing about the relay widened
+  it). What ships instead is one digit, behind five gates that ALL have to hold:
+  `status.waiting` is true · the numbered options parse off `capture()` · the digit is one of
+  them · the host approved that digit on the ladder · **and the screen still says the same thing
+  at the moment of typing**. The last one is why the request record carries the option text and
+  the option count as well as the number: the host approves one option of one prompt, and a prompt
+  that moved on in between would take that digit as the answer to a different question. On any
+  mismatch nothing is typed and both sides are told to look again.
+- **The parser is where the real risk was, so it was written against the real thing.** Probed on
+  claude 2.1.251 (`--permission-mode manual`, `capture-pane -p`): a horizontal rule, ` Bash
+  command`, the command, ` Do you want to proceed?`, then ` ❯ 1. Yes` / `   2. Yes, and always
+  allow access to …` / `   3. No`. Numbering ALONE is not enough to call that a prompt — a
+  markdown plan, a file being read or `git log --oneline` would all qualify, and a digit typed
+  into something that is not a picker lands in claude's input box as text. So the options are the
+  bottom-most block that numbers 1..n with no gap, AND either the picker's own `❯` marker or a
+  question line within four rows above it. Ten-plus options refuse outright rather than silently
+  offering the first nine. Anything unreadable returns nothing, which is a refusal.
+- **The digit answers on its own** — measured on the same probe: `send-keys -H 33` closed the
+  prompt and applied option 3 with no Enter at all. So the Enter the item asked for is sent
+  *conditionally*, only if the same options are still up 300 ms later: a picker that needs it gets
+  it, and a prompt that already closed never receives a stray submit. `sendKeyArgs` does the
+  encoding, so this rides F3's own path with one character in it.
+- **`always` exists on this ladder too**, for symmetry with the other three — and like them the
+  one-key bar never grants it, only the typed `/allow-perm <name> always` does. It is standing
+  permission to ANSWER prompts, still re-validated against the live screen every time, still
+  daemon-memory only. It is the widest thing in Batch P and is documented as such.
+- **P1's allowlist is three commands and deliberately bare.** `/cost` runs; `/cost --json` asks,
+  because an argument is behaviour the list has not read. The hard list is still checked first, so
+  neither the allowlist nor `always` can reach `/exit`/`/clear`/`/resume`. Two existing smokes had
+  to change: they were asserting a round trip for `/cost` that no longer happens, and now use
+  `/release-notes`. That exposed a cross-smoke race worth recording — `runSlash` broadcasts its
+  `sys` line BEFORE the daemon types anything, so a smoke can exit seconds before its last command
+  opens one of claude's modal panels, and a modal swallows everything typed after it. smoke-slash
+  now settles the pane (Esc until claude's input row is back) before it asserts on it.
+- **P3's bell is one byte and no policy.** `\x07` written straight to the real stdout, which is
+  safe beside ink because it paints no cell. Rung on the host's `waiting` transition (the host is
+  who can always answer) and on anybody's own name in a `say` or `chat`, whole-word and
+  case-insensitive, `@Name` included, at most one per 3 s. P4 adds the macOS notification through
+  `xfer.mjs`, argv-only like `/paste`, fire-and-forget so a failed notification cannot cost a frame.
+- **P5 needed no new traffic.** T2's ping is timed and the number goes back on that socket's own
+  `{t:'net'}` frame — never on `status`, which is broadcast and kept in history. The chip redraws
+  only when its text changes, so a healthy `~120ms` costs nothing per second and `⚠ stale Ns`
+  still appears and counts up with no frames arriving.
+- **P6 gives the mirror one row back.** The hint row would otherwise have pushed the status and
+  input rows off the bottom, so `Mirror` takes a `reserve` and drops a frame row while it is up.
+  No arming rule moved: an input starting with `/` is already non-empty, so v0.16's single keys are
+  already off (and the bar says so).
+- **P7 moved exactly one colour, and the measurements are in the test.** Contrast was never the
+  problem: all eight clear 6.1:1 on `#1e1e1e` and 7.7:1 on black. The one genuine weakness was
+  **78 `#5FD787` at ΔE 11.2 (CIE76) from the self green 114 `#87D787`** — the closest pair in the
+  set by a factor of two, and the worst one to have, because it made somebody else's name look
+  like your own. It is now **211 `#FF87AF`** (rose, ΔE 36 from its nearest neighbour, the best
+  dichromat separation of any candidate over the contrast floor). The hash is untouched and the
+  list is deliberately not re-sorted, so only slot index 2 moved: names that hashed there are rose
+  instead of pale green (`Eli` and `Manana` are two). Nothing else moved, because the remaining
+  close pairs — 39/141 and 81/183 collapse under deuteranopia — are inherent to holding eight
+  fixed hues in a space a dichromat sees in two dimensions. Colour here is redundant by
+  construction: the `[Name]` label is always printed next to it.
