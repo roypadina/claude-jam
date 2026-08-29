@@ -94,7 +94,12 @@ function stub(name, body) {
 }
 // A claude that draws a prompt and sits there: the daemon only ever captures this pane, and
 // this smoke never injects anything.
-const FAKE_CLAUDE = stub('claude', "printf '%s\\n' 'fake claude — v0.18 lifecycle smoke' '' '\u276f '\nexec sleep 1800");
+// v0.19: a real claude refuses an unknown option and exits, which is exactly what the launcher's
+// --append-system-prompt-file probe reads. A stub that swallowed every flag and slept instead
+// would stall every launch for the probe's whole timeout, so this one answers like the real thing.
+const FAKE_CLAUDE = stub('claude', 'for a in "$@"; do case "$a" in --claude-jam-probe-unknown-flag)'
+  + ' echo "error: unknown option \'$a\'" >&2; exit 1;; esac; done\n'
+  + "printf '%s\\n' 'fake claude — v0.18 lifecycle smoke' '' '\u276f '\nexec sleep 1800");
 // ttyd and cloudflared stand-ins: they exist to hold a pid the daemon has to kill on the way out.
 const FAKE_TTYD = stub('ttyd', 'exec sleep 1800');
 stub('cloudflared', 'case "$1" in --version) echo "cloudflared version 0.0.0-fake"; exit 0;; esac\nexec sleep 1800');

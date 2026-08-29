@@ -68,7 +68,13 @@ async function until(what, pred, ms = 10000) {
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-invite-'));
 const BIN = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-invite-bin-'));
 const FAKE_CLAUDE = path.join(BIN, 'claude');
-fs.writeFileSync(FAKE_CLAUDE, "#!/bin/sh\nprintf '%s\\n' 'fake claude — v0.22 invite smoke' '' '❯ '\nexec sleep 1800\n", { mode: 0o755 });
+// v0.19: a real claude refuses an unknown option and exits, which is what the launcher's
+// --append-system-prompt-file probe reads. A stub that swallowed every flag and slept instead
+// would stall every launch for the probe's whole timeout, so this one answers like the real thing.
+fs.writeFileSync(FAKE_CLAUDE,
+  '#!/bin/sh\nfor a in "$@"; do case "$a" in --claude-jam-probe-unknown-flag)'
+  + ' echo "error: unknown option \'$a\'" >&2; exit 1;; esac; done\n'
+  + "printf '%s\\n' 'fake claude — v0.22 invite smoke' '' '❯ '\nexec sleep 1800\n", { mode: 0o755 });
 const ENV = { ...process.env, TMPDIR: TMP, JAM_CLAUDE: FAKE_CLAUDE };
 const STATE = path.join(TMP, `claude-jam-${PORT}`);
 
