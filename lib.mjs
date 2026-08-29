@@ -287,6 +287,18 @@ export function parseClientLine(line) {
   }
   // v0.24: the live control panel. Everything it does is one of the commands above.
   if (t === '/menu') return { kind: 'menu' };
+  // v0.26: get somebody's attention on purpose. Anyone may send one — host and guest alike —
+  // and `/nudge` is the same command under the word people reach for first.
+  if (t === '/ping' || t.startsWith('/ping ') || t === '/nudge' || t.startsWith('/nudge ')) {
+    const v = parsePingCommand(t.slice(t.startsWith('/nudge') ? 6 : 5));
+    return v.ok ? { kind: 'ping', to: v.to, text: v.text, escalate: v.escalate }
+      : { kind: 'error', text: v.error };
+  }
+  // v0.25: the keyboard-only half of the Notifications toggles. Bare `/sound` reports.
+  if (t === '/sound' || t.startsWith('/sound ')) {
+    const v = parseSoundCommand(t.slice(6));
+    return v.ok ? { kind: 'sound', on: v.on } : { kind: 'error', text: v.error };
+  }
   // v0.14: the host's answer to a guest's `/command` request. `always` (last word, with or
   // without a name) grants that guest standing approval for the rest of this jam; no name
   // means the only guest currently waiting.
@@ -415,7 +427,9 @@ export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror',
   // v0.22B/C: invite links, and removing somebody who is already in.
   '/invite', '/invites', '/kick',
   // v0.24: the live control panel, and the relay switch it drives (also `claude-jam remote`).
-  '/menu', '/remote'];
+  '/menu', '/remote',
+  // v0.26: an addressed "look at your screen", from anyone to anyone. v0.25: the sound switch.
+  '/ping', '/nudge', '/sound'];
 
 // Session-lifecycle commands: they end or wipe the conversation for EVERYBODY, so they stay
 // with the host. Hard list, enforced server-side — no guest request, no `/allow-cmd always`
@@ -3022,6 +3036,9 @@ export const COMMAND_HELP = {
   '/invite': 'mint a link that joins with no approval · /invite <Name> [--uses N]',
   '/invites': 'every link: id, name, state, uses, expiry',
   '/kick': 'remove somebody already in · /kick <name> [revoke]',
+  '/ping': 'get somebody to look at their screen · /ping <Name|all> [message] · ! repeats once',
+  '/nudge': 'the same thing as /ping, under the word people reach for first',
+  '/sound': 'the sounds this client makes, on or off · /sound on | off',
 };
 
 // Which of them belong to the host.  Everything else is a guest's, and the guest menu lists
@@ -3055,6 +3072,11 @@ export const HOST_FLAGS = [
   { flag: '--tmux-socket', arg: 'default', desc: "put the jam on your own tmux server instead of jam's" },
   { flag: '--no-system-prompt', arg: '', desc: 'do not append the shared-session contract to claude' },
   { flag: '--answers', arg: 'host|anyone', desc: 'who may /answer a question claude asks' },
+  // v0.25/v0.27: the sounds this host client makes, and what a transfer has to go through.
+  { flag: '--no-sound', arg: '', desc: 'start your client silent — no knock, join or nudge sound (the bell and the notification are separate toggles in /menu)' },
+  { flag: '--uploads', arg: 'ask|auto|off', desc: 'ask about every file a guest sends (default), let anyone already admitted send with no prompt, or refuse all uploads' },
+  { flag: '--upload-quota', arg: 'N[MB|files]', desc: 'how much an `auto` session may take before it falls back to asking (default 40 files / 200 MB)' },
+  { flag: '--export', arg: 'ask|auto|off', desc: 'the transcript is the whole conversation, so it has its own toggle and stays `ask` by default' },
   { flag: '--replay', arg: 'N', desc: 'how much of the transcript on disk a joining guest is shown' },
   { flag: '--attach', arg: '', desc: 'reopen your client on a jam that is already running' },
   { flag: '--no-prompt', arg: '', desc: 'do not ask on exit whether to keep the jam running' },
@@ -3160,6 +3182,17 @@ export function menuTree({ host = true, state = {} } = {}) {
         desc: 'let people on this LAN find this jam by name — they still knock, or hold a token, or hold a link',
         value: announceValue(s.announce) },
       { id: 'access.join', label: 'Show the invite lines', desc: COMMAND_HELP['/join'], covers: ['/join'], run: '/join' },
+      // v0.27. The value is the whole point of the row: "why didn't it ask me this time" has to
+      // be answerable by looking, and the caps that never move are said in the same breath.
+      { id: 'access.uploads', label: 'Uploads', covers: [], coversFlag: '--uploads',
+        desc: 'ask about every file a guest sends · auto lets anyone already admitted send with no prompt · off refuses all — the 20 MB cap, the jam-uploads/ confinement and the traversal refusal never move',
+        value: uploadPolicy(s.uploads) },
+      { id: 'access.quota', label: 'Upload quota', covers: [], coversFlag: '--upload-quota',
+        desc: 'how much an `auto` session may take before it falls back to asking — press to reset it',
+        value: quotaText(s.uploadUsed, s.uploadQuota) },
+      { id: 'access.export', label: 'Export the transcript', covers: [], coversFlag: '--export',
+        desc: 'a transcript is the WHOLE conversation, file contents included — so it is a separate toggle and it stays `ask`',
+        value: uploadPolicy(s.exportPolicy) },
       ],
     });
   }
@@ -3188,6 +3221,29 @@ export function menuTree({ host = true, state = {} } = {}) {
         desc: host ? 'F3 hands your keyboard to claude — F3 again comes back' : 'host only: F3 attaches the real TUI' },
       ...(host ? [{ id: 'session.end', label: 'End the jam', desc: COMMAND_HELP['/end'], covers: ['/end'], run: '/end' }] : []),
       { id: 'session.leave', label: 'Leave', desc: COMMAND_HELP['/quit'], covers: ['/quit', '/exit'], run: '/quit' },
+    ],
+  });
+
+  // v0.25/v0.26. Everything in here is THIS client's own decision about how it interrupts THIS
+  // human — which is why a guest gets the whole section and the host gets no more of it. The
+  // phone row is the one that carries a secret, and it says out loud where that secret lives.
+  sections.push({
+    id: 'notify', title: 'Notifications', desc: 'how this client gets your attention, and how you get somebody else\'s',
+    items: [
+      { id: 'notify.ping', label: 'Nudge somebody', desc: COMMAND_HELP['/ping'], covers: ['/ping', '/nudge'], run: '/ping' },
+      { id: 'notify.sound', label: 'Sound', desc: COMMAND_HELP['/sound'], covers: ['/sound'], coversFlag: '--no-sound',
+        value: notifyPrefs(s.notify).sound ? 'on' : 'off' },
+      { id: 'notify.notification', label: 'Desktop notification', covers: [],
+        desc: 'a real notification when somebody knocks, joins or nudges you — a bell in a terminal on another desktop is a bell nobody hears',
+        value: notifyPrefs(s.notify).notification ? 'on' : 'off' },
+      { id: 'notify.bell', label: 'Terminal bell', covers: [],
+        desc: 'the portable half: \\x07, which your terminal already turns into whatever you configured',
+        value: notifyPrefs(s.notify).bell ? 'on' : 'off' },
+      { id: 'notify.phone', label: 'Phone (ntfy)', covers: [],
+        desc: 'opt-in: a nudge addressed to you is POSTed by YOUR client to YOUR topic — the topic lives only in ~/.config/claude-jam/config.json and never reaches the host, an invite link or the protocol',
+        value: s.ntfy ? 'configured' : 'off' },
+      { id: 'notify.who', label: 'Who is idle', desc: COMMAND_HELP['/who'], covers: ['/who'], run: '/who',
+        value: whoIdleValue(s.roster, s.idle) },
     ],
   });
 
@@ -3507,3 +3563,303 @@ export function joinPlanFor(row = {}, { name = '', token = '' } = {}) {
   const argv = ['join', row.url, '--name', name, ...(token ? ['--token', token] : [])];
   return { ok: true, argv, command: hostCommandLine(argv), access };
 }
+
+// ================= v0.25: audible join events, and who gets interrupted ====
+// Which sound an event is worth is a DECISION, so it is made here; what that sound is actually
+// made of (an .aiff, a `paplay`, silence) is platform.mjs's business and nothing else's.
+//
+// Three kinds, deliberately distinguishable by ear, because the whole point is knowing WITHOUT
+// LOOKING whether somebody needs you: a knock is a person waiting for approval, an auto-join is
+// a person who is already in, a nudge is a person asking for you by name. A leave is silent —
+// the roster line is enough, and a jam that chimes when people come and go is a jam people mute.
+export const EVENT_SOUNDS = { knock: 'knock', join: 'join', nudge: 'nudge', leave: null };
+export const SOUND_KINDS = ['knock', 'join', 'nudge'];
+
+// `self` is your own arrival, which is not an arrival. `prefs.sound === false` is the human
+// having said no, and it wins over every event — including the v0.17 `waiting` bell.
+export function soundKind(event, { self = false, prefs = null } = {}) {
+  if (self) return null;
+  if (prefs && notifyPrefs(prefs).sound === false) return null;
+  return EVENT_SOUNDS[String(event ?? '')] ?? null;
+}
+
+// The three tiers a client may use to interrupt its human, each independently switchable —
+// `--no-sound` at launch, `/menu → Notifications`, `/sound on|off`. Absent means on: the
+// notifications v0.17 shipped were unconditional, and a new toggle must not silence them by
+// default for somebody who never asked.
+export const NOTIFY_TIERS = ['sound', 'notification', 'bell'];
+export function notifyPrefs(p = {}) {
+  const o = p || {};
+  return { sound: o.sound !== false, notification: o.notification !== false, bell: o.bell !== false };
+}
+
+// One decision for every interrupt in either client: which tiers actually fire for this event.
+// `phone` is v0.26's third tier and only ever true for a nudge addressed to this person — it is
+// passed in rather than derived, because only the client knows whether its own config has a topic.
+export function notifyPlan({ event = '', self = false, prefs = {}, phone = false } = {}) {
+  const p = notifyPrefs(prefs);
+  return {
+    bell: !self && p.bell,
+    sound: soundKind(event, { self, prefs: p }),
+    notification: !self && p.notification,
+    phone: !self && phone === true,
+  };
+}
+
+// `/sound on|off`, the keyboard-only path to the same switch the menu owns.
+export function parseSoundCommand(rest) {
+  const v = String(rest ?? '').trim().toLowerCase();
+  if (v === 'on' || v === 'off') return { ok: true, on: v === 'on' };
+  if (!v) return { ok: true, on: null }; // bare `/sound` reports, it does not toggle blindly
+  return { ok: false, error: 'usage: /sound on | off' };
+}
+
+// A knock repeats ONCE after 30 s if nobody has answered it, and then stops for good. Never a
+// loop: an alarm that will not stop is an alarm that gets the whole feature turned off.
+export const KNOCK_REPEAT_MS = 30000;
+export function knockRepeat({ at = 0, repeated = false, answered = false, now = 0 } = {}) {
+  if (answered || repeated || !at) return false;
+  return now - at >= KNOCK_REPEAT_MS;
+}
+
+// ================= v0.26: nudges — any human can get another's attention ====
+// A mention already rings a bell, but only for somebody who happens to be watching that
+// terminal. A nudge is EXPLICIT and ADDRESSED, everybody may send one, and how it lands is the
+// recipient's decision (three tiers above) rather than the sender's.
+export const NUDGE_ALL = 'all';
+export const NUDGE_GAP = 30000;      // one nudge per sender → target per 30 s
+export const NUDGE_ALL_GAP = 60000;  // and per sender → everyone per minute
+export const NUDGE_TEXT_MAX = 200;
+export const NUDGE_USAGE = 'usage: /ping <Name|all> [message]  ·  add ! to repeat once after a minute';
+
+// `/ping Yossi look at line 40` · `/ping all` · `/ping Yossi !`. The trailing `!` is the opt-in
+// escalation and is taken off the message, so it can never be mistaken for punctuation somebody
+// typed. Everything after the name is the message; a name with a space in it is why the roster
+// (not this parser) decides where the name ends — see nudgeTarget.
+export function parsePingCommand(rest) {
+  const t = String(rest ?? '').trim().replace(/\s+/g, ' ');
+  if (!t) return { ok: false, error: NUDGE_USAGE };
+  const escalate = t.endsWith(' !') || t === '!';
+  const body = escalate ? t.replace(/\s*!$/, '').trim() : t;
+  const [to, ...words] = body.split(' ');
+  if (!to) return { ok: false, error: NUDGE_USAGE };
+  const text = words.join(' ').slice(0, NUDGE_TEXT_MAX);
+  return { ok: true, to, text, escalate };
+}
+
+// Is this target somebody who can actually be nudged right now? A refusal carries its reason:
+// "not connected" is a fact the sender needs, and it is the reason a nudge is NEVER queued —
+// an attention-getter that arrives an hour later is worse than one that never arrives.
+export function nudgeTarget(to, roster = [], from = '') {
+  const t = String(to ?? '').trim();
+  if (!t) return { ok: false, why: NUDGE_USAGE };
+  if (t.toLowerCase() === NUDGE_ALL) {
+    const names = roster.filter((n) => String(n).toLowerCase() !== String(from).toLowerCase());
+    return names.length ? { ok: true, all: true, to: NUDGE_ALL, names }
+      : { ok: false, why: 'nobody else is here to nudge' };
+  }
+  const hit = roster.find((n) => nameTaken(t, [n]));
+  if (!hit) return { ok: false, why: `${t} is not connected — a nudge is never kept for somebody who is not here` };
+  if (String(hit).toLowerCase() === String(from).toLowerCase()) {
+    return { ok: false, why: 'you are already looking at this screen' };
+  }
+  return { ok: true, all: false, to: hit, names: [hit] };
+}
+
+// The rate limit, per sender → target. Not a silent drop: a refused nudge says how long is left,
+// because the sender's next move is either to wait or to say it in the room.
+export function nudgeAllowed(lastAt, now, { all = false } = {}) {
+  const gap = all ? NUDGE_ALL_GAP : NUDGE_GAP;
+  const since = now - (Number(lastAt) || 0);
+  if (!lastAt || since >= gap) return { ok: true, gap };
+  const left = Math.max(1, Math.ceil((gap - since) / 1000));
+  return { ok: false, gap, retryIn: left,
+    why: `you nudged ${all ? 'everyone' : 'them'} ${Math.round(since / 1000)}s ago — one every ${gap / 1000}s, ${left}s left` };
+}
+
+// The escalation, and the only one there is: `/ping <Name> !` repeats ONCE after a minute, and
+// only if the target has still not become active. Never a loop, never a third.
+export const NUDGE_ESCALATE_MS = 60000;
+export function escalateDue({ at = 0, sent = false, idle = 0, now = 0 } = {}) {
+  if (sent || !at) return false;
+  if (now - at < NUDGE_ESCALATE_MS) return false;
+  return idleBucket(idle) !== 'active';
+}
+
+// ---- idle awareness: coarse seconds, never a keystroke ----
+// What is reported is "time since this person last typed or submitted", in whole seconds, and
+// nothing else. No key, no text, no window title — there is nothing here that could carry
+// content even by accident, and that is the property the docs promise.
+export const IDLE_AFTER = 120;   // seconds without local activity before `idle`
+export const AWAY_AFTER = 1200;  // …and before `away 20m+`
+export function idleBucket(seconds) {
+  const s = Math.max(0, Math.trunc(Number(seconds) || 0));
+  if (s < IDLE_AFTER) return 'active';
+  return s < AWAY_AFTER ? 'idle' : 'away';
+}
+
+export function idleText(seconds) {
+  const s = Math.max(0, Math.trunc(Number(seconds) || 0));
+  const b = idleBucket(s);
+  if (b === 'active') return 'active';
+  if (b === 'away') return `away ${Math.floor(AWAY_AFTER / 60)}m+`;
+  return `idle ${Math.max(1, Math.round(s / 60))}m`;
+}
+
+// `/who`, the roster line and `/menu → People` all read from this, so they cannot disagree
+// about what "idle" means. `idle` is a plain object of name → seconds; a name it does not
+// mention is a client too old to report, and says so rather than being called active.
+export function whoReport(roster = [], idle = {}, { self = null } = {}) {
+  if (!roster.length) return 'nobody is here';
+  return `here: ${roster.map((n) => {
+    const me = self != null && String(n).toLowerCase() === String(self).toLowerCase();
+    const s = idle?.[n];
+    const state = me ? 'you' : (s == null ? 'idle unknown' : idleText(s));
+    return `${n} (${state})`;
+  }).join(', ')}`;
+}
+
+// The one-line summary `/menu → Notifications` shows next to "Who is idle": a count per bucket,
+// because the panel is a status page and "2 active, 1 away" is the actionable form of it.
+export function whoIdleValue(roster = [], idle = {}) {
+  if (!roster.length) return '—';
+  const n = { active: 0, idle: 0, away: 0, unknown: 0 };
+  for (const who of roster) {
+    const s = idle?.[who];
+    n[s == null ? 'unknown' : idleBucket(s)]++;
+  }
+  return ['active', 'idle', 'away', 'unknown'].filter((k) => n[k]).map((k) => `${n[k]} ${k}`).join(', ');
+}
+
+// ---- the phone tier: the recipient's own config, and it never leaves their machine ----
+// THE RULE, and it is a security property rather than a preference: the ntfy topic is a
+// bearer secret (anyone who knows it can publish to that phone). It lives ONLY in the
+// recipient's own `~/.config/claude-jam/config.json`, it is posted by their OWN client, and it
+// is never sent to the host, never put in an invite link, never in the protocol and never in a
+// log line. Nothing in this file returns it in an error message either.
+export const CONFIG_FILE = 'config.json';
+export const NOTIFY_TITLE_LIMIT = 60;
+export const NTFY_TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const NTFY_SERVER_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]{0,252}(?::\d{1,5})?$/;
+export const NTFY_DEFAULT_SERVER = 'https://ntfy.sh';
+
+// Total by construction: a missing file, an empty one, a half-written one and a file with no
+// ntfy block are all the same answer — no phone tier — with a reason that never quotes the
+// topic. `ok:false` is only ever a MALFORMED config, which is worth one dim line.
+export function parseJamConfig(text) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return { ok: true, ntfy: null, why: 'no config file' };
+  let o;
+  try { o = JSON.parse(raw); } catch (e) { return { ok: false, ntfy: null, why: `config.json is not valid JSON: ${e.message}` }; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return { ok: false, ntfy: null, why: 'config.json is not an object' };
+  const n = o.ntfy;
+  if (n == null) return { ok: true, ntfy: null, why: 'no ntfy block' };
+  if (typeof n !== 'object' || Array.isArray(n)) return { ok: false, ntfy: null, why: 'ntfy must be an object' };
+  const topic = typeof n.topic === 'string' ? n.topic.trim() : '';
+  if (!NTFY_TOPIC_RE.test(topic)) {
+    return { ok: false, ntfy: null, why: 'ntfy.topic must be 1-64 chars of [A-Za-z0-9_-]' };
+  }
+  const server = typeof n.server === 'string' && n.server.trim() ? n.server.trim().replace(/\/+$/, '') : NTFY_DEFAULT_SERVER;
+  if (!NTFY_SERVER_RE.test(server)) return { ok: false, ntfy: null, why: 'ntfy.server must be an https:// URL' };
+  return { ok: true, ntfy: { server, topic }, why: '' };
+}
+
+// What the recipient's own client POSTs. Built here so the test can prove the topic only ever
+// appears in the URL of a request THIS machine makes, and never in a body somebody else sees.
+export function ntfyRequest(ntfy, { title = 'claude-jam', message = '', tags = 'wave' } = {}) {
+  if (!ntfy?.topic) return null;
+  return {
+    url: `${ntfy.server}/${ntfy.topic}`,
+    headers: { Title: String(title).slice(0, NOTIFY_TITLE_LIMIT), Tags: String(tags).slice(0, 40) },
+    body: String(message ?? '').slice(0, NUDGE_TEXT_MAX),
+  };
+}
+
+// ================= v0.27: upload policy ====
+// The prompt was never the protection. These are: a sanitized basename with traversal refused,
+// the 20 MB per-file cap, one transfer in flight per client, writes confined to
+// <cwd>/jam-uploads/, nothing executed or auto-opened, and an announced-vs-actual byte mismatch
+// dropping the upload. NONE of them move with the policy — the policy only decides whether the
+// host is ASKED, and every one of those checks runs before this function is ever consulted.
+export const UPLOAD_POLICIES = ['ask', 'auto', 'off'];
+export function uploadPolicy(v) {
+  return UPLOAD_POLICIES.includes(String(v ?? '')) ? String(v) : 'ask';
+}
+
+// The guard `auto` makes necessary. Without a quota an `auto` jam can quietly fill the host's
+// disk one 20 MB file at a time; with it, the session falls back to `ask` and says so once.
+export const UPLOAD_QUOTA = { files: 40, bytes: 200 * 1024 * 1024 };
+export const QUOTA_LINE = 'upload quota reached — asking again';
+
+// `--upload-quota 80files` | `200MB` | `80` (bare = files). One flag for both halves, because
+// they are one budget.
+export function parseUploadQuota(v, base = UPLOAD_QUOTA) {
+  const t = String(v ?? '').trim().toLowerCase();
+  const m = /^(\d{1,6})\s*(files?|mb|gb)?$/.exec(t);
+  if (!m) return { ok: false, error: 'usage: --upload-quota <n>[MB|files] — e.g. 80files or 500MB' };
+  const n = Number(m[1]);
+  if (!n) return { ok: false, error: 'an upload quota of 0 is `--uploads off`, which says so plainly' };
+  if (m[2] === 'mb') return { ok: true, quota: { ...base, bytes: n * 1024 * 1024 } };
+  if (m[2] === 'gb') return { ok: true, quota: { ...base, bytes: n * 1024 * 1024 * 1024 } };
+  return { ok: true, quota: { ...base, files: n } };
+}
+
+export function quotaLeft(used = {}, quota = UPLOAD_QUOTA) {
+  return { files: Math.max(0, quota.files - (used.files || 0)), bytes: Math.max(0, quota.bytes - (used.bytes || 0)) };
+}
+export function quotaReached(used = {}, quota = UPLOAD_QUOTA) {
+  const left = quotaLeft(used, quota);
+  return left.files <= 0 || left.bytes <= 0;
+}
+
+// What the menu row says: what has been taken out of the budget, and whether it is spent.
+export function quotaText(used = {}, quota = UPLOAD_QUOTA) {
+  const q = { ...UPLOAD_QUOTA, ...(quota || {}) };
+  const u = { files: used?.files || 0, bytes: used?.bytes || 0 };
+  return `${u.files}/${q.files} files · ${humanBytes(u.bytes)}/${humanBytes(q.bytes)}`
+    + (quotaReached(u, q) ? ' — spent, asking again' : '');
+}
+
+// The one decision, for `/send` and `/paste` alike. `trusted` is the host's own loopback client;
+// `standing` is a per-person `always` grant, which keeps working under `ask` and is deliberately
+// powerless under `off`.
+export function uploadDecision({ policy = 'ask', trusted = false, standing = false,
+  used = {}, quota = UPLOAD_QUOTA } = {}) {
+  const p = uploadPolicy(policy);
+  if (p === 'off') {
+    return { allow: 'refuse', quota: false,
+      why: 'uploads are off in this jam — the host turns them back on with /menu → Access → Uploads' };
+  }
+  if (trusted) return { allow: 'auto', quota: false, why: 'the host sending a file to their own session' };
+  if (p === 'auto') {
+    if (quotaReached(used, quota)) {
+      return { allow: standing ? 'auto' : 'ask', quota: true, why: QUOTA_LINE };
+    }
+    return { allow: 'auto', quota: false, why: 'uploads are on auto — anyone already admitted may send files' };
+  }
+  return standing
+    ? { allow: 'auto', quota: false, why: 'a standing approval from the host' }
+    : { allow: 'ask', quota: false, why: 'the host is asked for every transfer' };
+}
+
+// The transcript is the WHOLE conversation, including the contents of every file claude read, so
+// it keeps its own toggle and its own default. Same three words, no quota — an export is one
+// thing at a time and the host is the one sending it.
+export function exportDecision({ policy = 'ask', trusted = false, standing = false } = {}) {
+  const p = uploadPolicy(policy);
+  if (p === 'off') {
+    return { allow: 'refuse',
+      why: 'the transcript is not shared in this jam — the host changes that in /menu → Access → Export' };
+  }
+  if (trusted) return { allow: 'auto', why: 'the host asking for their own transcript' };
+  if (p === 'auto') return { allow: 'auto', why: 'the transcript is on auto in this jam' };
+  return standing ? { allow: 'auto', why: 'a standing approval from the host' }
+    : { allow: 'ask', why: 'the host is asked every time' };
+}
+
+// ================= v0.25 bugfix: the launcher's non-tty exit code ====
+// A menu nobody can answer prints the usage text instead of hanging — but WHICH exit code that
+// is depends on what was asked. `claude-jam` with no arguments is a question, and printing its
+// answer is success. `claude-jam join` with no argument is a MISSING ARGUMENT: interactively the
+// Join screen asks for it, and where nothing can ask, it is a usage error and exits 2.
+export function menuNonTtyExit(start) { return String(start ?? '') === 'join' ? 2 : 0; }

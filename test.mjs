@@ -64,13 +64,25 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   unescapeDnsLabel, parseTxtStrings, parseTxtPairs, parseDnssdZone, discoveredJams,
   FIND_COLS, FIND_EMPTY, FIND_GATE, findTable, findJson,
   JOIN_PASTE_VALUE, joinRows, joinPlanFor, announceValue,
+  // v0.25: which sound an event is worth, the three notification tiers, and the knock repeat.
+  EVENT_SOUNDS, SOUND_KINDS, soundKind, NOTIFY_TIERS, notifyPrefs, notifyPlan, parseSoundCommand,
+  KNOCK_REPEAT_MS, knockRepeat, menuNonTtyExit,
+  // v0.26: nudges — parsing, the target, the rate limit, the escalation, and idle awareness.
+  NUDGE_ALL, NUDGE_GAP, NUDGE_ALL_GAP, NUDGE_TEXT_MAX, NUDGE_USAGE, NUDGE_ESCALATE_MS,
+  parsePingCommand, nudgeTarget, nudgeAllowed, escalateDue,
+  IDLE_AFTER, AWAY_AFTER, idleBucket, idleText, whoReport, whoIdleValue,
+  CONFIG_FILE, NTFY_DEFAULT_SERVER, parseJamConfig, ntfyRequest,
+  // v0.27: the upload policy, its quota, and the export toggle that is deliberately separate.
+  UPLOAD_POLICIES, uploadPolicy, UPLOAD_QUOTA, QUOTA_LINE, parseUploadQuota, quotaLeft,
+  quotaReached, quotaText, uploadDecision, exportDecision,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 // v0.32 W0: the platform seam, asserted from outside — it is the only module allowed to spawn
 // a platform binary, and this file is what says so.
-import { clipboardImage, notify, playSound, stateDir, configDir, historyFile, secureWrite,
+import { clipboardImage, notify, playSound, SOUNDS, MAC_SOUND_DIR, soundFile,
+  stateDir, configDir, historyFile, secureWrite,
   secureDir, openExternal,
   // v0.23: mDNS is a platform binary too, so advertising and browsing come through the same seam.
   DNSSD_PATHS, DNSSD_MISSING, resolveDnssd, discoveryAvailable, advertiseSpawn, browseSpawn,
@@ -3532,9 +3544,11 @@ test('v0.24.2 the guest menu lists exactly what a guest may do', () => {
   }
   // A guest has no People / Invites / Access section at all.
   const secs = menuTree({ host: false }).sections.map((s) => s.id);
-  assert.deepEqual(secs, ['session', 'help']);
+  // v0.25/v0.26: Notifications is a guest's section too — how a client interrupts ITS human,
+  // and how that human gets somebody else's attention, is nobody's business but theirs.
+  assert.deepEqual(secs, ['session', 'notify', 'help']);
   assert.deepEqual(menuTree({ host: true }).sections.map((s) => s.id),
-    ['people', 'invites', 'access', 'session', 'help']);
+    ['people', 'invites', 'access', 'session', 'notify', 'help']);
 });
 
 test('v0.24.2 the menu doubles as the status page: every toggle shows its own value', () => {
@@ -4237,4 +4251,318 @@ test('v0.23 session.json records the display name beside the tmux name', () => {
   delete old.jamName;
   assert.equal(parseSessionJson(JSON.stringify(old))?.tmux, 'claude-jam');
   assert.equal(parseSessionJson(JSON.stringify(old))?.jamName, undefined);
+});
+
+// ==================================================== v0.25: audible join events ====
+
+test('v0.25 the sound kinds are three, distinct, and mapped from the EVENT not the wording', () => {
+  // The mapping is the decision, and it lives in lib.mjs: knock = somebody is waiting for you,
+  // join = they are already in, nudge = a person asking for you by name.
+  assert.equal(soundKind('knock'), 'knock');
+  assert.equal(soundKind('join'), 'join');
+  assert.equal(soundKind('nudge'), 'nudge');
+  // A leave is deliberately silent, and so is anything the map has never heard of.
+  assert.equal(soundKind('leave'), null);
+  assert.equal(EVENT_SOUNDS.leave, null);
+  assert.equal(soundKind('whatever'), null);
+  assert.equal(soundKind(undefined), null);
+  assert.deepEqual(SOUND_KINDS, ['knock', 'join', 'nudge']);
+  // Your own arrival is not an arrival.
+  assert.equal(soundKind('join', { self: true }), null);
+  // And the human's `no` beats every event, which is what makes --no-sound and /sound off mean it.
+  assert.equal(soundKind('knock', { prefs: { sound: false } }), null);
+  assert.equal(soundKind('knock', { prefs: { sound: true } }), 'knock');
+});
+
+test('v0.25 the platform seam turns each kind into a DIFFERENT file, and knows when there is none', () => {
+  // The three sounds must not be variations on one click, or the split buys nothing.
+  assert.deepEqual(SOUNDS, { knock: 'Submarine', join: 'Glass', nudge: 'Hero' });
+  assert.equal(new Set(Object.values(SOUNDS)).size, 3);
+  if (process.platform === 'darwin') {
+    const knock = soundFile('knock');
+    const join = soundFile('join');
+    assert.equal(knock.file, `${MAC_SOUND_DIR}/Submarine.aiff`);
+    assert.equal(join.file, `${MAC_SOUND_DIR}/Glass.aiff`);
+    assert.notEqual(knock.file, join.file);
+    assert.equal(knock.bin, 'afplay');
+    // Verified at startup once and remembered: the same object comes back, not a second stat.
+    assert.strictEqual(soundFile('knock'), knock);
+  }
+  // A kind with no sound is a remembered NO, not an exception and not a spawn.
+  assert.equal(soundFile('leave'), null);
+  assert.equal(playSound('leave'), false);
+  assert.equal(playSound(undefined), false);
+});
+
+test('v0.25 the three notification tiers default ON and are independently switchable', () => {
+  assert.deepEqual(NOTIFY_TIERS, ['sound', 'notification', 'bell']);
+  // Absent means on: v0.17 shipped these unconditionally, so a new toggle must not silence
+  // somebody who never asked for silence.
+  assert.deepEqual(notifyPrefs(), { sound: true, notification: true, bell: true });
+  assert.deepEqual(notifyPrefs({ sound: false }), { sound: false, notification: true, bell: true });
+  const plan = notifyPlan({ event: 'knock', prefs: { notification: false } });
+  assert.deepEqual(plan, { bell: true, sound: 'knock', notification: false, phone: false });
+  // --no-sound kills the sound and NOTHING else.
+  assert.deepEqual(notifyPlan({ event: 'knock', prefs: { sound: false } }),
+    { bell: true, sound: null, notification: true, phone: false });
+  // Nothing fires for your own event, whatever the toggles say.
+  assert.deepEqual(notifyPlan({ event: 'nudge', self: true, phone: true }),
+    { bell: false, sound: null, notification: false, phone: false });
+  assert.equal(notifyPlan({ event: 'nudge', phone: true }).phone, true);
+});
+
+test('v0.25 /sound on|off parses, and a bare /sound reports instead of guessing', () => {
+  assert.deepEqual(parseSoundCommand('on'), { ok: true, on: true });
+  assert.deepEqual(parseSoundCommand(' OFF '), { ok: true, on: false });
+  assert.deepEqual(parseSoundCommand(''), { ok: true, on: null });
+  assert.equal(parseSoundCommand('louder').ok, false);
+  assert.deepEqual(parseClientLine('/sound off'), { kind: 'sound', on: false });
+  assert.equal(parseClientLine('/sound louder').kind, 'error');
+});
+
+test('v0.25 an unanswered knock repeats ONCE after 30s, and never a third time', () => {
+  const at = 1000;
+  assert.equal(knockRepeat({ at, now: at + KNOCK_REPEAT_MS - 1 }), false);
+  assert.equal(knockRepeat({ at, now: at + KNOCK_REPEAT_MS }), true);
+  // Answered, or already repeated: never again. This is the whole difference between a
+  // reminder and an alarm nobody can turn off.
+  assert.equal(knockRepeat({ at, answered: true, now: at + 999999 }), false);
+  assert.equal(knockRepeat({ at, repeated: true, now: at + 999999 }), false);
+  assert.equal(knockRepeat({ now: 999999 }), false); // no knock at all
+});
+
+test('v0.25 bugfix: `claude-jam join` with no argument is a usage error on a non-tty', () => {
+  // Interactively it opens the Join screen; where nothing can answer it is a MISSING ARGUMENT,
+  // and a usage error exits 2 like every other one the launcher reports.
+  assert.equal(menuNonTtyExit('join'), 2);
+  // A bare `claude-jam` is a question, and printing its answer is success.
+  assert.equal(menuNonTtyExit('main'), 0);
+  assert.equal(menuNonTtyExit(undefined), 0);
+});
+
+// ============================================================ v0.26: nudges ====
+
+test('v0.26 /ping parses a name, a message and the opt-in escalation', () => {
+  assert.deepEqual(parsePingCommand('Yossi'), { ok: true, to: 'Yossi', text: '', escalate: false });
+  assert.deepEqual(parsePingCommand('Yossi look at line 40'),
+    { ok: true, to: 'Yossi', text: 'look at line 40', escalate: false });
+  // The trailing `!` is taken OFF the message, so it can never be mistaken for punctuation.
+  assert.deepEqual(parsePingCommand('Yossi !'), { ok: true, to: 'Yossi', text: '', escalate: true });
+  assert.deepEqual(parsePingCommand('Yossi come back !'),
+    { ok: true, to: 'Yossi', text: 'come back', escalate: true });
+  assert.deepEqual(parsePingCommand('all standup'), { ok: true, to: 'all', text: 'standup', escalate: false });
+  assert.equal(parsePingCommand('').ok, false);
+  assert.equal(parsePingCommand('   ').error, NUDGE_USAGE);
+  // A message cannot be used to smuggle a novel into somebody's notification centre.
+  assert.equal(parsePingCommand(`Yossi ${'x'.repeat(NUDGE_TEXT_MAX + 50)}`).text.length, NUDGE_TEXT_MAX);
+  // Both spellings are the same command.
+  assert.deepEqual(parseClientLine('/ping Yossi hi'), { kind: 'ping', to: 'Yossi', text: 'hi', escalate: false });
+  assert.deepEqual(parseClientLine('/nudge Yossi hi'), { kind: 'ping', to: 'Yossi', text: 'hi', escalate: false });
+  assert.equal(parseClientLine('/ping').kind, 'error');
+});
+
+test('v0.26 a nudge is refused for somebody who is not connected, and never queued', () => {
+  const roster = ['Roy', 'Dana K', 'Yossi'];
+  assert.deepEqual(nudgeTarget('Yossi', roster, 'Roy'), { ok: true, all: false, to: 'Yossi', names: ['Yossi'] });
+  // Case-insensitive, like every other name comparison in the product.
+  assert.equal(nudgeTarget('yossi', roster, 'Roy').to, 'Yossi');
+  assert.equal(nudgeTarget('dana k', roster, 'Roy').to, 'Dana K');
+  const gone = nudgeTarget('Kobi', roster, 'Roy');
+  assert.equal(gone.ok, false);
+  assert.match(gone.why, /not connected/);
+  assert.match(gone.why, /never kept/); // the refusal says WHY there is no queue
+  // `all` is everybody but you.
+  const all = nudgeTarget('all', roster, 'Roy');
+  assert.deepEqual(all, { ok: true, all: true, to: NUDGE_ALL, names: ['Dana K', 'Yossi'] });
+  assert.equal(nudgeTarget('all', ['Roy'], 'Roy').ok, false);
+  // Nudging yourself is a no-op with a straight answer rather than a bell on your own desk.
+  assert.equal(nudgeTarget('Roy', roster, 'Roy').ok, false);
+  assert.equal(nudgeTarget('', roster, 'Roy').why, NUDGE_USAGE);
+});
+
+test('v0.26 the rate limit is one per sender→target per 30s (per sender→all per 60s)', () => {
+  const now = 1_000_000;
+  assert.equal(nudgeAllowed(0, now).ok, true);           // never nudged them
+  assert.equal(nudgeAllowed(now - NUDGE_GAP, now).ok, true);
+  const no = nudgeAllowed(now - 5000, now);
+  assert.equal(no.ok, false);
+  assert.equal(no.retryIn, 25);
+  assert.match(no.why, /one every 30s/);                 // a refusal carries its own reason
+  // …and `all` is slower, because it interrupts a whole room.
+  assert.equal(nudgeAllowed(now - 45000, now, { all: true }).ok, false);
+  assert.equal(nudgeAllowed(now - 45000, now, { all: false }).ok, true);
+  assert.equal(nudgeAllowed(now - NUDGE_ALL_GAP, now, { all: true }).ok, true);
+  assert.ok(NUDGE_ALL_GAP > NUDGE_GAP);
+});
+
+test('v0.26 the escalation fires once, only after a minute, and only for somebody still not active', () => {
+  const at = 1000;
+  assert.equal(escalateDue({ at, idle: 600, now: at + NUDGE_ESCALATE_MS - 1 }), false);
+  assert.equal(escalateDue({ at, idle: 600, now: at + NUDGE_ESCALATE_MS }), true);
+  // They came back: nothing is repeated at somebody who is already looking.
+  assert.equal(escalateDue({ at, idle: 3, now: at + NUDGE_ESCALATE_MS }), false);
+  // Once. Never a loop.
+  assert.equal(escalateDue({ at, sent: true, idle: 600, now: at + 999999 }), false);
+  assert.equal(escalateDue({ idle: 600, now: 999999 }), false);
+});
+
+test('v0.26 idle is bucketed coarsely, and reports seconds — never a keystroke', () => {
+  assert.equal(idleBucket(0), 'active');
+  assert.equal(idleBucket(IDLE_AFTER - 1), 'active');
+  assert.equal(idleBucket(IDLE_AFTER), 'idle');
+  assert.equal(idleBucket(AWAY_AFTER - 1), 'idle');
+  assert.equal(idleBucket(AWAY_AFTER), 'away');
+  assert.equal(idleText(5), 'active');
+  assert.equal(idleText(240), 'idle 4m');   // the spec's own example
+  assert.equal(idleText(AWAY_AFTER), 'away 20m+');
+  assert.equal(idleText(99999), 'away 20m+');
+  // Garbage in is `active`, not a crash and not a NaN on somebody's status row.
+  assert.equal(idleText(undefined), 'active');
+  assert.equal(idleBucket(-5), 'active');
+  // /who reads the same helper, so the roster and the panel cannot disagree.
+  const line = whoReport(['Roy', 'Dana', 'Yossi'], { Roy: 2, Dana: 240, Yossi: 3000 }, { self: 'Roy' });
+  assert.equal(line, 'here: Roy (you), Dana (idle 4m), Yossi (away 20m+)');
+  // A client too old to report says so rather than being called active.
+  assert.match(whoReport(['Kobi'], {}), /idle unknown/);
+  assert.equal(whoReport([]), 'nobody is here');
+  assert.equal(whoIdleValue(['Roy', 'Dana'], { Roy: 1, Dana: 3000 }), '1 active, 1 away');
+});
+
+test('v0.26 the ntfy topic parses out of the recipient\'s own config, and never out of a bad one', () => {
+  assert.equal(CONFIG_FILE, 'config.json');
+  const ok = parseJamConfig('{"ntfy":{"server":"https://ntfy.sh","topic":"roy-abc_123"}}');
+  assert.deepEqual(ok, { ok: true, ntfy: { server: 'https://ntfy.sh', topic: 'roy-abc_123' }, why: '' });
+  // A missing file, an empty one and one with no ntfy block are all the same answer: no phone
+  // tier, no error, nothing to say out loud.
+  for (const t of ['', '   ', '{}', '{"ntfy":null}']) {
+    const r = parseJamConfig(t);
+    assert.equal(r.ok, true, t);
+    assert.equal(r.ntfy, null, t);
+  }
+  // A CORRUPT one is worth one dim line — and the reason never quotes the topic.
+  const bad = parseJamConfig('{"ntfy":{"topic":');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.ntfy, null);
+  assert.match(bad.why, /not valid JSON/);
+  assert.equal(parseJamConfig('[1,2]').ok, false);
+  assert.equal(parseJamConfig('{"ntfy":{"topic":"has spaces"}}').ok, false);
+  assert.equal(parseJamConfig('{"ntfy":{"topic":"ok","server":"http://ntfy.sh"}}').ok, false); // https only
+  const badTopic = parseJamConfig('{"ntfy":{"topic":"secret topic!!"}}');
+  assert.equal(badTopic.why.includes('secret'), false, 'the refusal must never echo the topic');
+  // The default server, and a trailing slash that would otherwise double up in the URL.
+  assert.equal(parseJamConfig('{"ntfy":{"topic":"t"}}').ntfy.server, NTFY_DEFAULT_SERVER);
+  assert.equal(parseJamConfig('{"ntfy":{"topic":"t","server":"https://n.example/"}}').ntfy.server, 'https://n.example');
+});
+
+test('v0.26 the ntfy request puts the topic in ITS OWN url and in no body anybody else sees', () => {
+  const req = ntfyRequest({ server: 'https://ntfy.sh', topic: 'roy-secret' },
+    { title: '👋 Dana', message: 'look at line 40' });
+  assert.equal(req.url, 'https://ntfy.sh/roy-secret');
+  assert.equal(req.body, 'look at line 40');
+  assert.equal(JSON.stringify(req.headers).includes('roy-secret'), false);
+  assert.equal(req.body.includes('roy-secret'), false);
+  assert.equal(ntfyRequest(null, {}), null);
+  assert.equal(ntfyRequest({ server: 'https://n', topic: 't' }, { message: 'x'.repeat(999) }).body.length, NUDGE_TEXT_MAX);
+});
+
+// ==================================================== v0.27: upload policy ====
+
+test('v0.27 the policy is three words, defaults to ask, and never invents a fourth', () => {
+  assert.deepEqual(UPLOAD_POLICIES, ['ask', 'auto', 'off']);
+  for (const p of UPLOAD_POLICIES) assert.equal(uploadPolicy(p), p);
+  for (const junk of ['', 'yes', null, undefined, 'AUTO']) assert.equal(uploadPolicy(junk), 'ask');
+});
+
+test('v0.27 ask keeps today\'s ladder, auto skips the prompt, off refuses everybody', () => {
+  // ask: the host is asked, unless that person holds a standing `always` grant (v0.22C).
+  assert.equal(uploadDecision({ policy: 'ask' }).allow, 'ask');
+  assert.equal(uploadDecision({ policy: 'ask', standing: true }).allow, 'auto');
+  // auto: anyone already admitted, with no prompt at all.
+  assert.equal(uploadDecision({ policy: 'auto' }).allow, 'auto');
+  // off: everybody, and a standing grant is deliberately powerless — that is what "regardless
+  // of any standing per-person grant" means.
+  const off = uploadDecision({ policy: 'off', standing: true });
+  assert.equal(off.allow, 'refuse');
+  assert.match(off.why, /Uploads/); // the refusal says where to turn it back on
+  assert.equal(uploadDecision({ policy: 'off', trusted: true }).allow, 'refuse');
+  // The host's own /paste is not a prompt anybody needs to answer.
+  assert.equal(uploadDecision({ policy: 'ask', trusted: true }).allow, 'auto');
+});
+
+test('v0.27 the quota auto makes necessary: 40 files / 200 MB, then it falls back to ask and says so', () => {
+  assert.deepEqual(UPLOAD_QUOTA, { files: 40, bytes: 200 * 1024 * 1024 });
+  const under = { files: 39, bytes: 10 };
+  assert.equal(uploadDecision({ policy: 'auto', used: under }).allow, 'auto');
+  assert.equal(uploadDecision({ policy: 'auto', used: under }).quota, false);
+  // Whichever comes first.
+  const byFiles = uploadDecision({ policy: 'auto', used: { files: 40, bytes: 0 } });
+  assert.equal(byFiles.allow, 'ask');
+  assert.equal(byFiles.quota, true);
+  assert.equal(byFiles.why, QUOTA_LINE);
+  const byBytes = uploadDecision({ policy: 'auto', used: { files: 1, bytes: UPLOAD_QUOTA.bytes } });
+  assert.equal(byBytes.allow, 'ask');
+  assert.equal(byBytes.quota, true);
+  // A spent quota does not revoke a grant the host already gave by hand.
+  assert.equal(uploadDecision({ policy: 'auto', used: { files: 99 }, standing: true }).allow, 'auto');
+  assert.equal(quotaReached({ files: 39, bytes: 0 }), false);
+  assert.equal(quotaReached({ files: 40, bytes: 0 }), true);
+  assert.deepEqual(quotaLeft({ files: 41, bytes: 0 }).files, 0); // never negative
+  assert.match(quotaText({ files: 2, bytes: 1024 * 1024 }), /^2\/40 files · 1\.0 MB\/200\.0 MB$/);
+  assert.match(quotaText({ files: 40, bytes: 0 }), /spent, asking again/);
+});
+
+test('v0.27 --upload-quota takes files or megabytes, and refuses the one value that is a lie', () => {
+  assert.deepEqual(parseUploadQuota('80files').quota, { files: 80, bytes: UPLOAD_QUOTA.bytes });
+  assert.deepEqual(parseUploadQuota('80 file').quota, { files: 80, bytes: UPLOAD_QUOTA.bytes });
+  assert.deepEqual(parseUploadQuota('80').quota, { files: 80, bytes: UPLOAD_QUOTA.bytes });
+  assert.deepEqual(parseUploadQuota('500MB').quota, { files: UPLOAD_QUOTA.files, bytes: 500 * 1024 * 1024 });
+  assert.deepEqual(parseUploadQuota('1gb').quota, { files: UPLOAD_QUOTA.files, bytes: 1024 ** 3 });
+  assert.equal(parseUploadQuota('lots').ok, false);
+  // 0 is `--uploads off` wearing a disguise, and it is told so.
+  assert.equal(parseUploadQuota('0').ok, false);
+  assert.match(parseUploadQuota('0').error, /--uploads off/);
+});
+
+test('v0.27 export keeps its own toggle, its own default, and no quota', () => {
+  // A transcript is the WHOLE conversation, file contents included — which is why the two
+  // defaults differ, and why the docs have to say so.
+  assert.equal(exportDecision({}).allow, 'ask');
+  assert.equal(exportDecision({ policy: 'auto' }).allow, 'auto');
+  assert.equal(exportDecision({ policy: 'off' }).allow, 'refuse');
+  assert.equal(exportDecision({ policy: 'off', standing: true }).allow, 'refuse');
+  assert.equal(exportDecision({ policy: 'ask', standing: true }).allow, 'auto');
+  assert.equal(exportDecision({ policy: 'ask', trusted: true }).allow, 'auto');
+  // An upload policy of `auto` says nothing about the transcript: two toggles, on purpose.
+  assert.equal(uploadDecision({ policy: 'auto' }).allow, 'auto');
+  assert.equal(exportDecision({ policy: 'ask' }).allow, 'ask');
+});
+
+test('v0.25/26/27 every new command and flag is reachable from /menu (completeness)', () => {
+  // The v0.24 rule, applied to this batch: a feature that is not in the menu fails the suite.
+  assert.deepEqual(menuGaps({ host: true }), { commands: [], flags: [], extra: [] });
+  assert.deepEqual(menuGaps({ host: false }), { commands: [], flags: [], extra: [] });
+  for (const c of ['/ping', '/nudge', '/sound']) {
+    assert.ok(JAM_COMMANDS.includes(c), c);
+    assert.ok(String(COMMAND_HELP[c] || '').length >= 8, c);
+    // …and a guest may use all three: a nudge that only the host can send is not a nudge.
+    assert.equal(HOST_MENU_ONLY.includes(c), false, c);
+  }
+  for (const f of ['--no-sound', '--uploads', '--upload-quota', '--export']) {
+    assert.ok(HOST_FLAGS.some((x) => x.flag === f), f);
+  }
+  const by = Object.fromEntries(menuItems(menuTree({ host: true, state: {
+    notify: { sound: false }, uploads: 'auto', exportPolicy: 'off',
+    uploadUsed: { files: 3, bytes: 0 }, ntfy: true, roster: ['Roy'], idle: { Roy: 5 },
+  } })).map((i) => [i.id, i]));
+  assert.equal(by['notify.sound'].value, 'off');
+  assert.equal(by['notify.bell'].value, 'on');
+  assert.equal(by['notify.phone'].value, 'configured');
+  assert.equal(by['access.uploads'].value, 'auto');
+  assert.equal(by['access.export'].value, 'off');
+  assert.match(by['access.quota'].value, /3\/40 files/);
+  assert.equal(by['notify.who'].value, '1 active');
+  // A guest gets the Notifications section whole, and still no Access section.
+  const g = Object.fromEntries(menuItems(menuTree({ host: false })).map((i) => [i.id, i]));
+  assert.ok(g['notify.ping'] && g['notify.sound'] && g['notify.phone']);
+  assert.equal(g['access.uploads'], undefined);
 });
