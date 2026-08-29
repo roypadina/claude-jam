@@ -173,14 +173,18 @@ const guest = peer(`ws://127.0.0.1:${P.main}`, 'Guest');
 
 try {
   await step('H1 the daemon seeds history from the resumed transcript before anyone connects', async () => {
-    const seeded = await main.waitLog(/\[replay\] (\d+) of (\d+) event\(s\) seeded from (\S+) \(--replay (\d+)\), (\d+) file\(s\) touched, tailing from byte (\d+)/);
+    // v0.28: the line names --history too, because the ring is what actually holds the seed and
+    // "seeded 20000 into a 2000-event ring" is a thing a host has to be able to see.
+    const seeded = await main.waitLog(/\[replay\] (\d+) of (\d+) event\(s\) seeded from (\S+) \(--replay (\d+|all), --history (\d+)\), (\d+) file\(s\) touched, tailing from byte (\d+)/);
     console.log(`      ${seeded[0].trim()}`);
     if (Number(seeded[1]) !== 9) throw new Error(`seeded ${seeded[1]} events, expected 9`);
     // findJsonl realpaths its hit (a --config-dir whose projects/ is a symlink has to settle on
     // one identity), and on macOS /var is itself a symlink to /private/var.
     if (seeded[3] !== fs.realpathSync(jsonl)) throw new Error(`seeded from ${seeded[3]}`);
-    if (Number(seeded[5]) !== 1) throw new Error(`${seeded[5]} files touched, expected 1 (notes.md)`);
-    if (Number(seeded[6]) !== fs.statSync(jsonl).size) throw new Error(`tail starts at ${seeded[6]}, not EOF`);
+    // Group 5 is the --history the seed was capped against (v0.28); 6 and 7 are what they were.
+    if (Number(seeded[5]) < Number(seeded[1])) throw new Error(`--history ${seeded[5]} cannot hold the ${seeded[1]} events it just seeded`);
+    if (Number(seeded[6]) !== 1) throw new Error(`${seeded[6]} files touched, expected 1 (notes.md)`);
+    if (Number(seeded[7]) !== fs.statSync(jsonl).size) throw new Error(`tail starts at ${seeded[7]}, not EOF`);
   });
 
   await step('H1 a guest joining that session gets the whole backlog in its welcome', async () => {
@@ -297,6 +301,13 @@ try {
     const born = tmux('new-session', '-d', '-s', GUEST_SESSION, '-x', '120', '-y', '40',
       process.execPath, CLIENT_MJS, `ws://127.0.0.1:${P.main}`, '--name', 'Dana', '--token', TOKEN);
     if (born.status !== 0) throw new Error(`tmux: ${born.stderr}`);
+    // v0.28: the live TUI lives in the terminal's ALTERNATE screen buffer, so while it is up
+    // `capture-pane` sees the mirror and not the transcript underneath it. F2 to the transcript
+    // is what a human does to read the backlog, and it is what this step does too — and that the
+    // block is still whole after the flip is itself the v0.28 claim.
+    await until('the client to connect', () => /⧉ live TUI/.test(pane(GUEST_SESSION)), 25000);
+    key('F2');
+    await until('the transcript view', () => /≡ transcript/.test(pane(GUEST_SESSION)), 10000);
     const all = await until('the divider under the replay', () => {
       const b = back(GUEST_SESSION);
       return /history above \(\d+ replayed\) · live from here/.test(b) ? b.split('\n') : null;
@@ -316,6 +327,8 @@ try {
   });
 
   await step('F4 the client\'s default mirror view shows the masked row, never the key', async () => {
+    key('F2'); // back to the live TUI — H2 left this client in the transcript (v0.28)
+    await until('the live chip', () => /⧉ live TUI/.test(pane(GUEST_SESSION)), 10000);
     const r = await until('the mirrored pane', () => (rows(GUEST_SESSION).some((l) => /jam replay smoke pane/.test(l)) ? rows(GUEST_SESSION) : null), 15000);
     show('Dana — the live TUI view, mirroring the planted pane', GUEST_SESSION);
     if (!r.some((l) => /\[masked\]/.test(l))) throw new Error('no masked row on screen');
