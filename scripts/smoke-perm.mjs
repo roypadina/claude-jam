@@ -124,7 +124,9 @@ try {
 
   await step('P2 /answer with nothing waiting is refused, and nothing is typed', async () => {
     guest.send({ t: 'perm', choice: 1 });
-    const e = await guest.want('the refusal', (f) => f.t === 'error' && /nothing is waiting for a permission answer/.test(f.text));
+    // v0.31 reworded this: `/answer` now answers a QUESTION as well as a permission, so the
+    // refusal is about there being nothing on screen at all rather than about permissions.
+    const e = await guest.want('the refusal', (f) => f.t === 'error' && /nothing is waiting for an answer/.test(f.text));
     console.log(`      ${JSON.stringify(e.text)}`);
     // Bare /answer is refused for the same reason: there is no prompt to describe.
     guest.send({ t: 'perm' });
@@ -214,8 +216,9 @@ try {
     console.log(`      ${TARGET} exists — claude proceeded`);
     show('the claude pane after the answer', `${SESSION}:claude`);
     const dlog = log(`${SESSION}:daemon`);
-    const typed = /\[permission\] typed 1[^\n]*/.exec(dlog);
-    console.log(`      daemon: ${typed ? typed[0] : '(no [permission] line in the visible log)'}`);
+    // v0.31: the relay logs under `[answer]` now — it drives questions as well as permissions.
+    const typed = /\[answer\] typed 1[^\n]*/.exec(dlog);
+    console.log(`      daemon: ${typed ? typed[0] : '(no [answer] line in the visible log)'}`);
     if (!typed) throw new Error('the daemon never logged the keystroke');
     // waiting cleared, so the next /answer is refused again.
     await until('status.waiting to clear', () => [...guest.frames].reverse().find((f) => f.t === 'status')?.waiting === false, 20000);

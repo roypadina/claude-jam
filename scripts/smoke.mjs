@@ -38,7 +38,7 @@ function jsonlHasBig(id) {
   // The JSONL holds the message as a JSON string, so compare against the encoded form.
   const want = JSON.stringify(`[Tester]: ${BIG}`).slice(1, -1);
   const seen = (text.match(new RegExp(`${BIG_MARK} line `, 'g')) || []).length;
-  return { whole: text.includes(want), lines: seen, want: BIG_LINES + 1 };
+  return { whole: text.includes(want), lines: seen, want: BIG_LINES }; // the header line is not a marked one
 }
 
 // v0.19: the second turn. Deliberately asks about the SHAPE of the rule rather than for its text —
@@ -110,7 +110,7 @@ function finish(code) {
     ? `IN EFFECT — ${JSON.stringify(got.sysprompt.slice(0, 220))}`
     : 'not proved (check the daemon log for "shared-session contract →", or --no-system-prompt)');
   // v0.30: the multi-line, multi-chunk payload — the exact shape that failed live at 15:20.
-  console.log(`v0.30 big paste  : ${BIG.length} chars / ${BIG_LINES + 1} lines →`, got.big
+  console.log(`v0.30 big paste  : ${BIG.length} chars / ${BIG_LINES + 1} lines, chunked →`, got.big
     ? (got.big.whole ? `WHOLE in the transcript (${got.big.lines}/${got.big.want} marked lines)`
       : `INCOMPLETE — ${got.big.kept || `${got.big.lines}/${got.big.want} marked lines in the transcript`}`)
     : 'MISSING');
