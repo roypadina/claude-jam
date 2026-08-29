@@ -1044,6 +1044,12 @@ async function typeSlash(text) {
 let xferN = 0;
 
 function streamXfer(ws, header, data) {
+  // The pump runs on setImmediate, where a throw would take the whole daemon (and everybody
+  // else's session) with it. Nothing downstream of here may be surprised by its input.
+  if (!Buffer.isBuffer(data)) {
+    console.error(`[xfer] ${header.name}: nothing to send`);
+    return sendError(ws, `${header.name}: nothing to send`);
+  }
   send(ws, { ...header, id: nextId++, ts: Date.now() });
   // A few frames per tick, so a 50 MB transcript does not stall the hook endpoints.
   pumpFrames(xferFrames(header.xfer, data), (f) => send(ws, f), () => clients.has(ws));
@@ -1071,7 +1077,7 @@ function sendExport(rec) {
   const xfer = `e${++xferN}`;
   console.log(`[export] ${rec.name} ← ${file} (${humanBytes(data.length)})`);
   broadcast({ t: 'sys', text: `${rec.name} took a copy of the session transcript (${humanBytes(data.length)})` });
-  streamXfer(rec.ws, { t: 'xfer', xfer, kind: 'export', name: exportFileName(opts.sessionId), size: data.length, session: opts.sessionId });
+  streamXfer(rec.ws, { t: 'xfer', xfer, kind: 'export', name: exportFileName(opts.sessionId), size: data.length, session: opts.sessionId }, data);
 }
 
 // --- v0.13: a guest sends a file in ---
@@ -1189,7 +1195,7 @@ function onGet(ws, me, m) {
   const xfer = `d${++xferN}`;
   console.log(`[file] ${me.name} ← ${offer.path} (${humanBytes(data.length)})`);
   broadcast({ t: 'sys', text: `${me.name} took ${asked} (${humanBytes(data.length)})` });
-  streamXfer(ws, { t: 'xfer', xfer, kind: 'file', name: asked, size: data.length });
+  streamXfer(ws, { t: 'xfer', xfer, kind: 'file', name: asked, size: data.length }, data);
 }
 
 // ------------------------------------------------------- raw key passthrough ----
