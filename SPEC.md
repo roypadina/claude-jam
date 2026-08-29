@@ -2054,3 +2054,47 @@ over LAN and over `--tunnel`. Each of: mirror rendering, F2/F3, invites, knock+a
 `/send` + `/paste` both directions, `/answer`, `/export` + resume on the other OS, sounds,
 notifications, scrollback. A `docs/COMPATIBILITY.md` table records what was actually verified,
 on what build, on what date — never a claim without a run.
+
+## v0.33 — adopt a running session (share the jam you are already in)
+
+Today sharing means `claude-jam host --resume <id>`, which RESTARTS the session in a jam-owned
+pane. Roy's ask: start a jam of the session I am already sitting in, without ending it.
+
+Feasible whenever that claude runs inside a tmux pane — jam's whole substrate is
+`capture-pane` + `paste-buffer` against a pane target, and nothing requires that jam created it.
+
+1. **`claude-jam adopt`** — run it from inside the session (Claude runs it as a Bash call, so it
+   inherits `$TMUX`/`$TMUX_PANE`) or from another terminal with `--pane '%23' [--socket <name>]`.
+   It resolves, and SHOWS what it resolved before doing anything:
+   - the pane (from `$TMUX_PANE`, or the flag) and which tmux **server socket** it lives on —
+     adoption must work on the user's own default socket, not only jam's;
+   - the claude process in that pane (`pane_pid` → child), its cwd;
+   - the session id: newest `~/.claude/projects/<cwd-slug>/*.jsonl` whose mtime is live, verified
+     by echoing that session's first user message and last assistant line for confirmation
+     (`--yes` skips the confirm for scripting). Wrong guess = wrong session shared, so this
+     confirmation is not optional in interactive use.
+2. **Daemon changes**: `--adopt-pane <target> --adopt-socket <name>` makes every tmux call use
+   that socket/pane instead of creating a session. All of it — mirror frames, injection, the
+   JSONL tail, invites, discovery, the ladders — works unchanged.
+3. **Foreign-session rules (hard).** jam did not create this tmux session, so it may never end
+   it: `claude-jam end` on an adopted jam stops the DAEMON and its children (ttyd/tunnel/mDNS)
+   and leaves the pane, the session and claude exactly as they were; `sessions` marks the row
+   `adopted`; `clean` never touches it; the v0.18 ownership marker is written on the state dir
+   only, never as a tmux option on someone else's session. Any tmux option jam would normally
+   set (fill-character, status, the F3 detach binding) is either skipped or saved-and-restored
+   on exit, and NEVER set with `-g`.
+4. **Hooks are the one real limitation, and it must be said plainly.** A running claude cannot be
+   given new hooks or a new `--append-system-prompt-file`, so an adopted jam has: no
+   Stop/Notification hook (turn-end and permission-wait are derived from the pane classifier
+   from v0.31 instead — already the authoritative source), no roster/token context injection,
+   and no durable system-prompt contract. The client says so once (`adopted session: claude was
+   not told it is shared — say so in your first message`), the docs say it, and MANUAL.md
+   explains the difference so the agent can answer "why don't you know who is here".
+5. **`/jam` from inside the session.** Ship a tiny Claude Code plugin (skill + command) in the
+   repo (`integrations/claude-plugin/`): typing `/jam` in any session runs `claude-jam adopt`
+   and prints the invite line; `/jam invite <Name>`, `/jam end` map to the CLI. Installation is
+   documented (marketplace/local plugin dir) and entirely optional — `claude-jam adopt` from the
+   Bash tool works without it.
+6. **When adoption is impossible** (not inside tmux — a bare terminal, or a cmux pane), say so
+   with the exact alternative: exit and run `claude-jam host --resume <id> --cwd <dir>`, with the
+   id already filled in from the detection above.
