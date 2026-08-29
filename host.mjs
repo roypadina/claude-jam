@@ -266,6 +266,9 @@ function joinInfo() {
     view: buildViewUrl(ip, opts.viewPort, viewKey),
     tunnelJoin: buildTunnelJoinLine(tunnelHosts.ws, currentToken, opts.clientCmd),
     tunnelView: buildTunnelViewUrl(tunnelHosts.view, viewKey),
+    // The lines carry the address with or without a token; `token` only decides whether the
+    // "friends knock" hint rides along with them.
+    token: currentToken,
   };
 }
 

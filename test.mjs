@@ -19,7 +19,13 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   // v0.17 Batch P: the guest allowlist, the permission relay, the bell, RTT, autocomplete.
   GUEST_SAFE_COMMANDS, isSafeGuestCommand, parsePermOptions, permOptionsReport, validPermChoice,
   PERM_OPTIONS_MAX, PERM_TEXT_MAX, PERM_ROW_GAP, BELL, BELL_MIN_GAP, bellAllowed, mentionsMe,
-  rttText, RTT_STALE_AFTER, commandMatches, COMMAND_HINTS_MAX } from './lib.mjs';
+  rttText, RTT_STALE_AFTER, commandMatches, COMMAND_HINTS_MAX,
+  // v0.18: jam owns its tmux sessions — the marker, the states, the pickers, the prompts.
+  OWNED_OPTION, SESSION_FILE, STATE_PREFIX, SESSION_TAG, SESSION_V, stateDirFor, portFromStateDir,
+  sessionInfo, parseSessionJson, verifyOwned, classifyJam, JAM_STATES, jamMark, cleanable,
+  resolveTarget, pickNumber, promptChoice, exitDecision, EXIT_KEYS, exitPromptText, reattachLines,
+  TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName, endingNotice, confirmYes,
+  uptimeText, sessionsTable, sessionsJson, sessionsRow } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -259,10 +265,15 @@ test('classifyHello: a bad name is refused before any token check', () => {
   }
 });
 
-test('buildJoinLine: null while no token is set', () => {
+test('buildJoinLine: the address always, the token only when there is one', () => {
   assert.equal(buildJoinLine('100.86.8.97', 7777, 'smoketoken'),
     'node client.mjs ws://100.86.8.97:7777 --name <You> --token smoketoken');
-  assert.equal(buildJoinLine('100.86.8.97', 7777, null), null);
+  // Knock mode still needs an address to hand out — this returned null and left the host
+  // with nothing to send.
+  assert.equal(buildJoinLine('100.86.8.97', 7777, null),
+    'node client.mjs ws://100.86.8.97:7777 --name <You>');
+  assert.equal(buildJoinLine(null, 7777, 'smoketoken'), null);
+  assert.equal(buildJoinLine('100.86.8.97', null, 'smoketoken'), null);
 });
 
 test('buildJoinLine: an installed clientCmd swaps the prefix, nothing else', () => {
@@ -354,10 +365,12 @@ test('buildViewUrl: basic auth is baked in; no key means no view', () => {
 test('joinLines: invite first, view second, the knock hint when there is no token', () => {
   const join = buildJoinLine('10.0.0.2', 7777, 'smoketoken');
   const view = buildViewUrl('10.0.0.2', 7778, 'smoketoken');
-  assert.deepEqual(joinLines(join, view), [`invite: ${join}`, `view: ${view}`]);
-  assert.deepEqual(joinLines(join, null), [`invite: ${join}`]);
-  assert.deepEqual(joinLines(null, view), [NO_TOKEN_HINT, `view: ${view}`]);
-  assert.deepEqual(joinLines(null, null), [NO_TOKEN_HINT]);
+  assert.deepEqual(joinLines(join, view, 'tok'), [`invite: ${join}`, `view: ${view}`]);
+  assert.deepEqual(joinLines(join, null, 'tok'), [`invite: ${join}`]);
+  // Knock mode: the address still has to be there, with the hint saying how they get in.
+  assert.deepEqual(joinLines(join, view, null), [`invite: ${join}`, NO_TOKEN_HINT, `view: ${view}`]);
+  assert.deepEqual(joinLines(null, view, null), [NO_TOKEN_HINT, `view: ${view}`]);
+  assert.deepEqual(joinLines(null, null, null), [NO_TOKEN_HINT]);
 });
 
 test('inviteLines: tunnel pair first, LAN below — the one list every surface prints', () => {
@@ -367,12 +380,14 @@ test('inviteLines: tunnel pair first, LAN below — the one list every surface p
     tunnelJoin: buildTunnelJoinLine('rand1.trycloudflare.com', 'smoketoken'),
     tunnelView: buildTunnelViewUrl('rand2.trycloudflare.com', 'smoketoken'),
   };
+  info.token = 'smoketoken';
   assert.deepEqual(inviteLines(info), [
     `tunnel invite: ${info.tunnelJoin}`, `tunnel view: ${info.tunnelView}`,
     `invite: ${info.join}`, `view: ${info.view}`,
   ]);
   // No tunnel: exactly what joinLines gave before, so nothing regresses for a LAN host.
-  assert.deepEqual(inviteLines({ join: info.join, view: info.view }), joinLines(info.join, info.view));
+  assert.deepEqual(inviteLines({ join: info.join, view: info.view, token: info.token }),
+    joinLines(info.join, info.view, info.token));
   // Knock-only, no view, no tunnel — and a client that has no session block yet.
   assert.deepEqual(inviteLines({}), [NO_TOKEN_HINT]);
   assert.deepEqual(inviteLines(), [NO_TOKEN_HINT]);
@@ -969,11 +984,12 @@ test('parseTunnelUrl: matches TRYCLOUDFLARE_RE directly, hostname only (no schem
   assert.equal(parseTunnelUrl('prose before https://a-b-c.trycloudflare.com prose after'), 'a-b-c.trycloudflare.com');
 });
 
-test('buildTunnelJoinLine: needs both a resolved host and a token, wss:// and no port', () => {
+test('buildTunnelJoinLine: needs a resolved host, token optional, wss:// and no port', () => {
   assert.equal(buildTunnelJoinLine('rand1.trycloudflare.com', 'smoketoken'),
     'node client.mjs wss://rand1.trycloudflare.com --name <You> --token smoketoken');
   assert.equal(buildTunnelJoinLine(null, 'smoketoken'), null); // tunnel not up yet
-  assert.equal(buildTunnelJoinLine('rand1.trycloudflare.com', null), null); // knock-only: nothing to hand out
+  assert.equal(buildTunnelJoinLine('rand1.trycloudflare.com', null),
+    'node client.mjs wss://rand1.trycloudflare.com --name <You>'); // knock mode still gets the URL
 });
 
 test('buildTunnelJoinLine: an installed clientCmd swaps the prefix, same as buildJoinLine', () => {
@@ -1437,8 +1453,8 @@ test('T4 funnelHost feeds buildTunnelJoinLine/buildTunnelViewUrl unchanged', () 
   assert.equal(buildTunnelJoinLine(ws, 'smoketoken', 'jam join'),
     'jam join wss://m.t.ts.net --name <You> --token smoketoken');
   assert.equal(buildTunnelViewUrl(view, 'smoketoken'), 'https://jam:smoketoken@m.t.ts.net:8443');
-  // Same "nothing to hand out while knocking" rule as every other join line.
-  assert.equal(buildTunnelJoinLine(ws, null), null);
+  // Knock mode keeps the address, drops only the token — same rule as every other join line.
+  assert.equal(buildTunnelJoinLine(ws, null, 'jam join'), 'jam join wss://m.t.ts.net --name <You>');
   assert.deepEqual(tunnelJoinLines(buildTunnelJoinLine(ws, 't0kent0ken'), buildTunnelViewUrl(view, 't0kent0ken')),
     ['tunnel invite: node client.mjs wss://m.t.ts.net --name <You> --token t0kent0ken',
       'tunnel view: https://jam:t0kent0ken@m.t.ts.net:8443']);
