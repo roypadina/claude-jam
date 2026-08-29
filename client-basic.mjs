@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // claude-jam terminal client. No dependencies: global WebSocket + readline.
 import readline from 'node:readline';
-import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames, reconnectMessage } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames, reconnectMessage, historyDivider } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
 
 const argv = process.argv.slice(2);
@@ -218,7 +218,11 @@ function connect() {
       // everything it sends. Drop them whenever the boot id changes.
       if (ev.session?.boot !== boot) { boot = ev.session?.boot; seen.clear(); }
       logOnboarding(); // above the first messages; the replay comes after it
-      for (const h of ev.history || []) if (!seen.has(h.id)) { seen.add(h.id); render(h); }
+      let replayed = 0;
+      for (const h of ev.history || []) if (!seen.has(h.id)) { seen.add(h.id); replayed++; render(h); }
+      // v0.17 H2: where the backlog ends and the live session begins.
+      const divider = historyDivider(replayed);
+      if (divider) emit({ text: divider, textColor: C.dim, bare: true });
       sys(`here: ${roster.join(', ')}`);
       return;
     }
@@ -329,6 +333,9 @@ rl.on('line', (raw) => {
     case 'send': doSend(act.path); break;
     case 'paste': doPaste(act.caption); break;
     case 'get': sendMsg({ t: 'get', name: act.name || undefined }); break;
+    // v0.17 F2/F3: the daemon owns both answers — the transcript and the cwd are its.
+    case 'files': sendMsg({ t: 'files' }); break;
+    case 'diff': sendMsg({ t: 'diff', path: act.path || undefined }); break;
     case 'token':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'token', op: act.op, value: act.value });
