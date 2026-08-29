@@ -49,6 +49,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `platform.mjs` | the platform seam. The **only** module allowed to spawn a platform binary (`osascript`, `pngpaste`, `afplay`, `pbcopy`, `open`, …) or to decide where `$TMPDIR`/`~/.config` are. |
 | `popup.mjs` | the one-key `tmux display-popup` approval. |
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
+| `peer-mcp.mjs` | v0.29: `list_peers` / `dispatch_to_peer` as a stdio MCP server for the HOST's own claude. A PIPE, not a brain — every decision is the daemon's, reached over the same loopback+secret endpoint `hooks.sh` uses. |
 | `peer.mjs` | v0.29: running ONE peer task on this machine — the scratch dir, the generated settings, the spawn, the caps and the killing. Imported by both clients so there is one place a peer task is built and stopped. |
 | `test.mjs` | the unit suite. `scripts/` holds the eighteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
 | `integrations/claude-plugin/` | the OPTIONAL `/jam` Claude Code plugin: a command, a skill, a manifest. **No code** — everything it does, it does by running the `claude-jam` on `PATH`. `.claude-plugin/marketplace.json` at the repo root points at it; a test asserts the two manifests agree. |

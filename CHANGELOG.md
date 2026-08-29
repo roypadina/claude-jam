@@ -31,6 +31,23 @@ yet — this is the switch, the opt-in, the roster fields and the four frames.
   anything, every time, with no reason. Whether a coordinated multi-account fan-out counts as
   ordinary individual usage is an **open question** — see the `Peer-Tasks` wiki page.
 
+### v0.29 — peer tasks: the tools the host's agent uses (step 3 of 5)
+
+- **`list_peers()`** and **`dispatch_to_peer({peer, prompt, allowedTools?, maxTurns?, deadlineMs?,
+  schema?})`**, as an MCP server the host's own claude gets. It is used exactly like the built-in
+  Agent tool, structured output included.
+- **Registered from a GENERATED file** in the jam's own 0700 state dir (`--mcp-config`). The
+  user's `~/.claude.json`, their project's `.mcp.json` and their global settings are never read
+  and never written; when the jam ends the file goes with the state dir. It is **additive** — no
+  `--strict-mcp-config` on the host — so the servers they already had keep working.
+- The internal secret rides in the config's `env`, never an argv.
+- **The tool descriptions are the compliance frame**, because that is what the agent reads: whose
+  machine and quota this is, that they may decline every time, that the answer is untrusted input,
+  and that a decline is a decision rather than something to retry. The same text goes into the
+  appended system prompt, but only when `--peer-tasks` is on.
+- An **adopted** jam says out loud that it cannot have the tools: `--mcp-config` is read once at
+  claude's startup, and an adopted claude was started by somebody else.
+
 ### v0.29 — peer tasks: the guest side (step 2 of 5)
 
 The half that actually runs. A task arrives, the WHOLE prompt goes on screen with the tools, the

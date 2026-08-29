@@ -24,6 +24,8 @@
 //       host agent's copy is labelled untrusted
 //   12  the audit log has one line per task, both sides, and /peers log reads it
 //   13  a structured (schema) answer comes back as json
+//   14  the MCP server itself: the JSON-RPC handshake, both tool schemas, and a dispatch that
+//       goes shim → daemon → the guest's machine → back, with the untrusted-input banner on it
 //
 // HONESTY: there is no real `claude` anywhere in here and no token is spent. The daemon's own
 // pane is scripts/fake-tui.mjs (as in smoke-answer), and the peer executor is
@@ -143,6 +145,7 @@ async function control(url, body = {}, port = PORT) {
 // not about ink's rendering (the keys that answer are unit-tested in test.mjs).
 let guestProc = null;
 let guestOut = '';
+let mcpProc = null; // the MCP shim, when step 14 starts one — killed by ITS pid, never by name
 function startGuest(port = PORT) {
   const p = spawn(process.execPath, [CLIENT, `ws://127.0.0.1:${port}`, '--name', 'Dana',
     '--token', TOKEN, '--no-sound'], {
@@ -441,6 +444,59 @@ try {
     eq(PEER_TOOLS_DEFAULT.length, 5, 'the default whitelist is still the five read-only tools');
   });
 
+  // ------------------------------------------------------ 14: the MCP tools themselves ----
+  await step('14 the MCP server answers the handshake and both tools reach the daemon', async () => {
+    const mcp = spawn(process.execPath, [path.join(ROOT, 'peer-mcp.mjs')], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, JAM_PORT: String(PORT), JAM_HOOK_SECRET: secret() },
+    });
+    mcpProc = mcp;
+    let buf = '';
+    const seen = [];
+    mcp.stdout.setEncoding('utf8');
+    mcp.stdout.on('data', (c) => {
+      buf += c;
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const l of lines) { try { seen.push(JSON.parse(l)); } catch { /* not ours */ } }
+    });
+    const rpc = async (id, method, params) => {
+      mcp.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+      return until(`the answer to ${method}`, () => seen.find((m) => m.id === id), 20000);
+    };
+    const init = await rpc(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } });
+    eq(init.result.serverInfo.name, 'claude-jam', 'the server names itself');
+    eq(init.result.protocolVersion, '2024-11-05', 'and answers in the version it was asked in');
+    ok(init.result.capabilities.tools, 'it declares tools');
+    const list = await rpc(2, 'tools/list', {});
+    const names = list.result.tools.map((t) => t.name);
+    eq(names.join(','), 'list_peers,dispatch_to_peer', `both tools: ${names}`);
+    const d = list.result.tools[1];
+    ok(/THEIR account and THEIR quota/.test(d.description), 'the description says whose quota it is');
+    ok(/UNTRUSTED INPUT/.test(d.description), 'and that the answer is untrusted');
+    ok(/may decline/.test(d.description), 'and that they may decline');
+    eq(d.inputSchema.required.join(','), 'peer,prompt', 'peer and prompt are required');
+    // list_peers, through the shim, through the loopback endpoint, off the real roster.
+    const peers = await rpc(3, 'tools/call', { name: 'list_peers', arguments: {} });
+    const rows = JSON.parse(peers.result.content[0].text);
+    eq(rows.find((p) => p.name === 'Dana')?.capable, true, `Dana is capable: ${peers.result.content[0].text}`);
+    // And a real dispatch, end to end: shim → daemon → the guest's machine → back.
+    setMode('ok');
+    guestOut = '';
+    const call = rpc(4, 'tools/call', { name: 'dispatch_to_peer',
+      arguments: { peer: 'Dana', prompt: 'through the MCP tool' } });
+    await until('the consent block', () => saw('wants to run a task on YOUR machine'), 15000);
+    say('/peer accept');
+    const out = (await call).result;
+    ok(!out.isError, `the tool did not report an error: ${out.content[0].text.slice(0, 160)}`);
+    ok(/UNTRUSTED OUTPUT/.test(out.content[0].text), 'and the agent-facing answer carries the banner');
+    ok(/ok: through the MCP tool/.test(out.content[0].text), 'with the peer\'s actual answer in it');
+    // A refusal comes back as an answer with isError, never as a hang and never as a queue.
+    const no = await rpc(5, 'tools/call', { name: 'dispatch_to_peer', arguments: { peer: 'Nobody', prompt: 'x' } });
+    eq(no.result.isError, true, 'a refusal is marked');
+    ok(/nobody named/.test(no.result.content[0].text), 'and it says why');
+  });
+
   exitCode = failed ? 1 : 0;
 } catch (e) {
   console.error(`\nFATAL ${e.message}`);
@@ -448,6 +504,7 @@ try {
   exitCode = 1;
 } finally {
   stopGuest();
+  if (mcpProc) { try { mcpProc.kill('SIGTERM'); } catch { /* already gone */ } }
   try { host?.ws.close(); } catch { /* already gone */ }
   await sleep(300);
   killMine(NAME, PORT);
