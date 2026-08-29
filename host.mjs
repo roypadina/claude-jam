@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
+import readline from 'node:readline';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,7 +17,14 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   backfillHistory, REPLAY_DEFAULT, REPLAY_MAX, noteFilePath, filesNewestFirst, filesReport,
   validDiffPath, gitDiffArgs, capOutput, maskSecrets,
   // v0.17 Batch P: the read-only allowlist, the permission relay, per-client RTT.
-  isSafeGuestCommand, parsePermOptions, permOptionsReport, validPermChoice, PERM_TEXT_MAX } from './lib.mjs';
+  isSafeGuestCommand, parsePermOptions, permOptionsReport, validPermChoice, PERM_TEXT_MAX,
+  // v0.18: jam owns the tmux session it made — the marker, the prompts, the way back in.
+  OWNED_OPTION, SESSION_FILE, stateDirFor, sessionInfo, parseSessionJson, exitDecision, EXIT_KEYS,
+  exitPromptText, reattachLines, TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName,
+  promptChoice } from './lib.mjs';
+// The tmux/fs/HTTP half of v0.18, shared with the `jam sessions|end|clean` command line so the
+// launcher's `[e]nd it` and `jam end` are one code path with one set of gates.
+import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -43,6 +51,12 @@ function parseArgs(argv) {
     else if (a === '--tunnel') o.tunnel = true;
     // v0.17 T4: the other public relay — Tailscale Funnel, whose hostname survives a restart.
     else if (a === '--funnel') o.funnel = true;
+    // v0.18: reopen the client on a jam that is already running, and the three ways to answer
+    // the "keep it running or end it?" prompt before it is ever asked.
+    else if (a === '--attach') o.attach = true;
+    else if (a === '--no-prompt') o.noPrompt = true;
+    else if (a === '--end-on-exit') o.endOnExit = true;
+    else if (a === '--keep-on-exit') o.keepOnExit = true;
     else if (a.startsWith('--')) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
     else throw new Error(`unexpected argument: ${a}`);
   }
@@ -53,7 +67,12 @@ function parseArgs(argv) {
 const opts = parseArgs(process.argv.slice(2));
 opts.name ||= 'Host';
 opts.cwd = path.resolve(opts.cwd || process.cwd());
-opts.state ||= path.join(os.tmpdir(), `claude-jam-${opts.port}`);
+opts.state ||= stateDirFor(os.tmpdir(), opts.port);
+// v0.18: two contradictory flags are a startup error, never a guess about which was meant.
+if (exitDecision({ endOnExit: opts.endOnExit, keepOnExit: opts.keepOnExit }) === 'conflict') {
+  console.error('--end-on-exit and --keep-on-exit say opposite things: pick one (or neither, and answer the prompt).');
+  process.exit(2);
+}
 // No --token means no token at all: friends knock and the host accepts them. A token that
 // was given must survive a join line, a chat message and a URL unquoted.
 opts.token ||= null;
@@ -117,7 +136,9 @@ if (opts.funnel) {
 // claude window, which holds exactly one pane: the TUI. Named, never indexed, so a host with
 // `base-index`/`pane-base-index` of 1 is fine. v0.14: nothing else ever lives in that window,
 // so pane and window are the same thing — the mirror, and a ttyd viewer, see only Claude Code.
-const CLAUDE_PANE = claudeTarget(opts.tmux);
+// `let`, not `const`, only because v0.18's `[n]ew session` can rename this jam before it is
+// built (see retarget()); once the session exists nothing ever moves it.
+let CLAUDE_PANE = claudeTarget(opts.tmux);
 const BOOT = randomUUID(); // clients drop their id-dedupe set when this changes
 // The live token, `/token new|set|off` away from the startup value. null = knock-only.
 let currentToken = opts.token;
@@ -132,12 +153,85 @@ if (opts.view && !ttyd) console.error('--view needs ttyd and could not find it: 
 let viewKey = ttyd ? resolveViewKey(currentToken, () => opts.viewKey || newToken()) : null;
 
 // ---------------------------------------------------------------- launcher ----
-function launch() {
-  if (tmux('has-session', '-t', opts.tmux).status === 0) {
-    console.error(`tmux session "${opts.tmux}" already exists. Attach with: tmux attach -t ${opts.tmux}\n` +
-      `Or run a second jam with --tmux <other-name>.`);
-    process.exit(1);
+// v0.18-1: one keypress, read off the terminal, with no default — nothing destructive may
+// happen because somebody hit Enter or because stdin was a pipe (exitDecision already sent
+// those cases elsewhere). EOF answers nothing, which every caller reads as "leave it alone".
+async function askKey(prompt, keys) {
+  if (!process.stdin.isTTY) return null;
+  console.log(prompt);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    for (;;) {
+      const line = await new Promise((r) => rl.question(`  [${keys.join('/')}] `, r)).catch(() => null);
+      if (line == null) return null;
+      const c = promptChoice(line, keys);
+      if (c) return c;
+    }
+  } finally { rl.close(); }
+}
+
+// Which of jam's own candidate names are already in use — probed one exact name at a time,
+// because `tmux list-sessions` is not something this project reads.
+function takenNames(base, max = 12) {
+  const out = [];
+  for (const c of [base, ...Array.from({ length: max }, (_, i) => `${base}-${i + 2}`)]) if (hasSession(c)) out.push(c);
+  return out;
+}
+
+// `[n]ew session`: this jam moves to a free name AND a free port pair, since the jam holding the
+// old name is still holding :port and :port+1.
+async function retarget(name) {
+  let port = opts.port;
+  for (let i = 0; i < 50 && await portBusy(port); i++) port += 2;
+  opts.tmux = name;
+  opts.port = port;
+  opts.viewPort = port + 1;
+  opts.state = stateDirFor(os.tmpdir(), port);
+  CLAUDE_PANE = claudeTarget(name);
+  console.log(`starting a second jam as "${name}" on :${port} (view :${opts.viewPort})`);
+}
+
+// v0.18-5: `jam host` when the name it wants is taken, and `jam host --attach`. A jam of jam's
+// own offers four ways out; anything else is refused untouched — that session belongs to
+// somebody, and jam has exactly one thing to say about it.
+async function resolveTargetSession() {
+  const taken = hasSession(opts.tmux);
+  const owned = taken ? ownedSession(opts.tmux) : null;
+  if (opts.attach) {
+    if (!taken) {
+      console.error(`there is no tmux session called "${opts.tmux}" to attach to.\n`
+        + '  `jam sessions` lists jam\'s own; `jam host` starts one.');
+      process.exit(1);
+    }
+    if (!owned.ok) { console.error(foreignSessionText(opts.tmux, owned.why)); process.exit(1); }
+    return { attach: owned.info };
   }
+  if (!taken) return {};
+  if (!owned.ok) { console.error(foreignSessionText(opts.tmux, owned.why)); process.exit(1); }
+  const next = autoSessionName(opts.tmux, takenNames(opts.tmux));
+  const choice = opts.noPrompt ? null : await askKey(takenPromptText(opts.tmux, next || 'no free name'), TAKEN_KEYS);
+  if (choice === 'a') return { attach: owned.info };
+  if (choice === 'n') {
+    if (!next) { console.error('every name from that base is taken — pass --tmux <name>'); process.exit(1); }
+    await retarget(next);
+    return {};
+  }
+  if (choice === 'e') {
+    const r = await endJam(owned.info, (l) => console.log(l));
+    if (!r.ok) { console.error(`refused: ${r.why}`); process.exit(1); }
+    return {};
+  }
+  // `c`, no answer, or --no-prompt: the pre-v0.18 refusal, with the v0.18 ways out named.
+  console.error(`tmux session "${opts.tmux}" is already a jam.\n`
+    + `  reopen your client:  jam host --attach${opts.tmux === 'jam' ? '' : ` --tmux ${opts.tmux}`}\n`
+    + `  end it:              jam end ${opts.tmux}\n`
+    + `  a second jam:        jam host --tmux ${next || '<name>'}`);
+  process.exit(1);
+}
+
+async function launch() {
+  const { attach } = await resolveTargetSession();
+  if (attach) return attachHostClient(attach);
   if (opts.resume) console.log(`resuming session ${opts.resume}`);
   fs.mkdirSync(opts.state, { recursive: true, mode: 0o700 });
   writeRoster([]);
@@ -175,6 +269,7 @@ function launch() {
     '-c', opts.cwd, '-n', 'daemon',
     process.execPath, self, '--daemon', ...common));
   sessionCreated = true;
+  claimSession();
   waitForHealth();
 
   // JAM_NODE: hooks.sh must not depend on whatever PATH tmux/claude inherited.
@@ -204,23 +299,95 @@ function launch() {
   if (opts.funnel) console.log(`tailscale funnel connecting — wss://${funnelHost(opts.funnelDns, FUNNEL_PORTS.ws)} (same URL every run)`);
   printJoin();
   if (opts.noAttach) return;
-
   // v0.14: nothing attaches to tmux. The host runs the same single-pane client as every
   // guest, full-screen in this terminal, and watches the real TUI through its mirror view —
   // so there is one surface to learn, and no host chrome for a viewer to see. Loopback +
   // `--host` is what makes this client trusted (F3 key passthrough, slash commands, /token).
-  const client = spawnSync(process.execPath,
-    [path.join(HERE, 'client.mjs'), `ws://127.0.0.1:${opts.port}`,
-      '--name', opts.name, ...(opts.token ? ['--token', opts.token] : []), '--host'],
-    { stdio: 'inherit' });
-  // The client is just a window onto the session: closing it leaves the daemon, the TUI and
-  // every guest exactly where they were, so say how to come back and how to actually stop.
-  console.log(`\nclient closed — the jam is still running.\n` +
-    `  rejoin:  ${opts.clientCmd} ws://127.0.0.1:${opts.port} --name ${opts.name}` +
-    `${currentToken ? ` --token ${currentToken}` : ''} --host\n` +
-    `  raw TUI: tmux attach -t ${opts.tmux}\n` +
-    `  stop:    tmux kill-session -t ${opts.tmux}\n`);
-  if (client.status) process.exitCode = client.status;
+  return runHostClient(readSession() || { tmux: opts.tmux, port: opts.port, state: opts.state, sessionId: opts.sessionId });
+}
+
+// v0.18: the ownership marker, stamped the moment the session exists. `@jam-owned` names the
+// state dir; session.json in that dir names the session back. Neither alone is a claim — the
+// PAIR is, which is what verifyOwned checks before anything is ever killed.
+function claimSession() {
+  const pid = Number((tmux('list-panes', '-t', `${opts.tmux}:daemon`, '-F', '#{pane_pid}').stdout || '').trim()) || 0;
+  const info = sessionInfo({
+    tmux: opts.tmux, port: opts.port, viewPort: opts.viewPort, cwd: opts.cwd,
+    sessionId: opts.sessionId, createdAt: Date.now(), pid, state: opts.state,
+    // How `jam end` authenticates its POST /end: loopback plus this, the same gate the knock
+    // popup already uses. It lives in the 0700 state dir beside token.json.
+    secret: opts.hookSecret,
+  });
+  fs.writeFileSync(path.join(opts.state, SESSION_FILE), `${JSON.stringify(info, null, 2)}\n`, { mode: 0o600 });
+  // Session option on OUR session only; the host's tmux config is never written.
+  const r = tmux('set-option', '-t', opts.tmux, OWNED_OPTION, opts.state);
+  if (r.status !== 0) console.error(`could not stamp ${OWNED_OPTION}: ${(r.stderr || '').trim()}`);
+}
+
+function readSession(state = opts.state) {
+  try { return parseSessionJson(fs.readFileSync(path.join(state, SESSION_FILE), 'utf8')); } catch { return null; }
+}
+
+// Who is in the room besides us, for the exit prompt's count.
+function guestCount(state) {
+  try {
+    const r = JSON.parse(fs.readFileSync(path.join(state, 'roster.json'), 'utf8'));
+    return (r.participants || []).filter((p) => p?.name && p.name !== opts.name).length;
+  } catch { return 0; }
+}
+
+// v0.18-5: `jam host --attach`, and the `[a]ttach as host` answer. Same client, same trust
+// (loopback + `--host`), with the port and the token read out of the state dir instead of out
+// of flags that were meant for a session that already exists.
+async function attachHostClient(info) {
+  if (!await daemonHealth(info.port)) {
+    console.error(`the tmux session "${info.tmux}" is there, but nothing answers on :${info.port}.\n`
+      + `  \`jam sessions\` shows it as no-daemon; \`jam end ${info.tmux}\` clears it out.`);
+    process.exit(1);
+  }
+  console.log(`attaching to jam "${info.tmux}" on :${info.port} — session ${info.sessionId}\n  cwd ${info.cwd}`);
+  return runHostClient(info);
+}
+
+// The host's client, and what happens when it closes. Everything about the decision is in
+// exitDecision/askKey; this only carries it out. `c` comes straight back to the client, which
+// is why this is a loop.
+async function runHostClient(info) {
+  const token = readToken(info.state) ?? opts.token;
+  for (;;) {
+    const client = spawnSync(process.execPath,
+      [path.join(HERE, 'client.mjs'), `ws://127.0.0.1:${info.port}`,
+        '--name', opts.name, ...(token ? ['--token', token] : []), '--host'],
+      { stdio: 'inherit' });
+    if (client.status) process.exitCode = client.status;
+    // The daemon may have ended the jam under us (`/end` in the client): then there is nothing
+    // to keep, and asking about it would be nonsense.
+    if (!hasSession(info.tmux)) {
+      console.log('\nthe jam has ended — the tmux session and its state dir are gone.');
+      return;
+    }
+    const decision = exitDecision({
+      endOnExit: opts.endOnExit, keepOnExit: opts.keepOnExit, noPrompt: opts.noPrompt,
+      isTty: process.stdin.isTTY, isHost: true,
+    });
+    const choice = decision === 'prompt'
+      ? await askKey(`\n${exitPromptText(guestCount(info.state))}`, EXIT_KEYS)
+      : { keep: 'k', end: 'e' }[decision];
+    if (choice === 'c') continue; // back into the client, nothing changed
+    if (choice === 'e') {
+      const r = await endJam(info, (l) => console.log(l));
+      if (!r.ok) console.error(`refused: ${r.why}`);
+      return;
+    }
+    // `k`, no answer at all, --keep-on-exit, --no-prompt, or a stdin that is not a terminal.
+    console.log(`\nclient closed — the jam is still running.\n`
+      + `${reattachLines({ tmux: info.tmux, port: info.port, clientCmd: opts.clientCmd, name: opts.name, token }).map((l) => `  ${l}`).join('\n')}\n`);
+    return;
+  }
+}
+
+function readToken(state) {
+  try { return JSON.parse(fs.readFileSync(path.join(state, 'token.json'), 'utf8')).token || null; } catch { return null; }
 }
 
 let sessionCreated = false;
@@ -228,8 +395,9 @@ function must(r) {
   if (r.status !== 0) {
     console.error(`tmux failed: ${r.stderr || r.stdout}`);
     // Half-built session is useless and blocks the next `jam host`; remove the exact
-    // session name we created a moment ago, nothing else.
-    if (sessionCreated) tmux('kill-session', '-t', opts.tmux);
+    // session name we created a moment ago, nothing else. `=` so tmux cannot prefix-match
+    // its way onto a different session that merely starts the same way.
+    if (sessionCreated) tmux('kill-session', '-t', `=${opts.tmux}`);
     process.exit(1);
   }
 }
@@ -784,9 +952,80 @@ function daemon() {
   // The ttyd/cloudflared children are ours alone. tmux kill-session hangs up the daemon
   // window, and a SIGHUP would otherwise skip the exit handler and leave them orphaned.
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stopView(); stopTunnels(); stopPopup(); restoreStatusRight(); process.exit(0); });
-  process.on('exit', () => { stopView(); stopTunnels(); stopPopup(); restoreStatusRight(); });
+  // v0.18-7: the state dir goes with the session, and only with the session — `tmux
+  // kill-session` from finishEnd() hangs this window up, so the removal is booked here too.
+  // A daemon that merely dies (a SIGTERM of its own) leaves the dir alone on purpose: that is
+  // what lets `jam sessions` say `! no-daemon` and `jam end` finish the job.
+  process.on('exit', () => {
+    stopView(); stopTunnels(); stopPopup(); restoreStatusRight();
+    if (removeState) removeStateDir(opts.state);
+  });
   setInterval(tailJsonl, 300).unref?.();
   startHeartbeat(wss);
+  startSessionWatch();
+}
+
+// ------------------------------------------------------ v0.18: ending the jam ----
+// One teardown, reached from `jam end` (POST /end) and from `/end` in the host client. Order
+// matters: everybody is TOLD first — a client that hears `{t:'ending'}` prints one line and
+// exits 0 instead of reconnecting at a daemon that is deliberately going away — then the
+// children we spawned are stopped, then the state dir goes, and only then, marker-verified,
+// this daemon's own tmux session.
+let ending = false;
+let removeState = false; // set once the session is provably ours and going away
+function endSession(why) {
+  if (ending) return;
+  ending = true;
+  console.log(`[end] ${why} — telling everyone, then shutting down`);
+  broadcast({ t: 'ending', by: opts.name, reason: why });
+  // A second, so the frame is actually on the wire (and a guest's client is off the socket)
+  // before the daemon starts dismantling the room around it.
+  setTimeout(finishEnd, 1000).unref?.();
+}
+
+function finishEnd() {
+  stopView();
+  stopTunnels();
+  stopPopup();
+  restoreStatusRight();
+  // THE gate, taken while the state dir is still intact — the marker and session.json are a
+  // PAIR, and verifying is exactly what reading both is for. (Order matters and cost a bug
+  // once: removing the dir first left nothing to verify against, so the session survived.)
+  const v = ownedSession(opts.tmux);
+  if (!v.ok) {
+    // The state dir stays. It is what makes this jam visible to `jam sessions` (as no-daemon)
+    // and endable with `jam end`, instead of a tmux session with no explanation attached.
+    console.log(`[end] NOT killing tmux session "${opts.tmux}": ${v.why}`);
+    return process.exit(0);
+  }
+  // kill-session hangs up this window, which is this process — so the removal has to be booked
+  // on the way out as well as attempted here.
+  removeState = true;
+  const killed = killOwned(opts.tmux, v);
+  console.log(killed.ok ? `[end] killed tmux session ${opts.tmux}` : `[end] ${killed.why}`);
+  const gone = removeStateDir(opts.state);
+  if (!gone.ok) console.log(`[end] ${gone.why}`);
+  process.exit(0);
+}
+
+// v0.18-7: the daemon outliving its own session. It normally cannot — it runs in a window of
+// that session — but a daemon started by hand with `--daemon` can, and then it holds a port and
+// a state dir while there is nothing left to type into. Only for a session the LAUNCHER built
+// (session.json present and pointing here); a standalone daemon with no session.json of its own
+// keeps running, which is what every smoke in scripts/ relies on.
+function startSessionWatch() {
+  const timer = setInterval(() => {
+    if (ending) return;
+    const mine = readSession();
+    if (!mine || mine.tmux !== opts.tmux) return; // not a launcher-built jam: nothing to watch
+    if (hasSession(opts.tmux)) return;
+    console.log(`[watchdog] tmux session "${opts.tmux}" is gone — nothing left to drive, exiting`);
+    ending = true;
+    removeState = true; // there is no session left for it to describe
+    broadcast({ t: 'ending', by: opts.name, reason: 'the tmux session went away' });
+    setTimeout(() => process.exit(0), 500).unref?.();
+  }, 5000);
+  timer.unref?.();
 }
 
 // v0.17 T2: the `ws` README's own broken-connection pattern. Two things need it. One, a socket
@@ -841,6 +1080,16 @@ function onRequest(req, res) {
         : admit(m?.name, m?.ok === true);
       reply(err ? 404 : 200, err ? { error: err } : { ok: true });
     });
+    return;
+  }
+  // v0.18-3: `jam end` asking the daemon to end the whole jam. Same guard as /admit — loopback
+  // plus the internal secret, which `jam end` reads out of the 0700 state dir — so a rotated
+  // friend token can never reach it and nothing off-box can reach it at all.
+  if (req.method === 'POST' && req.url === '/end') {
+    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
+    reply(200, { ok: true }); // answered first: the teardown takes this socket down with it
+    endSession('jam end');
     return;
   }
   const hook = /^\/hook\/(\w[\w-]*)$/.exec(req.url || '');
@@ -1115,6 +1364,12 @@ function onSocket(ws, req) {
     } else if (m.t === 'token') {
       if (!me.host) return sendError(ws, 'host only');
       onToken(ws, m);
+      // v0.18-4: `/end`. This ends the session for everybody and kills the tmux session it runs
+      // in, so it wears F3's gate — host AND loopback, i.e. the client the launcher spawned —
+      // and the client asks its own `really end this jam for everyone?` before it ever gets here.
+    } else if (m.t === 'end') {
+      if (!trusted(me)) return sendError(ws, 'ending the jam is the host\'s, on loopback only');
+      endSession(`/end from ${me.name}`);
     } else {
       sendError(ws, `unknown message type: ${m.t}`);
     }
@@ -1787,4 +2042,6 @@ function onTranscript(e) {
   }
 }
 
-if (opts.daemon) daemon(); else launch();
+// launch() is async since v0.18 (its prompts are), so the launcher path is awaited here;
+// the daemon path is unchanged and never returns.
+if (opts.daemon) daemon(); else await launch();
