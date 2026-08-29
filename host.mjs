@@ -53,8 +53,9 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.27: the upload policy, its session quota, and the export toggle that stays separate.
   uploadPolicy, uploadDecision, exportDecision, parseUploadQuota, UPLOAD_QUOTA, UPLOAD_POLICIES,
   quotaText, QUOTA_LINE,
-  // v0.33: the pane jam adopted rather than created — validated here, driven below.
-  validPaneId, SOCKET_NAME_RE,
+  // v0.33: the pane jam adopted rather than created — validated here, driven below — and the
+  // briefing an adopted claude gets INSTEAD of the hooks and the system prompt it cannot be given.
+  validPaneId, SOCKET_NAME_RE, BRIEF_NAME, buildBriefing, briefUpdates, MANUAL_FILE,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -141,6 +142,9 @@ function parseArgs(argv) {
   // v0.31: who may answer a QUESTION outright. `host` puts questions back on the approval ladder;
   // permissions are never affected by it either way.
   o.answers = answersMode(o.answers);
+  // v0.33: whether an adopted session is re-told after a compaction or a roster change. One word,
+  // normalised here so nothing downstream has to re-decide what a typo meant.
+  o.briefUpdates = briefUpdates(o.briefUpdates);
   return o;
 }
 
@@ -1750,6 +1754,13 @@ function daemon() {
       console.log(`claude profile: ${opts.configDir}`);
       console.log(`tail globs: ${jsonlGlobs(opts.sessionId, os.homedir(), opts.configDir).join('  ')}`);
     }
+    // v0.33: as soon as there is a daemon to be shared BY, tell the session it is shared. It goes
+    // on the injection queue like everything else, so if claude is mid-turn Claude Code queues it
+    // and it lands when the turn ends — which is the right moment for it anyway.
+    if (ADOPTED && opts.brief === false) {
+      console.log('[brief] --no-brief: claude has NOT been told this session is shared');
+    }
+    brief('adoption');
     if (ttyd) startView();
     startTunnels();
     // v0.23: last of the three children, and only once the port is actually bound — announcing
@@ -2033,7 +2044,10 @@ function admitSocket(ws, name, host, loopback = false, via = 'token') {
       id: opts.sessionId, cwd: opts.cwd, hostName: opts.name, boot: BOOT, jamName: opts.jamName,
       // v0.33: everyone is told this jam was ADOPTED — it changes what the client may promise
       // (no Stop/Notification hooks, so turn-end comes off the pane) and what ending it does.
+      // `noBrief` is the one a client must SAY OUT LOUD: an agent that has not been told it is
+      // shared may answer a participant as if it were the host.
       adopted: ADOPTED,
+      noBrief: ADOPTED && opts.brief === false,
       ...(host ? { ...joinInfo(), tmux: opts.tmux, tmuxSocket: SOCKET } : {}),
       // The host's F3 goes to the pane jam is actually driving, on the server it lives on.
       ...(host && ADOPTED ? { tmuxTarget: opts.adoptPane, tmuxSocket: opts.adoptSocket } : {}),
@@ -3246,10 +3260,13 @@ function clearBox() {
   return !inputBoxText(capture());
 }
 
-async function inject(name, text, ws = null, kept = null) {
+async function inject(name, text, ws = null, kept = null, { keep = true } = {}) {
   const payload = `[${name}]: ${text}`;
   // On disk first. `kept` is a /retry, which already has a file — re-keeping it would leave two.
-  const file = kept || outboxWrite(name, payload);
+  // v0.33: `keep:false` is the injected briefing, which is the one payload nothing should keep —
+  // it is regenerated from the roster whenever it is needed, and putting it in the outbox would
+  // put it in `/outbox` and under somebody's `/retry`.
+  const file = keep ? (kept || outboxWrite(name, payload)) : null;
   await ensureReady();
   // Wait for the input box. Claude Code queues text typed mid-response, so a timeout
   // is not fatal — paste anyway.
@@ -3280,7 +3297,9 @@ async function inject(name, text, ws = null, kept = null) {
       // -landed chunk would glue itself to the next message), and keep the payload either way.
       const had = !!inputBoxText(capture());
       if (had) clearBox();
-      const where = file || '(nowhere — the outbox is not writable, see the daemon log)';
+      const where = keep
+        ? (file || '(nowhere — the outbox is not writable, see the daemon log)')
+        : '(nothing to keep — this payload is regenerated when it is needed)';
       console.log(`[inject] ${name}'s message did not land${chunks.length > 1 ? ` (chunk ${c + 1}/${chunks.length})` : ''}`
         + ` — kept at ${where}, box ${had ? 'had text and was cleared' : 'was empty'}`);
       if (ws) sendError(ws, keptMessageText(where));
@@ -3300,6 +3319,44 @@ async function inject(name, text, ws = null, kept = null) {
   console.log(`[inject] ${name}'s message was pasted but the box did not clear — kept at ${file}`);
   if (ws) sendError(ws, keptMessageText(file || '(nowhere)'));
   throw new Error('kept');
+}
+
+// -------------------------------------------- v0.33: telling an adopted claude ----
+// A claude claude-jam STARTED is handed the contract twice: an appended system prompt (which
+// survives a /compact) and the SessionStart hook. An ADOPTED one can be given neither — both are
+// read once, at startup, and it started before claude-jam existed for it. What claude-jam does own
+// is the injection path, so the contract is TYPED IN.
+//
+// It goes through the same queue as every other injection, so it can never interleave with
+// somebody's message; it is NOT kept in the outbox (it is regenerated from the roster whenever it
+// is needed); and it is never broadcast as a `say`, because a paragraph of protocol in everyone's
+// transcript is noise. The room gets one line saying it happened.
+let briefedAt = 0;
+let briefing = false;
+function brief(reason) {
+  if (!ADOPTED || opts.brief === false || briefing) return;
+  briefing = true;
+  const text = buildBriefing({
+    hostName: opts.name, manual: path.join(HERE, MANUAL_FILE),
+    participants: names(), jamName: opts.jamName, reason,
+  });
+  queue = queue.then(() => inject(BRIEF_NAME, text, null, null, { keep: false }))
+    .then(() => {
+      briefedAt = Date.now();
+      console.log(`[brief] told claude this session is shared (${reason})`);
+      broadcast({ t: 'sys', text: reason === 'adoption'
+        ? 'claude has been told this session is now shared, and who is in it'
+        : `claude has been re-told this session is shared (${reason})` });
+    })
+    .catch((e) => {
+      // A briefing that did not land is not a message anybody lost — but it IS the difference
+      // between an agent that knows the rules and one that does not, so it is said out loud.
+      console.error(`[brief] the briefing did not land in the pane (${e.message}) — claude has NOT been told`);
+      broadcast({ t: 'sys', text: 'claude-jam could not tell claude that this session is shared — '
+        + 'the message did not land in the pane. Say so yourself, or /retry-brief is not a thing: '
+        + 'end the jam and adopt again.' });
+    })
+    .finally(() => { briefing = false; });
 }
 
 // ------------------------------------------------- v0.30: /retry and /outbox ----

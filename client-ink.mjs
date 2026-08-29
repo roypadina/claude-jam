@@ -38,8 +38,9 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   // the offer that follows a kick.
   INVITE_CONNECT_MS, inviteMintedLines, kickOffer,
   // v0.20: jam's tmux lives on its own socket, so F3's attach has to name it.
-  // v0.33: and an adopted jam names a pane id instead of a window of its own.
-  tmuxSocketArgs, TMUX_DEFAULT_SOCKET, tmuxAttachLine, attachTarget,
+  // v0.33: and an adopted jam names a pane id instead of a window of its own. `noBriefWarning`
+  // is the one thing a client must say out loud when the host chose not to tell claude.
+  tmuxSocketArgs, TMUX_DEFAULT_SOCKET, tmuxAttachLine, attachTarget, noBriefWarning,
   // v0.31: the status row and the question block are both drawn from the daemon's classification
   // of the live pane, so a client can never show a prompt that is no longer on screen.
   promptStatusText, questionBlock,
@@ -837,6 +838,14 @@ function connect() {
       // v0.23: the jam's NAME leads, because that is what a human calls the room they just
       // walked into; the session id stays, in the same 8-char form every other surface shows.
       sys(`jam ${ev.session.jamName ? `"${ev.session.jamName}" ` : ''}(${String(ev.session.id).slice(0, 8)}) — host ${ev.session.hostName}, cwd ${ev.session.cwd}`);
+      // v0.33: an adopted jam is a different promise, and both halves are said once, here.
+      if (ev.session.adopted) {
+        sys('this jam ADOPTED a session that was already running: ending it stops claude-jam and '
+          + 'leaves the pane, its tmux session and claude exactly as they are. A running claude '
+          + 'cannot be given hooks, so turn-end and "waiting for permission" are read off the '
+          + 'screen instead — the ⚠ row is the pane, not an event.');
+        if (ev.session.noBrief) err(noBriefWarning());
+      }
       if (IS_HOST) logJoin();
       logOnboarding(); // above the first messages; the replay comes after it
       // A restarted daemon reissues ids from 1, so old ids in `seen` would swallow
