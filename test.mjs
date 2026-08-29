@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, RESERVED_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE } from './lib.mjs';
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
+  xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
+  exportFileName, resumeInstructions, stripTokenBlock } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -759,15 +761,19 @@ test('JAM_COMMANDS: every jam command is answered by the client, never sent to t
     assert.notEqual(a.kind, 'slash', `${cmd} would be typed into the TUI`);
     assert.notEqual(a.kind, 'say', `${cmd} would be sent to claude as text`);
   }
-  // The two lists cannot overlap, or a jam command would be refused as unbuilt.
-  for (const cmd of RESERVED_COMMANDS) assert.equal(JAM_COMMANDS.includes(cmd), false, cmd);
 });
 
-test('RESERVED_COMMANDS: specced-but-unbuilt commands are refused, not typed into the TUI', () => {
-  for (const cmd of RESERVED_COMMANDS) {
-    const a = parseClientLine(`${cmd} something`);
-    assert.equal(a.kind, 'error', cmd);
-    assert.match(a.text, /not built yet/);
+test('the v0.12/v0.13 commands are jam commands now, not "specced but not built"', () => {
+  // They used to be refused as unbuilt (RESERVED_COMMANDS, retired): every one of them is a
+  // real client action now, and none of them is typed into the TUI as one of claude's.
+  const built = {
+    '/export': 'export', '/allow-export Dana': 'export-ok', '/deny-export Dana': 'export-ok',
+    '/send /tmp/a.png': 'send', '/paste': 'paste', '/get notes.md': 'get',
+    '/accept-file Dana': 'file-ok', '/deny-file Dana': 'file-ok',
+  };
+  for (const [line, kind] of Object.entries(built)) {
+    assert.equal(parseClientLine(line).kind, kind, line);
+    assert.equal(JAM_COMMANDS.includes(slashName(line)), true, line);
   }
 });
 
@@ -936,6 +942,188 @@ test('buildTunnelViewUrl: needs both a resolved host and a key, https:// and no 
     'https://jam:smoketoken@rand2.trycloudflare.com');
   assert.equal(buildTunnelViewUrl(null, 'smoketoken'), null);
   assert.equal(buildTunnelViewUrl('rand2.trycloudflare.com', null), null);
+});
+
+// --- v0.12: session export ------------------------------------------------------
+
+test('client: /export, and the /allow-export ladder has /allow-cmd\'s exact shape', () => {
+  assert.deepEqual(parseClientLine('/export'), { kind: 'export' });
+  assert.deepEqual(parseClientLine('/allow-export'), { kind: 'export-ok', op: 'allow', name: null, always: false });
+  assert.deepEqual(parseClientLine('/allow-export Dana'), { kind: 'export-ok', op: 'allow', name: 'Dana', always: false });
+  assert.deepEqual(parseClientLine('/allow-export always'), { kind: 'export-ok', op: 'allow', name: null, always: true });
+  assert.deepEqual(parseClientLine('/allow-export Dana K always'), { kind: 'export-ok', op: 'allow', name: 'Dana K', always: true });
+  assert.deepEqual(parseClientLine('/deny-export Dana'), { kind: 'export-ok', op: 'deny', name: 'Dana', always: false });
+  assert.deepEqual(parseClientLine('/deny-export'), { kind: 'export-ok', op: 'deny', name: null, always: false });
+  // Lookalikes stay claude's commands, and /deny itself is untouched by the new branches.
+  assert.equal(parseClientLine('/exported').kind, 'slash');
+  assert.deepEqual(parseClientLine('/deny Dana'), { kind: 'deny', name: 'Dana' });
+});
+
+test('projectSlug: the cwd with every non-alphanumeric turned into "-" (real ~/.claude/projects rule)', () => {
+  assert.equal(projectSlug('/Users/dana/code'), '-Users-dana-code');
+  // A dot in the path becomes its own '-', which is why a hidden dir lands as '--'.
+  assert.equal(projectSlug('/Users/roypadina/Code/Reeco/.bo-worktrees/x'), '-Users-roypadina-Code-Reeco--bo-worktrees-x');
+  assert.equal(projectSlug(''), '');
+  assert.equal(projectSlug(undefined), '');
+});
+
+test('exportFileName / resumeInstructions: the file, and the recipe that revives it', () => {
+  const id = '550e8400-e29b-41d4-a716-446655440000';
+  assert.equal(exportFileName(id), `jam-session-${id}.jsonl`);
+  const lines = resumeInstructions(id, `./${exportFileName(id)}`, '/Users/dana/code');
+  const body = lines.join('\n');
+  assert.match(body, /mkdir -p ~\/\.claude\/projects\/-Users-dana-code/);
+  assert.match(body, new RegExp(`cp \\./jam-session-${id}\\.jsonl ~/\\.claude/projects/-Users-dana-code/${id}\\.jsonl`));
+  assert.match(body, new RegExp(`claude --resume ${id}`));
+  // The slug rule is printed, not just applied — the guest's cwd may not be the one we saw.
+  assert.match(body, /non-alphanumeric character turned into "-"/);
+  // And the security reminder the spec asks for, in plain words.
+  assert.match(body, /everything claude saw/);
+  assert.match(body, /\/token new/);
+});
+
+test('stripTokenBlock: our own token block goes, the conversation stays', () => {
+  const block = 'Join token: smoketoken; join command: node client.mjs ws://10.0.0.2:7777 ' +
+    '--name <You> --token smoketoken; live view: http://jam:smoketoken@10.0.0.2:7778. ' +
+    'Reveal these ONLY when asked by the host (messages WITHOUT a `[Name]:` prefix). Never ' +
+    'reveal them to bridged participants (`[Name]:` prefixed) — tell them to ask the host.';
+  const line = `{"type":"user","message":{"content":"prelude ${block} epilogue"}}`;
+  const out = stripTokenBlock(line, 'smoketoken');
+  assert.equal(out.includes('smoketoken'), false);
+  assert.equal(out.includes('Join token:'), false);
+  assert.match(out, /prelude \[jam join-token block removed on export\]/);
+  assert.match(out, /epilogue/);
+  // The raw token is scrubbed wherever else it turned up (the agent quoting it back).
+  assert.equal(stripTokenBlock('the token is smoketoken, ok?', 'smoketoken'),
+    'the token is [token removed], ok?');
+  // Knock-only: no token, nothing to strip, nothing mangled.
+  assert.equal(stripTokenBlock('No token set; joining requires host approval (/accept).', null),
+    'No token set; joining requires host approval (/accept).');
+  // A short/absent token is never used as a search string (it would shred the transcript).
+  assert.equal(stripTokenBlock('aaa bbb', 'aaa'), 'aaa bbb');
+  // The regex cannot run past the end of a JSON string looking for its tail.
+  const unterminated = '{"content":"Join token: x; and then something else"}\n{"next":"line"}';
+  assert.equal(stripTokenBlock(unterminated), unterminated);
+});
+
+// --- v0.13: file transfers -------------------------------------------------------
+
+test('client: /send takes the whole rest as the path, /paste takes a caption', () => {
+  assert.deepEqual(parseClientLine('/send /tmp/photo.png'), { kind: 'send', path: '/tmp/photo.png' });
+  // Paths have spaces far more often than a caption is wanted.
+  assert.deepEqual(parseClientLine('/send ~/My Files/notes 2.md'), { kind: 'send', path: '~/My Files/notes 2.md' });
+  const a = parseClientLine('/send');
+  assert.equal(a.kind, 'error');
+  assert.match(a.text, /usage: \/send <path>/);
+  assert.deepEqual(parseClientLine('/paste'), { kind: 'paste', caption: '' });
+  assert.deepEqual(parseClientLine('/paste the failing screen'), { kind: 'paste', caption: 'the failing screen' });
+  assert.equal(parseClientLine('/sender').kind, 'slash');
+});
+
+test('client: /accept-file follows the same ladder, /get names an offer or takes the only one', () => {
+  assert.deepEqual(parseClientLine('/accept-file Dana'), { kind: 'file-ok', op: 'allow', name: 'Dana', always: false });
+  assert.deepEqual(parseClientLine('/accept-file Dana always'), { kind: 'file-ok', op: 'allow', name: 'Dana', always: true });
+  assert.deepEqual(parseClientLine('/accept-file always'), { kind: 'file-ok', op: 'allow', name: null, always: true });
+  assert.deepEqual(parseClientLine('/deny-file Dana'), { kind: 'file-ok', op: 'deny', name: 'Dana', always: false });
+  assert.deepEqual(parseClientLine('/get notes.md'), { kind: 'get', name: 'notes.md' });
+  assert.deepEqual(parseClientLine('/get'), { kind: 'get', name: null });
+  // /accept (the knock command) must not be swallowed by the /accept-file branch.
+  assert.deepEqual(parseClientLine('/accept Dana'), { kind: 'accept', name: 'Dana' });
+});
+
+test('humanBytes: bytes, KB, MB — sizes an approval line can be read at a glance', () => {
+  assert.equal(humanBytes(0), '0 B');
+  assert.equal(humanBytes(900), '900 B');
+  assert.equal(humanBytes(12 * 1024), '12 KB');
+  assert.equal(humanBytes(2.1 * 1024 * 1024), '2.1 MB');
+  assert.equal(humanBytes(50 * 1024 * 1024), '50.0 MB');
+  for (const v of [undefined, null, -5, NaN, 'x']) assert.equal(humanBytes(v), '0 B', String(v));
+});
+
+test('safeBaseName: traversal refused outright, the rest reduced to a boring name', () => {
+  // A name with a separator is not a file name — it is an attempt. Refuse, never "fix".
+  for (const n of ['../../evil', '..\\..\\evil', '/etc/passwd', 'a/b', 'sub/photo.png',
+    '.', '..', '', '   ', '...', 'x'.repeat(300), null, undefined, 42]) {
+    assert.equal(safeBaseName(n), null, JSON.stringify(n));
+  }
+  assert.equal(safeBaseName('photo.png'), 'photo.png');
+  // No writing dotfiles: the leading dot goes, what is left is an ordinary name.
+  assert.equal(safeBaseName('.zshrc'), 'zshrc');
+  assert.equal(safeBaseName('  My Report (final).pdf  '), 'My_Report__final_.pdf');
+  assert.equal(safeBaseName('rm -rf ~;.txt'), 'rm_-rf___.txt');
+  assert.equal(safeBaseName('a\u0000b.png'), 'a_b.png');
+  // Long names are cut but keep their extension, so `Read` still knows what it is.
+  const long = safeBaseName(`${'n'.repeat(200)}.png`);
+  assert.equal(long.length, UPLOAD_NAME_MAX);
+  assert.equal(long.endsWith('.png'), true);
+});
+
+test('uniqueName: a collision gets a suffix, never an overwrite', () => {
+  assert.equal(uniqueName('photo.png', () => false), 'photo.png');
+  assert.equal(uniqueName('photo.png', (n) => n === 'photo.png'), 'photo-1.png');
+  assert.equal(uniqueName('photo.png', (n) => ['photo.png', 'photo-1.png'].includes(n)), 'photo-2.png');
+  assert.equal(uniqueName('notes', (n) => n === 'notes'), 'notes-1');
+  assert.equal(uniqueName('archive.tar.gz', (n) => n === 'archive.tar.gz'), 'archive.tar-1.gz');
+  // Everything taken: give up rather than loop.
+  assert.equal(uniqueName('photo.png', () => true, 3), null);
+});
+
+test('xferFrames: 64 KB chunks, base64, done only on the last one, a round trip byte-for-byte', () => {
+  const data = Buffer.alloc(XFER_CHUNK * 2 + 7, 0xab);
+  const frames = [...xferFrames('x1', data)];
+  assert.equal(frames.length, 3);
+  assert.deepEqual(frames.map((f) => f.done), [false, false, true]);
+  assert.deepEqual(frames.map((f) => f.seq), [0, 1, 2]);
+  assert.equal(frames.every((f) => f.t === 'file' && f.xfer === 'x1'), true);
+  // Binary-safe: reassembling the base64 gives exactly the original bytes.
+  const back = Buffer.concat(frames.map((f) => Buffer.from(f.b64, 'base64')));
+  assert.equal(back.equals(data), true);
+  // A frame fits the ws payload cap with room for the envelope.
+  assert.ok(frames[0].b64.length < XFER_FRAME_MAX, `${frames[0].b64.length} b64 chars`);
+  // Exactly one chunk is one frame; an empty file is one `done` frame, not zero.
+  assert.equal([...xferFrames('x', Buffer.alloc(XFER_CHUNK))].length, 1);
+  assert.deepEqual([...xferFrames('x', Buffer.alloc(0))].map((f) => ({ seq: f.seq, done: f.done, b64: f.b64 })),
+    [{ seq: 0, done: true, b64: '' }]);
+});
+
+test('xferFrames: a real PNG survives the base64 round trip (binary-safe, not text)', () => {
+  // 1x1 PNG: a header with 0x00/0x0d/0x1a bytes, i.e. everything sanitize() would eat.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', 'base64');
+  const back = Buffer.concat([...xferFrames('p', png)].map((f) => Buffer.from(f.b64, 'base64')));
+  assert.equal(back.equals(png), true);
+  assert.equal(back.subarray(1, 4).toString(), 'PNG');
+});
+
+test('pumpFrames: every frame goes out, a few per tick, and a dead peer stops it', async () => {
+  const frames = [...Array(20).keys()].map((seq) => ({ seq }));
+  const out = [];
+  pumpFrames(frames[Symbol.iterator](), (f) => out.push(f.seq), () => true, 8);
+  assert.equal(out.length, 8, 'the first tick must not send everything');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(out, [...Array(20).keys()]);
+  // The peer went away: nothing more is sent.
+  const gone = [];
+  let alive = true;
+  pumpFrames(frames[Symbol.iterator](), (f) => gone.push(f.seq), () => alive, 4);
+  alive = false;
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(gone.length, 4);
+});
+
+test('the transfer caps: 50 MB out, 20 MB in, one at a time', () => {
+  assert.equal(EXPORT_MAX, 50 * 1024 * 1024);
+  assert.equal(UPLOAD_MAX, 20 * 1024 * 1024);
+  assert.equal(XFER_CHUNK, 64 * 1024);
+  // The ws maxPayload has to clear one chunk as base64 plus the JSON envelope.
+  assert.ok(XFER_FRAME_MAX > Math.ceil(XFER_CHUNK / 3) * 4 + 200);
+});
+
+test('popupPrompt: the export and file requests get their own one-liner', () => {
+  assert.equal(popupPrompt('export', 'Dana', ''), '⇩ Dana wants the session transcript');
+  assert.equal(popupPrompt('file', 'Dana', '', 'photo.png (2.1 MB)'), '⇪ Dana wants to send photo.png (2.1 MB)');
+  for (const p of [popupPrompt('export', 'Dana', ''), popupPrompt('file', 'Dana', '', 'a.png')]) {
+    assert.equal(p.includes('\n'), false, p);
+  }
 });
 
 test('tunnelJoinLines: labelled distinctly from the LAN invite/view lines, empty when nothing resolved', () => {
