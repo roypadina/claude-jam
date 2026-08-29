@@ -56,6 +56,7 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.33: the pane jam adopted rather than created — validated here, driven below — and the
   // briefing an adopted claude gets INSTEAD of the hooks and the system prompt it cannot be given.
   validPaneId, SOCKET_NAME_RE, BRIEF_NAME, buildBriefing, briefUpdates, MANUAL_FILE,
+  contextLostSignal, rosterKey, briefUpdateDecision,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -964,9 +965,25 @@ function statusFrame() {
 }
 function pushStatus() { broadcast(statusFrame()); }
 
+// v0.33: what claude was last told the room was. A reconnect is not a change; somebody arriving
+// or leaving is. Only ever compared, never shown.
+let briefedRoster = null;
+
 function rosterChanged(extra) {
   writeRoster([...clients.values()].map(({ name, joinedAt }) => ({ name, joinedAt })));
   broadcast({ t: 'roster', roster: names(), idle: idleMap(), ...extra });
+  // v0.33: an adopted claude holds "who is here" only because it was typed in, so a real change
+  // to that set makes its copy wrong. It is not worth interrupting a turn or a prompt for, and it
+  // is not worth a message every time somebody's laptop wakes up — hence the whole decision.
+  if (!ADOPTED || opts.brief === false) return;
+  const key = rosterKey(names());
+  const d = briefUpdateDecision({ mode: opts.briefUpdates, reason: 'roster',
+    key, lastKey: briefedRoster, busy: status.busy, promptKind: prompt.kind,
+    lastAt: briefedAt, now: Date.now() });
+  if (!d.brief) return;
+  briefedRoster = key;
+  console.log(`[brief] roster: re-telling claude — ${d.why}`);
+  brief('roster');
 }
 
 // ------------------------------------------------------------- live view ----
@@ -1575,18 +1592,46 @@ function onHistory(ws, m) {
 // screen calls it too — the Notification hook, a typed answer, a new assistant record — so the
 // status is usually right within a frame rather than within a tick.
 const PROMPT_GAP = 400;
+// v0.33: the same capture answers a second question on an adopted jam — has the context the
+// briefing was injected into just gone? A `/compact` or a `/clear` is the one moment where an
+// agent that knew the rules stops knowing them, and there is no hook to tell us.
+// `undefined` = never looked. The FIRST look only records what is on screen: a session adopted
+// seconds after its own `/clear`, or with a `Compacted` line still visible from before
+// claude-jam was there, has already been briefed by then, and a second copy on top of the first
+// would be noise. Only a CHANGE from what was there at adoption is a context that has just gone.
+let lostSig;
+function watchContext(screen) {
+  if (!ADOPTED || opts.brief === false) return;
+  const now = contextLostSignal(screen);
+  const sig = now?.sig ?? null;
+  if (lostSig === undefined) { lostSig = sig; return; }
+  if (sig === lostSig) return;
+  lostSig = sig;
+  if (!sig) return; // the marker scrolled away, which is what re-arms this
+  const d = briefUpdateDecision({ mode: opts.briefUpdates, reason: 'compaction',
+    promptKind: prompt.kind, busy: status.busy, lastAt: briefedAt, now: Date.now() });
+  console.log(`[brief] ${now.kind}: ${d.brief ? 're-telling claude' : `not re-telling — ${d.why}`}`);
+  if (d.brief) brief('compaction');
+}
+
 function pumpPrompt() {
   if (!clients.size) return prompt;
-  const now = classifyPrompt(capture());
-  if (now.sig === prompt.sig) return prompt;
-  prompt = now;
-  status.waiting = now.kind !== 'none';
-  // A picker that went away and came back is a NEW question, so the first-answer-wins lock goes
-  // with it. Nothing else clears it: while one prompt is up, one answer is what it gets.
-  if (now.kind === 'none') answered = {};
-  console.log(`[prompt] ${now.kind}${now.header ? ` (${now.header})` : ''}`
-    + `${now.question ? ` — ${now.question.slice(0, 70)}` : ''}`);
-  pushStatus();
+  // v0.33: ONE capture, two questions. The second (has the context just gone?) is asked after
+  // `prompt` has moved, so "is a picker up right now" is this tick's answer and not last tick's —
+  // and nothing is ever typed into a picker.
+  const screen = capture();
+  const now = classifyPrompt(screen);
+  if (now.sig !== prompt.sig) {
+    prompt = now;
+    status.waiting = now.kind !== 'none';
+    // A picker that went away and came back is a NEW question, so the first-answer-wins lock goes
+    // with it. Nothing else clears it: while one prompt is up, one answer is what it gets.
+    if (now.kind === 'none') answered = {};
+    console.log(`[prompt] ${now.kind}${now.header ? ` (${now.header})` : ''}`
+      + `${now.question ? ` — ${now.question.slice(0, 70)}` : ''}`);
+    pushStatus();
+  }
+  watchContext(screen);
   return prompt;
 }
 function startPromptPoll() {
@@ -3343,6 +3388,9 @@ function brief(reason) {
   queue = queue.then(() => inject(BRIEF_NAME, text, null, null, { keep: false }))
     .then(() => {
       briefedAt = Date.now();
+      // Whatever the reason, claude now holds THIS roster — so the next roster re-brief is about
+      // a change from here, not from whenever the last roster-triggered one happened.
+      briefedRoster = rosterKey(names());
       console.log(`[brief] told claude this session is shared (${reason})`);
       broadcast({ t: 'sys', text: reason === 'adoption'
         ? 'claude has been told this session is now shared, and who is in it'

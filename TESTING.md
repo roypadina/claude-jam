@@ -71,11 +71,22 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   (which builds real jams and drives the launcher's prompts) plus the new `smoke-adopt` cover the
   paths that did change. Prove: full sweep at the next release gate.
 - 2026-08-29 · Adoption has never been run against a REAL claude in a REAL pane on the default
-  tmux socket — `smoke-adopt` uses a shell stub for the pane, and the one default-socket case it
-  runs uses a session the smoke created itself. So the injected briefing has never been seen to
-  land in a live conversation, and the pane classifier has never been seen to re-brief after a
-  real `/compact`. Prove: one live adoption in the campaign (Roy's own session, `--no-brief` off),
-  looking at the pane afterwards.
+  tmux socket — `smoke-adopt` uses `scripts/fake-tui.mjs` for the pane, and the one default-socket
+  case it runs uses a session the smoke created itself. So the injected briefing has never been
+  seen to land in a live conversation. Prove: one live adoption in the campaign (Roy's own
+  session, `--no-brief` off), looking at the pane afterwards.
+- 2026-08-29 · `contextLostSignal`'s patterns are UNVERIFIED against a real compaction. There is
+  no capture of one in `fixtures/pane/`, so the wording (`Compacted`, the post-`/clear` welcome
+  block) comes from claude 2.1.251's own output rather than from a measured corpus — and
+  `smoke-adopt` S7b drives it with a fixture the SMOKE invents, in its own temp dir, deliberately
+  not added to the real corpus. The end-to-end path (marker on the pane → re-brief injected and
+  landed) is therefore proven; the marker itself is a guess. Prove: capture a real `/compact` and
+  a real `/clear` into `fixtures/pane/`, then assert against those. A false negative here is an
+  agent that has quietly forgotten the two standing rules, so it is worth a real capture.
+- 2026-08-29 · The ROSTER re-brief has unit tests (`briefUpdateDecision`, `rosterKey`) but no
+  end-to-end run: proving it needs a fake clock, because the 10-minute rate limit is armed by the
+  adoption briefing seconds earlier. Prove: either a `--brief-min-gap` test hook, or a campaign
+  run long enough to cross the gap with somebody joining.
 - 2026-08-29 · `--funnel` carries a known UPSTREAM risk, not merely an unverified path:
   tailscale/tailscale#18827 (filed 2026-02-27, open) reports WebSockets through `tailscale
   serve`'s HTTP reverse proxy — the same layer Funnel rides — closing every 10–40 s with code

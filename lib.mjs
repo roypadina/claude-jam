@@ -3546,7 +3546,9 @@ export function menuTree({ host = true, state = {} } = {}) {
           + 'what it resolved and asks first. Ending an adopted jam stops claude-jam and leaves '
           + 'the pane, the tmux session and claude exactly as they were. At adoption claude is '
           + 'TOLD it is shared — one injected message, because a running claude cannot be given '
-          + 'hooks or a system prompt; `--no-brief` skips it.' },
+          + 'hooks or a system prompt; `--no-brief` skips it, and it is re-sent after a /compact '
+          + 'or /clear and on a meaningful roster change while the session is idle (at most one '
+          + 'every 10 minutes; `--brief-updates off` stops those).' },
       ...(host ? [{ id: 'help.flags', label: 'Host launch flags', covers: [],
         desc: 'what `claude-jam host` takes, and what each flag does',
         items: HOST_FLAGS.map((f) => ({ id: `flag${f.flag}`, label: `${f.flag}${f.arg ? ` ${f.arg}` : ''}`,
@@ -4438,6 +4440,77 @@ export function noBriefWarning() {
 export const BRIEF_UPDATE_MODES = ['on', 'off'];
 export function briefUpdates(v) {
   return BRIEF_UPDATE_MODES.includes(String(v ?? '')) ? String(v) : 'on';
+}
+
+// -------------------------------------- v0.33: noticing that the briefing is gone ----
+// An injected briefing lives in the context, and the context has two ways of going away:
+// `/compact` summarises it out, `/clear` deletes it outright. Both are visible on the pane, which
+// is where v0.31 already reads everything else from — so the same classifier notices them.
+//
+// UNVERIFIED against a real compaction (2026-08-29): there is no capture of one in
+// `fixtures/pane/`, so these patterns come from claude 2.1.251's own wording rather than from a
+// measured corpus, and TESTING.md carries that as a deferred verification. They are deliberately
+// narrow. A false POSITIVE costs one extra injected message and one turn; a false NEGATIVE costs
+// an agent that has quietly forgotten the two standing rules while people are still talking to
+// it — so if the wording moves, this fails in the direction that matters, and the roster re-brief
+// is the backstop that eventually catches it.
+const COMPACTED_RE = /(?:^|[\s⏺●*])Compacted\b|conversation (?:has been )?compacted|compacting conversation/i;
+// The welcome block claude redraws after `/clear` — the glyph half AND the version half, because
+// the glyphs alone are also what a session that started thirty seconds ago is still showing.
+const BANNER_GLYPH_RE = /[▐▛▜▝█]{2,}/;
+const BANNER_VERSION_RE = /Claude Code v\d/;
+const CONTEXT_ROWS = 30;   // how far up the screen the compaction line can be and still be new
+const CLEARED_MAX_ROWS = 14; // a just-cleared screen is nearly empty; a working one is not
+
+export function contextLostSignal(screen) {
+  const lines = (Array.isArray(screen) ? screen : String(screen ?? '').split('\n'))
+    .map((r) => String(r).replace(/\s+$/, ''));
+  const hit = lines.slice(-CONTEXT_ROWS).find((l) => COMPACTED_RE.test(l));
+  if (hit) return { kind: 'compacted', sig: `compacted:${hit.trim().slice(0, 80)}` };
+  const filled = lines.filter((l) => l.trim()).length;
+  if (filled <= CLEARED_MAX_ROWS
+    && lines.some((l) => BANNER_GLYPH_RE.test(l)) && lines.some((l) => BANNER_VERSION_RE.test(l))) {
+    return { kind: 'cleared', sig: 'cleared' };
+  }
+  return null;
+}
+
+// The identity of a participant SET — sorted and case-folded, so "Dana dropped and reconnected"
+// is not a change and "Dana left, Yossi arrived" is. What makes a roster re-brief MEANINGFUL
+// rather than one per reconnect.
+export function rosterKey(names = []) {
+  return [...new Set((Array.isArray(names) ? names : []).map((n) => String(n).toLowerCase().trim()).filter(Boolean))]
+    .sort().join('\u0001');
+}
+
+// At most one roster re-brief every ten minutes. A busy room would otherwise spend its turns
+// being told who is in it.
+export const BRIEF_MIN_GAP = 10 * 60 * 1000;
+
+// Whether to re-tell an adopted claude, and if not, why not. Every refusal carries its reason
+// because this one is easy to get wrong quietly: too eager and it interrupts somebody's work,
+// too shy and the agent is answering strangers under rules it has forgotten.
+export function briefUpdateDecision({ mode = 'on', reason = 'roster', key = '', lastKey = null,
+  busy = false, promptKind = 'none', lastAt = 0, now = 0, minGap = BRIEF_MIN_GAP } = {}) {
+  if (briefUpdates(mode) === 'off') return { brief: false, why: '--brief-updates off' };
+  // NEVER while a prompt is up, whatever the reason. An injection types into whatever has the
+  // input, and a picker is the one place where a stray paste chooses something.
+  if (promptKind && promptKind !== 'none') {
+    return { brief: false, why: `claude is showing a ${promptKind} prompt — nothing is typed into one` };
+  }
+  if (reason === 'compaction') {
+    // Not rate-limited and not gated on idle: this is the moment the briefing stopped existing,
+    // and Claude Code queues input typed mid-turn, so it lands when the turn ends.
+    return { brief: true, why: 'the context the briefing was in has just gone' };
+  }
+  if (reason !== 'roster') return { brief: false, why: `nothing re-briefs on "${reason}"` };
+  if (!key || key === lastKey) return { brief: false, why: 'the participant set did not change' };
+  if (busy) return { brief: false, why: 'mid-turn — a roster change is never worth interrupting one' };
+  const since = Number(now) - Number(lastAt || 0);
+  if (lastAt && since < minGap) {
+    return { brief: false, why: `re-briefed ${uptimeText(since)} ago — at most one every ${uptimeText(minGap)}` };
+  }
+  return { brief: true, why: 'the participant set changed and the session is idle' };
 }
 
 export function adoptPlan({ pane, socket, cwd, sessionId, extra = [] } = {}) {

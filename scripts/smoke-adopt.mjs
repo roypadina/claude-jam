@@ -12,6 +12,7 @@
 //   S6b the BRIEFING lands in that pane, whole, prefixed `[claude-jam:tool]:` — the half an
 //       adopted claude cannot be given as a hook or a system prompt — and is NOT kept in the outbox
 //   S7  a guest's mirror shows the REAL adopted pane, and their message lands in it whole
+//   S7b a compaction marker on that pane re-briefs claude — the case there is no hook to hear
 //   S8  the same pane cannot be adopted twice
 //   S9  `claude-jam clean` removes nothing while it is running
 //   S10 a jam of claude-jam's OWN is refused for adoption — `--attach` is the way back in
@@ -97,6 +98,19 @@ const CTL = path.join(TMP, 'tui-mode');
 const LOG = path.join(TMP, 'tui-log');
 fs.writeFileSync(CTL, 'box');
 fs.writeFileSync(LOG, '');
+const setMode = (m) => fs.writeFileSync(CTL, m);
+
+// This smoke's OWN fixture directory, deliberately not `fixtures/pane/`. That corpus is real
+// `capture-pane` output from claude 2.1.251, and this one is invented — nobody has captured a
+// real compaction yet (TESTING.md carries that as a deferred verification), so it does not go in
+// with the measured ones. It only has to carry the line the classifier looks for.
+const FIX = path.join(TMP, 'fixtures');
+fs.mkdirSync(FIX, { recursive: true });
+fs.writeFileSync(path.join(FIX, 'compacted.txt'), [
+  '⏺ Compacted (ctrl+o to see full summary)',
+  '',
+  '  ready',
+].join('\n'));
 
 // A transcript exactly where claude would file one for WORK, under this smoke's own $HOME. The
 // first user line and the last assistant line are what the confirmation has to echo back.
@@ -149,7 +163,7 @@ const submitted = () => tuiLog().split('\n').filter((l) => l.startsWith('SUBMIT 
 function makePane(name, sess = tmux, cwd = WORK) {
   killMine(name, sess);
   const born = sess('new-session', '-d', '-s', name, '-x', '100', '-y', '32', '-c', cwd, '-n', 'mywork',
-    process.execPath, path.join(HERE, 'fake-tui.mjs'), CTL, LOG);
+    process.execPath, path.join(HERE, 'fake-tui.mjs'), CTL, LOG, FIX);
   if (born.status !== 0) throw new Error(`tmux new-session ${name}: ${born.stderr}`);
   const id = (sess('display-message', '-p', '-t', name, '#{pane_id}').stdout || '').trim();
   const pid = Number((sess('display-message', '-p', '-t', name, '#{pane_pid}').stdout || '').trim());
@@ -179,6 +193,7 @@ function connect(port, name, { host = false } = {}) {
 console.log(`TMPDIR ${TMP}\nHOME   ${HOME}\ncwd    ${WORK}\nsocket ${SOCKET}\ndefault-socket session ${S.dflt}`);
 const started = Date.now();
 let adopted = null;
+let guest = null; // S7 leaves it connected: the pane is classified only while somebody is in
 
 try {
   // =============================================================== the refusals ====
@@ -323,7 +338,28 @@ try {
       return all.length > before ? all[all.length - 1] : null;
     }, 30000);
     ok(got === `[Guest]: ${said}`, `the pane got ${JSON.stringify(got)}`);
-    g.ws.close();
+    guest = g; // S7b needs a client connected: the pane is classified only while somebody is in
+  });
+
+  await step('S7b a COMPACTION re-brief: the context went, so claude is told again', async () => {
+    // The v0.31 classifier already reads this pane 2.5 times a second; v0.33 asks it a second
+    // question off the same capture. There is no hook for this — a running claude cannot be given
+    // one — so a compaction is only ever visible on the screen.
+    const before = submitted().filter((s) => s.startsWith(`[${BRIEF_NAME}]: `)).length;
+    ok(before === 1, `expected exactly one briefing so far, got ${before}`);
+    setMode('compacted');           // fake-tui paints the smoke's own fixture
+    await sleep(1500);              // long enough for two classifier ticks
+    setMode('box');                 // …and back, so the re-brief has an input box to land in
+    const again = await until('a second briefing in the adopted pane', () => {
+      const all = submitted().filter((s) => s.startsWith(`[${BRIEF_NAME}]: `));
+      return all.length > before ? all[all.length - 1] : null;
+    }, 40000);
+    ok(/compacted or cleared/.test(again), `the re-brief did not say why:\n${again.slice(0, 200)}`);
+    ok(/NEVER reveal the join token/.test(again), 'the re-brief lost the standing rules');
+    ok(/In the room: /.test(again), 'the re-brief lost the roster');
+    console.log('      re-briefed after the compaction marker appeared and went');
+    guest.ws.close();
+    guest = null;
   });
 
   await step('S8 REFUSAL the same pane is never adopted twice', async () => {
