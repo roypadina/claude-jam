@@ -1673,11 +1673,16 @@ export function portFromStateDir(name) {
 // authenticates its POST /end — the same loopback+secret gate the knock popup already uses; it
 // lives in a 0700 dir beside token.json, which already holds the join token.
 export function sessionInfo({ tmux, port, viewPort, cwd, sessionId, createdAt, pid, state,
-  secret = null, socket = TMUX_DEFAULT_SOCKET }) {
+  secret = null, socket = TMUX_DEFAULT_SOCKET, jamName = '' }) {
   return {
     jam: SESSION_TAG,
     v: SESSION_V,
     tmux: String(tmux ?? ''),
+    // v0.23: the jam's DISPLAY name (`--jam-name`, defaulting to the cwd's basename). Cosmetic
+    // and separate from `tmux` on purpose — `tmux` is the identifier `claude-jam end` takes and
+    // the thing that must stay a tmux-legal word, this is what a human calls the room. It is
+    // written here so `claude-jam sessions` can show it without asking a running daemon.
+    jamName: String(jamName ?? ''),
     // v0.20: which tmux server this session lives on. `claude-jam sessions|end|clean` enumerate
     // per-socket, so a row that does not name its socket is read as the default one — which is
     // exactly what a session.json written before v0.20 means.
@@ -1889,12 +1894,16 @@ export function uptimeText(ms) {
 // lays them out. `id` is the first 8 of the claude session id (enough to recognise, short enough
 // to fit), `here` the roster, `urls` which relays are configured — never the URLs themselves,
 // because a join line carries the token.
-export const SESSIONS_COLS = ['', '#', 'name', 'port', 'state', 'up', 'session', 'here', 'urls', 'cwd'];
+// v0.23: `jam` is the display name (`--jam-name`), `name` the tmux session `claude-jam end`
+// takes. Both, because they are usually different words and the listing is where a human works
+// out which room is which.
+export const SESSIONS_COLS = ['', '#', 'name', 'jam', 'port', 'state', 'up', 'session', 'here', 'urls', 'cwd'];
 export function sessionsRow(row = {}, now = 0, i = 0) {
   return {
     mark: jamMark(row.state),
     n: String(i + 1),
     name: row.name || '—',
+    jam: row.jamName || '—',
     port: String(row.port ?? '—'),
     state: row.state || '?',
     up: row.createdAt ? uptimeText(Number(now) - Number(row.createdAt)) : '—',
@@ -1928,6 +1937,7 @@ export function sessionsTable(rows = [], now = 0) {
 export function sessionsJson(rows = [], now = 0) {
   return rows.map((r) => ({
     name: r.name ?? null,
+    jamName: r.jamName || null, // v0.23: the display name, null when the jam predates it
     state: r.state,
     port: r.port ?? null,
     viewPort: r.viewPort ?? null,
@@ -3021,7 +3031,11 @@ export const HOST_FLAGS = [
   { flag: '--port', arg: 'N', desc: 'which port the daemon listens on (default 7777)' },
   { flag: '--name', arg: 'X', desc: 'your display name in the jam' },
   { flag: '--cwd', arg: 'DIR', desc: 'the directory claude runs in' },
-  { flag: '--tmux', arg: 'NAME', desc: "the jam's name — its tmux session, and what `claude-jam end` takes" },
+  { flag: '--tmux', arg: 'NAME', desc: "the tmux session name, and what `claude-jam end` takes" },
+  // v0.23: two different names. `--tmux` is the IDENTIFIER (a tmux-legal word, what `end` takes);
+  // `--jam-name` is what a human calls the room and what the LAN sees.
+  { flag: '--jam-name', arg: 'X', desc: "what this jam is CALLED — shown in the welcome, `claude-jam sessions` and discovery (default: the directory's name)" },
+  { flag: '--no-announce', arg: '', desc: 'do not announce this jam on the local network (mDNS is on by default)' },
   { flag: '--token', arg: 'V', desc: 'a shared token: anyone holding it joins with no approval' },
   { flag: '--invite-only', arg: '', desc: 'no knocking at all — an invite link is the only door' },
   { flag: '--view', arg: '', desc: 'also serve the real TUI read-only in a browser (ttyd)' },
@@ -3069,6 +3083,15 @@ export function menuRunsBare(cmd) {
 }
 
 const cmdItem = (c) => ({ id: `cmd${c}`, label: c, desc: COMMAND_HELP[c] || '', covers: [c], run: c });
+
+// v0.23. `on` is what the host ASKED for and `live` whether a child is actually registered, so
+// the row says which of those is true rather than reporting the wish as the fact. The two only
+// disagree when there is no mDNS tool, and then the reason is the value.
+export function announceValue(a = null) {
+  if (!a) return 'off';
+  if (!a.on) return 'off';
+  return a.live ? 'on' : `asked for, not running — ${a.why || 'no reason given'}`;
+}
 
 // The whole control panel as data.  `state` is what the client knows right now, so every
 // toggle can show its own value and the menu doubles as the status page.  Host and guest are
@@ -3121,7 +3144,12 @@ export function menuTree({ host = true, state = {} } = {}) {
           value: s.view ? val(s.view) : 'off' },
         { id: 'access.remote', label: 'Remote', desc: COMMAND_HELP['/remote'], covers: ['/remote'], run: '/remote',
           value: `${remoteMode(s.remote)}${s.tunnelJoin ? ' · up' : (remoteMode(s.remote) === 'off' ? '' : ' · starting…')}` },
-        { id: 'access.join', label: 'Show the invite lines', desc: COMMAND_HELP['/join'], covers: ['/join'], run: '/join' },
+        // v0.23. The value says what is TRUE, not what was asked for: `on` only when a child is
+      // actually registered, and the reason inline when the two disagree (no mDNS tool).
+      { id: 'access.announce', label: 'Announce on the network', covers: [],
+        desc: 'let people on this LAN find this jam by name — they still knock, or hold a token, or hold a link',
+        value: announceValue(s.announce) },
+      { id: 'access.join', label: 'Show the invite lines', desc: COMMAND_HELP['/join'], covers: ['/join'], run: '/join' },
       ],
     });
   }
@@ -3175,7 +3203,11 @@ export function menuTree({ host = true, state = {} } = {}) {
     ],
   });
 
-  return { id: 'menu', title: host ? 'claude-jam — control panel' : 'claude-jam — what you can do', host, sections };
+  // v0.23: the panel says which jam it belongs to. With two clients open on two jams, the title
+  // is the only thing on screen that tells them apart.
+  const named = s.jamName ? ` · ${s.jamName}` : '';
+  return { id: 'menu', title: (host ? 'claude-jam — control panel' : 'claude-jam — what you can do') + named,
+    host, sections };
 }
 
 // Every item in the tree, sections and nested lists flattened. One walker, so the completeness

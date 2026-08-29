@@ -63,7 +63,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   DISCOVERY_TXT_KEYS, DISCOVERY_ID_LEN, TXT_VALUE_MAX, discoveryTxt,
   unescapeDnsLabel, parseTxtStrings, parseTxtPairs, parseDnssdZone, discoveredJams,
   FIND_COLS, FIND_EMPTY, FIND_GATE, findTable, findJson,
-  JOIN_PASTE_VALUE, joinRows, joinPlanFor,
+  JOIN_PASTE_VALUE, joinRows, joinPlanFor, announceValue,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -2574,14 +2574,17 @@ test('v0.18-2 uptimeText reads as a duration at every scale', () => {
 test('v0.18-2 the sessions table marks what is wrong and never prints a credential', () => {
   const now = 1_000_000;
   const rows = [
-    { name: 'jamtest', state: 'live', port: 7799, viewPort: 7801, cwd: '/Users/roy/p', sessionId: 'abcdef12-3456-4789-8abc-def012345678', createdAt: now - 90 * 60_000, participants: ['Roy', 'Dana'], view: true, tunnel: true, dir: '/tmp/claude-jam-7799' },
+    { name: 'jamtest', state: 'live', jamName: 'reeco debugging', port: 7799, viewPort: 7801, cwd: '/Users/roy/p', sessionId: 'abcdef12-3456-4789-8abc-def012345678', createdAt: now - 90 * 60_000, participants: ['Roy', 'Dana'], view: true, tunnel: true, dir: '/tmp/claude-jam-7799' },
     { name: null, state: 'orphan', port: 7805, cwd: '/tmp/x', sessionId: '', createdAt: null, participants: [], dir: '/tmp/claude-jam-7805' },
   ];
   const t = sessionsTable(rows, now);
   const lines = t.split('\n');
-  assert.match(lines[0], /#\s+name\s+port\s+state\s+up\s+session\s+here\s+urls\s+cwd/);
-  assert.match(lines[1], /^\s+1 jamtest\s+7799 live\s+1h 30m abcdef12 Roy, Dana\s+view\+tunnel \/Users\/roy\/p$/);
-  assert.match(lines[2], /^! 2 —\s+7805 orphan/);
+  // v0.23: `name` is the tmux session, `jam` the display name — two columns because they are two
+  // different words, and the listing is where a human works out which room is which.
+  assert.match(lines[0], /#\s+name\s+jam\s+port\s+state\s+up\s+session\s+here\s+urls\s+cwd/);
+  assert.match(lines[1], /^\s+1 jamtest reeco debugging 7799 live\s+1h 30m abcdef12 Roy, Dana\s+view\+tunnel \/Users\/roy\/p$/);
+  // A jam built before v0.23 has no display name, and gets a dash rather than one it never had.
+  assert.match(lines[2], /^! 2 —\s+—\s+7805 orphan/);
   assert.match(t, /! orphan = the tmux session is gone/);
   // Presence only: the join line carries the token and the view URL carries the view key, so
   // neither ever appears in a listing.
@@ -2595,12 +2598,13 @@ test('v0.18-2 the sessions table marks what is wrong and never prints a credenti
 test('v0.18-2 --json carries the facts a script needs, including what clean would take', () => {
   const now = 2_000_000;
   const rows = [
-    { name: 'jamtest', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, participants: ['Roy'], view: false, tunnel: false, dir: '/tmp/claude-jam-7799' },
+    { name: 'jamtest', state: 'live', jamName: 'reeco debugging', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, participants: ['Roy'], view: false, tunnel: false, dir: '/tmp/claude-jam-7799' },
     { name: null, state: 'orphan', port: 7805, cwd: null, sessionId: null, createdAt: null, participants: [], dir: '/tmp/claude-jam-7805' },
   ];
   const j = sessionsJson(rows, now);
   assert.equal(j.length, 2);
-  assert.deepEqual(j[0], { name: 'jamtest', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, uptimeMs: 5000, participants: ['Roy'], view: false, tunnel: false, socket: 'default', state_dir: '/tmp/claude-jam-7799', cleanable: false });
+  assert.deepEqual(j[0], { name: 'jamtest', jamName: 'reeco debugging', state: 'live', port: 7799, viewPort: 7801, cwd: '/p', sessionId: 'sid', createdAt: now - 5000, uptimeMs: 5000, participants: ['Roy'], view: false, tunnel: false, socket: 'default', state_dir: '/tmp/claude-jam-7799', cleanable: false });
+  assert.equal(j[1].jamName, null, 'a jam with no display name reports null, never an invented one');
   assert.equal(j[1].cleanable, true, 'the orphan is the only thing clean may remove');
   assert.equal(j[1].uptimeMs, null);
   // It has to survive JSON.stringify unchanged — that is the whole point of --json.
@@ -4176,4 +4180,61 @@ test('v0.23 the mDNS seam never throws when there is no tool — it answers', as
   // …and the empty text parses to the empty listing rather than to a crash.
   assert.deepEqual(parseDnssdZone(t.text), []);
   assert.equal(findTable(discoveredJams(parseDnssdZone(t.text))), FIND_EMPTY);
+});
+
+test('v0.23 announceValue says what is TRUE, not what was asked for', () => {
+  assert.equal(announceValue({ on: true, live: true, why: '' }), 'on');
+  assert.equal(announceValue({ on: false, live: false, why: '' }), 'off');
+  // The one case the two disagree: asked for, but there is no mDNS tool to do it with. The row
+  // must not read `on` — the reason IS the value.
+  assert.equal(announceValue({ on: true, live: false, why: 'no dns-sd' }), 'asked for, not running — no dns-sd');
+  assert.match(announceValue({ on: true, live: false }), /asked for, not running/);
+  // A client that has not heard from the daemon yet says off rather than guessing on.
+  assert.equal(announceValue(null), 'off');
+  assert.equal(announceValue(undefined), 'off');
+});
+
+test('v0.23 the Access section gains the announce toggle, and the menu stays complete', () => {
+  const tree = menuTree({ host: true, state: { announce: { on: true, live: true }, jamName: 'reeco debugging' } });
+  const access = tree.sections.find((s) => s.id === 'access');
+  const row = access.items.find((i) => i.id === 'access.announce');
+  assert.ok(row, 'the announce toggle is in Access');
+  assert.equal(row.value, 'on');
+  assert.ok(row.desc.length >= 8);
+  // The row says the gate, because the row is where somebody decides to turn this on.
+  assert.match(row.desc, /still knock, or hold a token, or hold a link/);
+  // It sits with the other things that publish something about this jam, before the invite lines.
+  const ids = access.items.map((i) => i.id);
+  assert.ok(ids.indexOf('access.announce') > ids.indexOf('access.remote'));
+  assert.ok(ids.indexOf('access.announce') < ids.indexOf('access.join'));
+  // The panel names the jam it belongs to — with two clients open, that is what tells them apart.
+  assert.match(tree.title, /reeco debugging/);
+  assert.equal(menuTree({ host: true, state: {} }).title, 'claude-jam — control panel');
+  // And the completeness check still passes, including the two new host flags.
+  assert.deepEqual(menuGaps({ host: true, state: {} }), { commands: [], flags: [], extra: [] });
+  assert.deepEqual(menuGaps({ host: false, state: {} }), { commands: [], flags: [], extra: [] });
+  assert.ok(HOST_FLAGS.some((f) => f.flag === '--jam-name'));
+  assert.ok(HOST_FLAGS.some((f) => f.flag === '--no-announce'));
+  // A guest never sees Access at all, so the toggle is not theirs to press.
+  assert.equal(menuTree({ host: false, state: {} }).sections.some((s) => s.id === 'access'), false);
+});
+
+test('v0.23 session.json records the display name beside the tmux name', () => {
+  const info = sessionInfo({ tmux: 'claude-jam', port: 7777, viewPort: 7778, cwd: '/p',
+    sessionId: 'sid', createdAt: 1, pid: 2, state: '/tmp/claude-jam-7777', jamName: 'reeco debugging' });
+  assert.equal(info.tmux, 'claude-jam');
+  assert.equal(info.jamName, 'reeco debugging');
+  // Two different things: the tmux name is the identifier `claude-jam end` takes, the jam name is
+  // what a human calls the room. They are allowed to differ, and usually do.
+  assert.notEqual(info.tmux, info.jamName);
+  // Absent is '' and never undefined, so a round trip through JSON cannot lose the field.
+  assert.equal(sessionInfo({ tmux: 'x', port: 1, viewPort: 2, cwd: '/p', sessionId: 's', createdAt: 1, pid: 2, state: '/s' }).jamName, '');
+  const back = parseSessionJson(JSON.stringify(info));
+  assert.equal(back.jamName, 'reeco debugging');
+  // A session.json written before v0.23 has no jamName, and is still perfectly valid — it must
+  // stay listable and endable, which is the whole reason parseSessionJson does not require it.
+  const old = JSON.parse(JSON.stringify(info));
+  delete old.jamName;
+  assert.equal(parseSessionJson(JSON.stringify(old))?.tmux, 'claude-jam');
+  assert.equal(parseSessionJson(JSON.stringify(old))?.jamName, undefined);
 });
