@@ -1416,3 +1416,37 @@ distinguishable sounds so the host knows without looking whether someone needs a
   keyboard-only path. Respect it everywhere, including the v0.17 `waiting` bell.
 - Docs: README, MANUAL (so claude can answer "turn off the sounds"), wiki Hosting page,
   CHANGELOG; and the sounds must appear in the `/menu` completeness test (v0.24).
+
+## v0.26 — nudges: any human can get another's attention
+
+Mentions already ring a bell (v0.17 P3), but only if the person is watching that terminal.
+A nudge is an explicit, addressed "look at the screen" that every participant can send, and
+that each recipient's own machine decides how to surface.
+
+- **Command**: `/ping <Name> [message]` (alias `/nudge`), `/ping all [message]`, from anyone —
+  host and guests alike. The addressed client shows `👋 Roy is asking for you: <message>` as a
+  highlighted line (not a chat line), and everyone else sees a dim `* Roy nudged Yossi`, so a
+  nudge is never secret.
+- **Wire**: `{t:'nudge', from, to:'<Name>|all', text}` → daemon validates the target is in the
+  roster, rate-limits **one nudge per sender→target per 30 s** (and per sender→all per 60 s)
+  with a clear refusal, then routes it. Never queued for someone offline: the sender is told
+  `Yossi is not connected` instead.
+- **Local surfacing, decided by the recipient, not the sender** (three tiers, all toggleable
+  in `/menu → Notifications`):
+  1. in-terminal: highlighted line + bell + `Hero.aiff` (distinct from the knock/join sounds);
+  2. macOS notification via the existing helper (`👋 <from>` / the message);
+  3. **phone**, opt-in: if the recipient has `~/.config/claude-jam/config.json` with
+     `{ "ntfy": { "server": "https://ntfy.sh", "topic": "<their topic>" } }`, their own client
+     POSTs the nudge to that topic. The topic is a secret that stays on the recipient's machine
+     — it is never sent to the host, never in an invite link, never in the protocol. Failures
+     are silent (one dim line at most).
+- **Idle awareness** (makes nudging purposeful instead of guesswork): each client reports a
+  coarse `idle` seconds value (no keystroke and no submit) on the existing heartbeat; `/who`,
+  the roster and `/menu → People` show `active` / `idle 4m` / `away 20m+`, and the nudge
+  confirmation says which state the target was in. Nothing keystroke-content is ever reported —
+  only "time since last local activity".
+- **Escalation, opt-in per sender action**: `/ping <Name> !` repeats the nudge once after 60 s
+  if the target has not become active — and only once, never a loop.
+- Docs: README, MANUAL (claude must be able to explain "how do I get Roy's attention"), wiki
+  Joining/Hosting + Security-Model (the ntfy topic stays local), CHANGELOG; `/ping` and the
+  notification toggles appear in `/menu` (v0.24 completeness test covers it).
