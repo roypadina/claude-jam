@@ -17,7 +17,8 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { xferFrames, stripTokenBlock, jsonlGlobs, humanBytes, UPLOAD_MAX } from '../lib.mjs';
-import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from '../xfer.mjs';
+import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from '../xfer.mjs';
+import { clipboardImage } from '../platform.mjs';
 
 const [url, token, session, hookSecret] = process.argv.slice(2);
 if (!url || !token || !session) {
@@ -323,7 +324,7 @@ await step('a clipboard PNG round-trips, and claude reads the image it landed in
     return;
   }
   let img;
-  try { img = clipboardPng(); } catch (e) {
+  try { img = clipboardImage(); } catch (e) {
     console.log(`      SKIP: no clipboard image path on this machine (${e.message})`);
     return;
   }

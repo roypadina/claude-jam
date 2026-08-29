@@ -20,7 +20,6 @@
 // continuation to the text column by itself and lib.mjs's wrapText is not needed here.
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
@@ -44,12 +43,15 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   // of the live pane, so a client can never show a prompt that is no longer on screen.
   promptStatusText, questionBlock,
   // v0.30-3: `↑`/`↓` walk what THIS client submitted, whatever the daemon did with it.
-  historyPush, historyMove, parseHistoryFile, serializeHistory, historyFilePath, HISTORY_LIVE,
+  historyPush, historyMove, parseHistoryFile, serializeHistory, HISTORY_LIVE,
   // v0.24: the live control panel, the relay switch, and the invite block that says which of
   // the lines in the log is the current one.
   menuTree, menuItems, joinBlock, relayPendingLine, REMOTE_MODES, MANUAL_FILE, menuRunsBare,
   KEY_HELP, WIKI_PAGES } from './lib.mjs';
-import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, copyToClipboard, DOWNLOAD_DIR } from './xfer.mjs';
+import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './xfer.mjs';
+// v0.32 W0: anything that touches this machine's clipboard, desktop or dot-directories goes
+// through the one module that knows what operating system this is.
+import { clipboardImage, notify, copyText, historyFile, secureWrite, secureDir } from './platform.mjs';
 
 const h = React.createElement;
 
@@ -104,7 +106,7 @@ const STRIP_ROWS = 3; // rows of chat/system lines kept under the mirror (v0.14 
 // be recalled and re-sent whatever the daemon did with it — which is the reason a lost message
 // hurt as much as it did. The file is 0600 in the user's own config dir and capped, and every
 // disk step is wrapped: a read-only home must cost recall, never the client.
-const HISTORY_PATH = historyFilePath(os.homedir(), process.env);
+const HISTORY_PATH = historyFile();
 let history = [];
 try { history = parseHistoryFile(fs.readFileSync(HISTORY_PATH, 'utf8')).reverse().slice(0, HISTORY_LIVE); }
 catch { /* no file yet, or not readable — recall simply starts empty */ }
@@ -116,8 +118,8 @@ function rememberInput(text) {
   histIdx = -1;
   histDraft = '';
   try {
-    fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(HISTORY_PATH, serializeHistory(history), { mode: 0o600 });
+    secureDir(path.dirname(HISTORY_PATH));
+    secureWrite(HISTORY_PATH, serializeHistory(history));
   } catch { /* the recall still works for this session */ }
 }
 
@@ -294,7 +296,7 @@ function nudge(title, body) {
   if (!bellAllowed(lastBell, Date.now())) return;
   lastBell = Date.now();
   try { process.stdout.write(BELL); } catch { /* stdout closed: nothing to ring */ }
-  desktopNotify(title, body); // macOS only, fire and forget, never throws
+  notify(title, body); // macOS only, fire and forget, never throws
 }
 
 // The host's invite lines, wherever they are shown (welcome, /join, a /token reply).
@@ -850,7 +852,7 @@ function doSend(p) {
 // image has no path claude could be pointed at instead.
 function doPaste(caption) {
   let img;
-  try { img = clipboardPng(); } catch (e) { return err(e.message); }
+  try { img = clipboardImage(); } catch (e) { return err(e.message); }
   stageUpload(img.name, img.data, caption);
 }
 
@@ -1222,7 +1224,7 @@ function Menu({ s }) {
       case 'people.grants': return down('people.grants');
       case 'invites.copy': {
         if (!s.lastLink) return say('no link has been minted in this client yet — Invites → Create a link');
-        const ok = copyToClipboard(`${clientCmdName()} ${s.lastLink.link}`);
+        const ok = copyText(`${clientCmdName()} ${s.lastLink.link}`);
         return say(ok ? `copied ${s.lastLink.name}'s invite command — send it privately, it is a password`
           : `clipboard not available — the link is in the log above (${s.lastLink.name})`);
       }

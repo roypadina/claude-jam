@@ -22,6 +22,8 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   rttText, RTT_STALE_AFTER, commandMatches, COMMAND_HINTS_MAX,
   // v0.18: jam owns its tmux sessions — the marker, the states, the pickers, the prompts.
   OWNED_OPTION, OWNED_OPTION_LEGACY, OWNED_OPTIONS, SESSION_FILE, STATE_PREFIX, SESSION_TAG, SESSION_V, stateDirFor, portFromStateDir,
+  // v0.32 W0: the pure halves of the platform seam.
+  configDirPath, historyFilePath,
   sessionInfo, parseSessionJson, verifyOwned, classifyJam, JAM_STATES, jamMark, cleanable,
   resolveTarget, pickNumber, promptChoice, exitDecision, EXIT_KEYS, exitPromptText, reattachLines,
   TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName, endingNotice, confirmYes,
@@ -58,6 +60,12 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   menuTree, menuItems, menuGaps, menuRunsBare, MANUAL_FILE,
 } from './lib.mjs';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+// v0.32 W0: the platform seam, asserted from outside — it is the only module allowed to spawn
+// a platform binary, and this file is what says so.
+import { clipboardImage, notify, playSound, stateDir, configDir, historyFile, secureWrite,
+  secureDir, openExternal } from './platform.mjs';
 
 // ---------------------------------------------------------------- pane fixtures ----
 // Real `tmux capture-pane -p` output, captured 2026-08-29 against claude 2.1.251 in a 100x32 (and
@@ -3685,4 +3693,78 @@ test('v0.21 no user-visible string emits a bare `jam ` command form', () => {
   const alias = read('jam');
   assert.match(alias, /exec .*claude-jam.* "\$@"/);
   assert.doesNotMatch(alias, /^\s*echo\b/m);
+});
+
+// ============================== v0.32 W0: one module knows what operating system this is ====
+// The seam only pays for itself if it is the ONLY door. `osascript`, `pngpaste`, `afplay`,
+// `pbcopy` and `open` have no meaning on Windows, so a call to one from a client is a bug that
+// W1 would have to find twice: once when the feature breaks, and again when somebody adds
+// another one. tmux, claude, git, curl, cloudflared, tailscale and ttyd are NOT in this list —
+// they are the tool's dependencies, spelled the same everywhere.
+const PLATFORM_BINS = ['osascript', 'pngpaste', 'afplay', 'say', 'terminal-notifier',
+  'pbcopy', 'pbpaste', 'xclip', 'xsel', 'clip', 'open', 'xdg-open', 'start',
+  'powershell', 'pwsh', 'cmd'];
+
+test('v0.32 W0 no module outside platform.mjs spawns a platform binary', () => {
+  const read = (f) => fs.readFileSync(new URL(`./${f}`, import.meta.url), 'utf8');
+  const modules = fs.readdirSync(new URL('./', import.meta.url))
+    .filter((f) => f.endsWith('.mjs') && f !== 'test.mjs' && f !== 'platform.mjs').sort();
+  assert.ok(modules.length >= 7, modules.join(' '));
+
+  // `spawn('open', …)` / `spawnSync("pbcopy", …)` — the first argument as a literal. A variable
+  // there (TMUX, ttyd, relayBin()) is one of the tool's own dependencies and is left alone.
+  const SPAWN = /\bspawn(?:Sync)?\(\s*(['"`])([^'"`]*)\1/g;
+  for (const f of modules) {
+    const src = read(f);
+    for (const m of src.matchAll(SPAWN)) {
+      assert.ok(!PLATFORM_BINS.includes(m[2]), `${f} spawns ${m[2]} — that belongs in platform.mjs`);
+    }
+    // And the unambiguous names must not appear as a bare string at all, which catches the
+    // `const cmd = ['pbcopy', []]` shape that never names the binary at the spawn itself.
+    for (const bin of ['osascript', 'pngpaste', 'afplay', 'pbcopy', 'pbpaste', 'xclip', 'xdg-open', 'terminal-notifier']) {
+      for (const lit of jsStringLiterals(src)) {
+        assert.ok(!lit.text.split(/[\s'"`,()[\]]+/).includes(bin),
+          `${f}:${lit.line} names ${bin} — that belongs in platform.mjs`);
+      }
+    }
+  }
+
+  // The seam itself: every capability the spec named is there and callable.
+  for (const fn of [clipboardImage, notify, playSound, stateDir, configDir, historyFile,
+    secureWrite, openExternal]) {
+    assert.equal(typeof fn, 'function');
+  }
+  // The pure ones answer without touching anything.
+  assert.equal(stateDir(), os.tmpdir());
+  assert.equal(stateDir(7777), stateDirFor(os.tmpdir(), 7777));
+  assert.equal(configDir(), configDirPath(os.homedir(), process.env));
+  assert.equal(historyFile(), historyFilePath(os.homedir(), process.env));
+  assert.equal(path.dirname(historyFile()), configDir());
+  // The fire-and-forget ones never throw and never lie about having done nothing.
+  assert.equal(playSound('not-a-sound'), false);
+  assert.equal(openExternal('file:///etc/passwd'), false); // only http(s) is ever handed over
+  assert.equal(openExternal(''), false);
+});
+
+test('v0.32 W0 configDirPath: XDG when it is absolute, ~/.config otherwise', () => {
+  assert.equal(configDirPath('/home/roy', {}), '/home/roy/.config/claude-jam');
+  assert.equal(configDirPath('/home/roy', { XDG_CONFIG_HOME: '/xdg' }), '/xdg/claude-jam');
+  // A relative XDG_CONFIG_HOME is not a config home, and must not become one by concatenation.
+  assert.equal(configDirPath('/home/roy', { XDG_CONFIG_HOME: 'relative' }), '/home/roy/.config/claude-jam');
+  assert.equal(historyFilePath('/home/roy', {}), '/home/roy/.config/claude-jam/history');
+});
+
+test('v0.32 W0 secureWrite writes a file only its owner can read', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-jam-w0-'));
+  try {
+    const file = path.join(secureDir(path.join(dir, 'nested')), 'secret');
+    secureWrite(file, 'token');
+    assert.equal(fs.readFileSync(file, 'utf8'), 'token');
+    // POSIX only: on Windows this becomes an ACL check, and the docs say so rather than
+    // pretending the mode bits carried over.
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+      assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

@@ -18,7 +18,7 @@ import { Select, TextInput, Spinner, Alert, Badge } from '@inkjs/ui';
 import { hostPlan, buildJoinArgv, remoteRows, ACCESS_MODES, resolveTailscale, funnelPrecheck,
   sessionsTable, resolveTarget, validName } from './lib.mjs';
 import { listRows } from './sessions.mjs';
-import { copyToClipboard } from './xfer.mjs';
+import { copyText } from './platform.mjs';
 
 const h = React.createElement;
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -241,7 +241,7 @@ function Jams({ back, mode }) {
             const r = spawnSync(JAM, ['invite', v, '--jam', pick.name], { encoding: 'utf8' });
             const link = (r.stdout || '').split('\n').map((l) => l.trim()).find((l) => /cjam\d_/.test(l));
             if (!link) return setMsg(`! could not mint a link: ${((r.stderr || r.stdout || '').trim().split('\n')[0]) || 'no answer'}`);
-            setMsg(copyToClipboard(link)
+            setMsg(copyText(link)
               ? `copied — send it privately, it joins as ${v} with no approval:\n  ${link}`
               : `mint ok, clipboard not available — copy this by hand:\n  ${link}`);
           },
