@@ -173,6 +173,14 @@ Then, in any order, the ones that bring their own everything:
     clock killed that pid" are facts on disk rather than claims. It runs a REAL `--basic` client
     as the guest, because the guest half is the half that spawns.
 
+    The stand-in emits the **measured** shape in every mode — one `assistant` event per CONTENT
+    BLOCK, all of a turn's blocks under one `message.id` — and writes a `receipt` line saying how
+    many of each it actually sent, which step 9b asserts against. That is campaign F4's lesson
+    made structural: the stand-in used to send no `message.id` at all, so the turn counter that
+    ships was never once driven by the shape it meets, and a bug that halved every cap survived
+    eighteen smokes. **A stand-in is only as good as the last measurement behind it** — if you
+    change one, say what you measured and when.
+
     Note: it asserts the scratch directory by BASENAME. On macOS `$TMPDIR` is a symlink, so the
     argv carries `/var/folders/…` and the child's own `process.cwd()` reports
     `/private/var/folders/…` — the same trap `smoke-adopt`'s fixtures hit.

@@ -11,32 +11,59 @@
 //   FAKE_PEER_LOG   a file this appends one JSON line to per invocation
 //
 // Everything it was given is written to the log BEFORE it does anything else, so a run that is
-// killed a moment later has still recorded its argv, its cwd and its pid.
+// killed a moment later has still recorded its argv, its cwd and its pid. A run that reaches its
+// result writes a SECOND line — the shape it actually emitted — so "the stand-in is faithful" is
+// a fact the smoke asserts rather than a claim this comment makes. That second line is the whole
+// lesson of campaign F4: this file used to emit no `message.id` at all, so the turn counter that
+// ships was never once driven by the shape it meets in production, and a bug that halved every
+// cap survived eighteen smoke runs.
 import fs from 'node:fs';
 
 const modeFile = process.env.FAKE_PEER_MODE;
 const logFile = process.env.FAKE_PEER_LOG;
 const mode = (() => { try { return fs.readFileSync(modeFile, 'utf8').trim(); } catch { return 'ok'; } })();
 
-const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
-// Measured on claude 2.1.251, 2026-08-30: a real stream carries a `message.id`, and emits ONE
-// event PER CONTENT BLOCK — six events under two ids for a two-turn task. A stand-in without ids
-// only ever exercised the no-id fallback, so the counter that ships was never driven by the shape
-// it actually meets. One id per `turn()` call: one call is one turn, which is what the smoke means.
-let msgN = 0;
-const nextId = () => `msg_fake${String(++msgN).padStart(4, '0')}`;
-const turn = (text, tools = []) => out({ type: 'assistant',
-  message: { id: nextId(), content: [...(text ? [{ type: 'text', text }] : []), ...tools.map((name) => ({ type: 'tool_use', name }))] } });
-// The real multi-block shape: several events, ONE message id, ONE turn. `blocks` mode below uses
-// it so the smoke can prove the cap counts messages rather than events.
-const splitTurn = (text, tools = []) => {
-  const id = nextId();
-  out({ type: 'assistant', message: { id, content: [{ type: 'thinking', thinking: 'mulling it over' }] } });
-  if (text) out({ type: 'assistant', message: { id, content: [{ type: 'text', text }] } });
-  for (const name of tools) out({ type: 'assistant', message: { id, content: [{ type: 'tool_use', name }] } });
+const MODEL = 'claude-haiku-4-5-20251001'; // what the 2026-08-30 live run was measured on
+let frames = 0;   // every line written, init and result included
+let events = 0;   // just the `assistant` ones — the count the 2026-08-30 measurement is about
+const out = (o) => {
+  frames++;
+  if (o.type === 'assistant') events++;
+  process.stdout.write(`${JSON.stringify(o)}\n`);
 };
-const result = (text, { ok = true, subtype = 'success' } = {}) =>
-  out({ type: 'result', subtype, is_error: !ok, result: text });
+
+// MEASURED on claude 2.1.251, 2026-08-30 (the live peer run in TESTING.md): a real stream emits
+// ONE `{"type":"assistant"}` event PER CONTENT BLOCK, all the blocks of one turn sharing one
+// `message.id` — six events under TWO ids for a two-turn task, whose own `result.num_turns` was 3.
+//
+// So that is what `turn()` does, in EVERY mode. It used to be the exception (a `blocks` mode one
+// step used) and the ordinary path was one event per turn — a shape 2.1.251 never emits, which is
+// precisely how the stand-in hid the bug it was supposed to find.
+const ids = [];
+const turn = (text, tools = []) => {
+  const id = `msg_fake${String(ids.length + 1).padStart(4, '0')}`;
+  ids.push(id);
+  const block = (content) => out({ type: 'assistant',
+    message: { id, type: 'message', role: 'assistant', model: MODEL, content: [content] } });
+  block({ type: 'thinking', thinking: 'mulling it over' });
+  if (text) block({ type: 'text', text });
+  for (const name of tools) block({ type: 'tool_use', name });
+};
+
+// The result frame carries what the live run's did. Nothing in claude-jam reads `num_turns`,
+// `total_cost_usd` or `duration_ms` today — they are here because the turn cap is exactly the
+// thing that would reach for `num_turns` next, and a stand-in that lacks the field is how F4
+// happened the first time. `num_turns` counts the user's turn too: 2 assistant turns measured 3.
+const result = (text, { ok = true, subtype = 'success' } = {}) => {
+  out({ type: 'result', subtype, is_error: !ok, result: text,
+    num_turns: ids.length + 1, duration_ms: 1234, total_cost_usd: 0.012 });
+  // The receipt. Written only when a run finishes on its own — a mode the smoke kills (slow,
+  // turns) truthfully leaves none.
+  try {
+    fs.appendFileSync(logFile, `${JSON.stringify({ receipt: true, pid: process.pid, mode,
+      events, ids: ids.length, frames })}\n`);
+  } catch { /* the smoke will notice the missing line */ }
+};
 
 let prompt = '';
 process.stdin.setEncoding('utf8');
@@ -54,7 +81,7 @@ process.stdin.on('end', () => {
     })}\n`);
   } catch { /* the smoke will notice the missing line */ }
 
-  out({ type: 'system', subtype: 'init', tools: [] });
+  out({ type: 'system', subtype: 'init', model: MODEL, cwd: process.cwd(), tools: [], mcp_servers: [] });
   if (mode === 'crash') {
     process.stderr.write('error: unknown option \'--restricted\'\n');
     return process.exit(1);
@@ -71,10 +98,12 @@ process.stdin.on('end', () => {
     return t;
   }
   if (mode === 'blocks') {
-    // Exactly the 2026-08-30 measurement: two turns, six events. A cap of 3 must NOT stop this —
-    // counting events, it would have stopped inside the first turn.
-    splitTurn('let me look', ['Read', 'Glob']);
-    splitTurn('done looking');
+    // Exactly the 2026-08-30 measurement, and now just two ordinary turns: thinking + text + two
+    // tool_use, then thinking + text — SIX events under TWO ids. A cap of 3 must NOT stop this;
+    // counting events, it would have stopped inside the first turn. The receipt in the log is
+    // what the smoke checks that arithmetic against.
+    turn('let me look', ['Read', 'Glob']);
+    turn('done looking');
     return result('two turns, six events');
   }
   if (mode === 'schema') {

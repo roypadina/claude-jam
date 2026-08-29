@@ -108,7 +108,12 @@ const STATE = path.join(TMP, `claude-jam-${PORT}`);
 const TOKEN = 'peersmoketoken';
 
 const setMode = (m) => fs.writeFileSync(MODE, m);
-const invocations = () => fs.readFileSync(PEERLOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+// The stand-in writes two KINDS of line into the same file: one per invocation (argv, cwd, stdin,
+// pid — written before it does anything, so a child killed a moment later still recorded them)
+// and, for a run that reaches its own result, one `receipt` saying what shape it actually emitted.
+const logLines = () => fs.readFileSync(PEERLOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+const invocations = () => logLines().filter((x) => !x.receipt);
+const receipts = () => logLines().filter((x) => x.receipt);
 const peerLog = () => { try { return parsePeerLog(fs.readFileSync(path.join(STATE, 'peer-log.jsonl'), 'utf8')); } catch { return []; } };
 
 // ------------------------------------------------------------------- the host ----
@@ -384,6 +389,7 @@ try {
     // first turn and the guest would have been told it hit a cap it never reached.
     setMode('blocks');
     guestOut = '';
+    const before = receipts().length;
     const p = control('/peer/dispatch', { peer: 'Dana', prompt: 'two turns, six events', maxTurns: 3, deadlineMs: 60000 });
     await until('the consent block', () => saw('wants to run a task on YOUR machine'), 15000);
     say('/peer accept');
@@ -391,6 +397,15 @@ try {
     eq(r.ok, true, `it ran to completion instead of hitting the cap: ${JSON.stringify(r.why)}`);
     eq(r.why, 'ok', 'no cap, no timeout');
     ok(/two turns, six events/.test(r.result || r.agent || ''), `the real result came back: ${String(r.result || r.agent).slice(0, 120)}`);
+    // …and the stand-in's OWN receipt, so this step asserts the measured shape rather than
+    // trusting a mode name. Campaign F4: the whole reason the turn-cap bug survived eighteen
+    // smokes is that nobody ever checked what the stand-in was actually emitting.
+    const rec = receipts().at(-1);
+    ok(receipts().length === before + 1, 'the run wrote a receipt');
+    eq(rec.events, 6, `six ASSISTANT events, as claude 2.1.251 emits them: ${JSON.stringify(rec)}`);
+    eq(rec.ids, 2, `under two message ids — which is two turns, under a cap of 3: ${JSON.stringify(rec)}`);
+    console.log(`      the stand-in emitted ${rec.events} assistant events under ${rec.ids} message ids `
+      + `(${rec.frames} stream lines in all)`);
   });
 
   // ------------------------------------------------------------------- 10: a crash ----

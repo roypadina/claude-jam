@@ -291,6 +291,23 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   session `claude-jam`, so two at once make `claude-jam end <name>` ambiguous — S13's note) or a
   restructure of S7b's guest lifetime, for a third proof of a path already proven twice. Prove:
   fold a `cleared`-mode paint into S7b when that step is next touched.
+- 2026-08-30 · **F4 — the stand-in was not the thing it stood in for.** `scripts/fake-claude.mjs`
+  emitted one stream event per turn; 2.1.251 emits one per CONTENT BLOCK under a shared
+  `message.id`, so the only path `smoke-peer` could reach was the no-id fallback and the turn-cap
+  bug survived eighteen runs. Fixed: `turn()` emits the measured shape in EVERY mode (the `blocks`
+  mode is now just two ordinary turns — thinking + text + two tool_use, then thinking + text: six
+  assistant events, two ids), and a finished run writes a `receipt` line saying what it actually
+  emitted, which step 9b asserts (`events: 6`, `ids: 2`) instead of trusting a mode name. The
+  result frame carries the measured `num_turns`, `duration_ms` and `total_cost_usd`.
+  **Proved by reverting the fix**, 2026-08-30: with `peer.mjs` counting events again
+  (`turns++` unconditionally), step 9b goes red — *"it ran to completion instead of hitting the
+  cap: 'cap': got false, want true"* — and every other step still passes, which is the point.
+  Restored and re-run: all 16 steps green, 405/0 unit.
+  NOT done, and named here rather than left implicit: the other stand-ins were not re-derived from
+  a fresh measurement. `fake-tui.mjs` is built from the real `fixtures/pane/` corpus and its one
+  known infidelity (its command name is `node`, which is what hid F9) is a property of running it
+  under node at all, not something a rewrite fixes. Prove: when a stand-in's behaviour is next
+  relied on for a new assertion, measure that behaviour first and say so in the file.
 - 2026-08-30 · **F7's remaining ceiling, accepted and documented** (`host.mjs` `watchContext`,
   the wiki's Hosting-a-Jam). The watch is edge detection over a screen signature, so two identical
   losses with nothing observable between them read as one: `/clear`, then exchanges short enough
