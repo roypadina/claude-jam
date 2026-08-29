@@ -97,14 +97,18 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   case it runs uses a session the smoke created itself. So the injected briefing has never been
   seen to land in a live conversation. Prove: one live adoption in the campaign (Roy's own
   session, `--no-brief` off), looking at the pane afterwards.
-- 2026-08-29 · `contextLostSignal`'s patterns are UNVERIFIED against a real compaction. There is
-  no capture of one in `fixtures/pane/`, so the wording (`Compacted`, the post-`/clear` welcome
-  block) comes from claude 2.1.251's own output rather than from a measured corpus — and
-  `smoke-adopt` S7b drives it with a fixture the SMOKE invents, in its own temp dir, deliberately
-  not added to the real corpus. The end-to-end path (marker on the pane → re-brief injected and
-  landed) is therefore proven; the marker itself is a guess. Prove: capture a real `/compact` and
-  a real `/clear` into `fixtures/pane/`, then assert against those. A false negative here is an
-  agent that has quietly forgotten the two standing rules, so it is worth a real capture.
+- ~~2026-08-29 · `contextLostSignal`'s patterns are UNVERIFIED against a real compaction … the
+  marker itself is a guess. Prove: capture a real `/compact` and a real `/clear` into
+  `fixtures/pane/`, then assert against those.~~
+  **DISCHARGED — campaign, 2026-08-30.** Six haiku turns, then a real `/compact`, then a real
+  `/clear`, captured into `fixtures/pane/compacted.txt` and `fixtures/pane/cleared.txt` with
+  tests asserting against them. **The guess was right**: the marker is
+  `⎿  Compacted (ctrl+o to see full summary)` — a `⎿` continuation line under the human's
+  `/compact`, so neither at the start of a line nor after a ⏺/●/* glyph, which is exactly why
+  `COMPACTED_RE` allows any whitespace before it. Two things the capture taught that the guess
+  did not include, both now pinned by tests: a real compaction **does not wipe the scrollback**
+  (the screen is still full afterwards, so the "nearly empty" branch would never have caught it),
+  and a **fresh claude reads as `cleared`** — see the new deferral below.
   (For whoever does it: writing that step found two real bugs — the re-brief's own wording
   matching the watcher, i.e. an injection loop on a live session, and the baseline being taken by
   whichever tick happened to run first. Both are fixed and both have tests. It was a
@@ -169,6 +173,22 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   docs. Until then it is a stable-URL convenience with an unproven long-session story, and the
   docs must not imply otherwise.
 
+
+- 2026-08-30 · **CAMPAIGN, NEW.** A just-STARTED claude and a just-`/clear`ed one draw the same
+  screen — same banner, same emptiness — so `contextLostSignal` returns `cleared` for both, and
+  `fixtures/pane/startup.txt` and `startup-one-turn.txt` (a real screen after a real turn) are
+  now in the corpus saying so. Mostly absorbed by `watchContext` only firing on a CHANGE from the
+  adoption baseline. Not absorbed: adopt a just-started claude, keep every exchange short enough
+  that the banner never scrolls away, and a later `/clear` does not change the signature — so no
+  re-brief fires and the agent has silently lost the two standing rules. Narrow, and the roster
+  re-brief is the backstop. Prove/fix: something other than the screen for "the context went" —
+  the transcript's own file is the obvious candidate — or accept it and say so in the docs.
+- 2026-08-30 · **CAMPAIGN, NEW.** `--max-budget-usd` DOES exist on 2.1.251 (checked in `--help`,
+  2026-08-30) and is a real spend cap, unlike the `--max-turns` the spec wanted. It is still not
+  adopted, and the campaign did not adopt it: it is untestable without spending, and an inert or
+  refusing flag would break every peer task. Now that a live run exists ($0.012, `total_cost_usd`
+  on the result frame), the decision is cheap to make. Prove: Roy's call — one live run with the
+  flag set below the task's cost, checking it refuses rather than truncating silently.
 
 ## The 2026-08-30 campaign
 
