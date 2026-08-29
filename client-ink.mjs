@@ -26,8 +26,9 @@ import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import React from 'react';
-import { Box, Text, Static, render as inkRender } from 'ink';
+import { Box, Text, Static, render as inkRender, useInput } from 'ink';
 import TextInput from 'ink-text-input';
+import { Select, Spinner, Badge } from '@inkjs/ui';
 import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage, historyDivider, toolLiveLine,
   // v0.17 Batch P: the bell and its gate, @mentions, the RTT chip, jam's own autocomplete.
   BELL, bellAllowed, mentionsMe, rttText, commandMatches, COMMAND_HINTS_MAX,
@@ -43,8 +44,12 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   // of the live pane, so a client can never show a prompt that is no longer on screen.
   promptStatusText, questionBlock,
   // v0.30-3: `↑`/`↓` walk what THIS client submitted, whatever the daemon did with it.
-  historyPush, historyMove, parseHistoryFile, serializeHistory, historyFilePath, HISTORY_LIVE } from './lib.mjs';
-import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
+  historyPush, historyMove, parseHistoryFile, serializeHistory, historyFilePath, HISTORY_LIVE,
+  // v0.24: the live control panel, the relay switch, and the invite block that says which of
+  // the lines in the log is the current one.
+  menuTree, menuItems, joinBlock, relayPendingLine, REMOTE_MODES, MANUAL_FILE, menuRunsBare,
+  KEY_HELP, WIKI_PAGES } from './lib.mjs';
+import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, copyToClipboard, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
 
@@ -156,6 +161,13 @@ const store = {
   xfers: new Map(), // v0.12/v0.13: incoming transfers, xfer id -> assembling record
   upload: null, // a file read and waiting for the host's yes: {name, data, caption}
   offers: new Map(), // v0.13: what the host has offered, name -> {from, size}
+  // v0.24: the live control panel. `menu` is null when it is closed; the rest is the state it
+  // shows, which arrives on frames the client already receives.
+  menu: null,
+  grants: [], // v0.24C: the standing `always` grants, listed so they can be withdrawn
+  remoteRows: null, // what the daemon says each relay mode can do here, and why not
+  remoteBusy: false, // a switch is in flight: the panel shows a spinner instead of a list
+  lastLink: null, // v0.24: the last invite link minted here, so the menu can copy it
   listeners: new Set(),
 };
 const touch = () => { for (const l of store.listeners) l(); };
@@ -206,6 +218,10 @@ inkStdin.unref = () => inkStdin;
     // for the duration; this is the belt to that braces — a byte read here would be a byte
     // tmux never sees.
     if (store.attached) return;
+    // v0.24: while `/menu` is open the panel owns the keyboard, whole. Without this the filter
+    // above claims `↑`/`↓` for input recall and Esc for the approval bar, so a Select in the
+    // panel would never move and Esc would never close it — measured, not guessed.
+    if (store.menu && !store.passthrough) return inkStdin.write(dec.write(buf));
     // v0.14: in passthrough mode the keyboard belongs to the claude TUI, so only F3 (the way
     // back) is still ours — everything else, escape sequences included, goes on the wire
     // untouched. ink never sees a byte of it, so nothing lands in the text field either.
@@ -281,12 +297,28 @@ function nudge(title, body) {
   desktopNotify(title, body); // macOS only, fire and forget, never throws
 }
 
-// The host's invite lines, wherever they are shown (welcome, /join, a /token reply) —
-// including the `--tunnel` pair, which used to reach only the daemon log and token.json.
+// The host's invite lines, wherever they are shown (welcome, /join, a /token reply).
+//
+// v0.24b, and the bug that made it necessary: these went through the ordinary emit path with
+// `strip:true`, so in the MIRROR view — which is the default view since v0.14 — they landed in
+// `deferred` and showed only in the three-row chat strip. Three system lines later they were
+// gone, and the host had never seen the tunnel URL that had just come up. Reproduced against a
+// stub daemon 2026-08-29: the {t:'token'} frame arrives, the line is simply pushed off screen.
+//
+// So the block is written to the TRANSCRIPT, the way a minted invite link already was
+// (toTranscript, v0.22B), and it is ONE dated block rather than a fourth near-identical copy —
+// the heading carries the time, and a dim line says the earlier ones are stale.
+let printedJoin = false;
 function logJoin() {
-  for (const l of inviteLines(store.session || {})) {
-    emit({ glyph: '*', text: l, textColor: C.dim, wrap: false, strip: true });
-  }
+  const lines = joinBlock(store.session || {}, { now: Date.now(), hadEarlier: printedJoin });
+  printedJoin = true;
+  toTranscript++;
+  for (const l of lines) emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
+  // v0.24b: with --tunnel/--funnel the hostname is ~10s away. Say what is pending, rather than
+  // leaving a LAN-only block that looks complete.
+  const pend = store.session?.relayPending ? relayPendingLine(store.session.remote) : null;
+  if (pend) emit({ glyph: '*', text: pend, textColor: C.dim, wrap: false });
+  toTranscript--;
 }
 
 // v0.10c: what a client prints on connect and on `/help`. Dim, gutter-less, ≤10 rows.
@@ -444,9 +476,45 @@ function render(ev) {
     }
     case 'token': {
       // Every invite string the daemon knows, tunnel pair included: a `/token` rotation
-      // changes the credential inside all four.
-      if (store.session) Object.assign(store.session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin, tunnelView: ev.tunnelView });
+      // changes the credential inside all four. v0.24 adds the access/relay state the menu
+      // shows, so `/menu` is a status page without a frame of its own.
+      if (store.session) {
+        Object.assign(store.session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin,
+          tunnelView: ev.tunnelView, token: ev.token,
+          ...(ev.remote === undefined ? {} : { remote: ev.remote }),
+          ...(ev.inviteOnly === undefined ? {} : { inviteOnly: ev.inviteOnly }),
+          ...(ev.relayPending === undefined ? {} : { relayPending: ev.relayPending }) });
+      }
       return logJoin();
+    }
+    // v0.24b: a relay came up (or moved). Its own event, in the transcript, with the whole join
+    // command on it — the {t:'token'} refresh alone was the thing nobody saw.
+    // Deliberately NOT toTranscript: in the mirror view (the default) that would print it above
+    // the frame, where it scrolls out of sight in the same breath — which is the bug this event
+    // exists to fix. `strip:true` puts it in the three-row chat strip the mirror leaves for
+    // exactly this, and the deferred list is flushed into the transcript on the way back to it,
+    // so nothing is lost either way.
+    case 'relay': {
+      emit({ glyph: '⇗', glyphColor: C.accent, text: ev.text, textColor: C.accent, wrap: false, strip: true });
+      nudge('claude-jam', ev.text);
+      return;
+    }
+    // v0.24C: the standing `always` grants, which were invisible once given.
+    case 'grants': {
+      store.grants = Array.isArray(ev.items) ? ev.items : [];
+      return touch();
+    }
+    // v0.24.1: the relay switch answered. `rows` is the menu asking what is possible.
+    case 'remote': {
+      if (ev.state === 'rows') { store.remoteRows = ev.rows || []; return touch(); }
+      if (ev.state !== 'done') return;
+      store.remoteBusy = false;
+      if (store.session) store.session.remote = ev.mode;
+      const n = (ev.reissued || []).length;
+      if (ev.action === 'noop') return sys(`remote was already ${ev.mode} — nothing changed`);
+      return sys(`remote is ${ev.mode} — nobody was disconnected`
+        + (n ? `, ${n} invite link(s) re-issued` : '')
+        + (ev.reissuePending ? '; the links are re-issued as soon as the hostname lands, or they would carry the old address' : ''));
     }
     // v0.16: the whole set of requests waiting for the host, pushed on every change. Host
     // clients only (the daemon sends it nowhere else), and it replaces the list wholesale so
@@ -463,6 +531,7 @@ function render(ev) {
     case 'invite': {
       if (ev.state === 'refused') return err(ev.text);
       if (ev.state !== 'minted' || !ev.link) return;
+      store.lastLink = { link: ev.link, name: ev.invite?.name || '' };
       toTranscript++; // the link belongs on screen even while the live TUI fills it
       for (const l of inviteMintedLines(ev.invite || {}, ev.link, 'jam join')) {
         emit({ glyph: '*', text: l, textColor: C.dim, wrap: false });
@@ -935,6 +1004,18 @@ function submit(raw) {
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'kick', name: act.name, revoke: act.revoke });
       break;
+    // v0.24: the live control panel. Everything it offers is one of the cases above — it opens
+    // an overlay, it never becomes a second way to do any of them.
+    case 'menu':
+      store.menu = { path: [], at: 0 };
+      if (IS_HOST) { sendMsg({ t: 'grants' }); sendMsg({ t: 'remote' }); }
+      break;
+    // v0.24.1: off | tunnel | funnel while the jam runs. A bare `/remote` asks what is possible.
+    case 'remote':
+      if (!IS_HOST) err('host only');
+      else if (act.mode == null) { sendMsg({ t: 'remote' }); sys(`remote: ${store.session?.remote || 'off'} — /remote ${REMOTE_MODES.join(' | ')}`); }
+      else { store.remoteBusy = true; sys(`switching remote to ${act.mode}…`); sendMsg({ t: 'remote', mode: act.mode, reissue: act.reissue === true }); }
+      break;
     case 'quit': return leave(0);
     case 'error': err(act.text); break;
     default: break;
@@ -1053,10 +1134,198 @@ function StatusBar({ status, typing, spin, mirror, passthrough, net }) {
     right ? h(Text, { color: C.dim }, right) : null);
 }
 
+// ------------------------------------------------- v0.24: /menu, the control panel ----
+// Ink overlay over menuTree() (lib.mjs), which is the same data the completeness test walks —
+// so a feature that is not in here fails the suite. EVERY action maps to a command that already
+// exists: a leaf either submits its `/command` (when the command means something on its own) or
+// puts it on the input line ready for its argument. The menu is discoverability, never a second
+// implementation of anything.
+const HERE_DIR = path.dirname(new URL(import.meta.url).pathname);
+
+function manualLines() {
+  try { return fs.readFileSync(path.join(HERE_DIR, MANUAL_FILE), 'utf8').split('\n'); }
+  catch (e) { return [`could not read ${MANUAL_FILE}: ${e.message}`]; }
+}
+
+// Where the cursor is, as a path of ids from the tree root. Resolved fresh on every render, so
+// the panel shows live state (who is here, what is pending, which relay is up) rather than a
+// snapshot taken when it opened.
+function nodeAt(tree, path) {
+  let items = tree.sections;
+  let node = tree;
+  for (const id of path) {
+    const hit = (items || []).find((i) => i.id === id);
+    if (!hit) break;
+    node = hit;
+    items = hit.items;
+  }
+  return { node, items: items || [] };
+}
+
+function Pager({ lines, title, onClose }) {
+  const rows = Math.max(6, (process.stdout.rows || 24) - 6);
+  const [top, setTop] = React.useState(0);
+  const max = Math.max(0, lines.length - rows);
+  useInput((input, key) => {
+    if (key.escape || input === 'q') return onClose();
+    if (key.downArrow) return setTop((t) => Math.min(max, t + 1));
+    if (key.upArrow) return setTop((t) => Math.max(0, t - 1));
+    if (key.pageDown || input === ' ') return setTop((t) => Math.min(max, t + rows));
+    if (key.pageUp || input === 'b') return setTop((t) => Math.max(0, t - rows));
+    if (input === 'g') return setTop(0);
+    if (input === 'G') return setTop(max);
+  });
+  return h(Box, { flexDirection: 'column' },
+    h(Text, { color: C.accent, bold: true }, `── ${title} — ${top + 1}-${Math.min(lines.length, top + rows)} of ${lines.length} `),
+    ...lines.slice(top, top + rows).map((l, i) => h(Text, { key: i, wrap: 'truncate', color: /^#/.test(l) ? C.accent : undefined }, l === '' ? ' ' : l)),
+    h(Text, { color: C.dim }, '↑↓ / space / b · g top · G end · Esc closes'));
+}
+
+function Menu({ s }) {
+  const [pager, setPager] = React.useState(null);
+  const tree = menuTree({
+    host: IS_HOST,
+    state: {
+      roster: s.roster, pending: s.pending, grants: s.grants,
+      token: s.session?.token, inviteOnly: s.session?.inviteOnly, view: s.session?.view,
+      remote: s.session?.remote, tunnelJoin: s.session?.tunnelJoin, replay: s.session?.replay,
+    },
+  });
+  const here = nodeAt(tree, s.menu.path);
+  const close = () => { store.menu = null; touch(); };
+  const up = () => { store.menu = { path: s.menu.path.slice(0, -1), at: 0 }; touch(); };
+  const down = (id) => { store.menu = { path: [...s.menu.path, id], at: 0 }; touch(); };
+  const runCmd = (cmd) => { close(); if (menuRunsBare(cmd)) submit(cmd); else { store.input = cmd + ' '; setInputExternal(cmd + ' '); } };
+  const say = (lines) => { close(); toTranscript++; for (const l of [].concat(lines)) sys(l); toTranscript--; };
+
+  useInput((input, key) => {
+    if (pager) return;
+    if (key.escape) return s.menu.path.length ? up() : close();
+  }, { isActive: !pager });
+
+  if (pager) return h(Pager, { lines: pager.lines, title: pager.title, onClose: () => setPager(null) });
+
+  // The special rows: everything that is not simply "run this command".
+  const act = (item) => {
+    if (item.items) return down(item.id);
+    switch (item.id) {
+      case 'help.manual': return setPager({ title: `${MANUAL_FILE} — the same text claude is given`, lines: manualLines() });
+      case 'help.keys': return say(['keyboard:', ...KEY_HELP.map((k) => `  ${k.key.padEnd(12)} ${k.desc}`)]);
+      case 'help.wiki': return say(['wiki: https://github.com/roypadina/claude-jam/wiki',
+        ...WIKI_PAGES.map((w) => `  ${w}`)]);
+      case 'session.attach': return IS_HOST ? (close(), onF3()) : say('F3 attaches the real TUI, and it is the host\'s key');
+      case 'session.replay': return say(`replay: ${s.session?.replay ?? '?'} events of the transcript are shown to a joining guest (--replay at launch)`);
+      case 'people.pending': return say(s.pending.length
+        ? [`${s.pending.length} waiting:`, ...s.pending.map((p) => `  ${p.kind} from ${p.name}${p.detail ? ` — ${p.detail}` : ''}`),
+          '  answer with a / d on the bar, or the /allow-… command on the line']
+        : 'nothing is waiting for you');
+      case 'people.grants': return down('people.grants');
+      case 'invites.copy': {
+        if (!s.lastLink) return say('no link has been minted in this client yet — Invites → Create a link');
+        const ok = copyToClipboard(`${clientCmdName()} ${s.lastLink.link}`);
+        return say(ok ? `copied ${s.lastLink.name}'s invite command — send it privately, it is a password`
+          : `clipboard not available — the link is in the log above (${s.lastLink.name})`);
+      }
+      case 'invites.revoke': return runCmd('/invite revoke');
+      case 'invites.reissue': return down('access.remote');
+      case 'access.inviteonly': return runCmd(`/token invite-only ${s.session?.inviteOnly ? 'off' : 'on'}`);
+      case 'access.view': { close(); sendMsg({ t: 'view', on: !s.session?.view }); return sys(`asking the daemon to turn the browser view ${s.session?.view ? 'off' : 'on'}…`); }
+      case 'access.remote': return down('access.remote');
+      default: return item.run ? runCmd(item.run) : say(item.desc || 'nothing to do here');
+    }
+  };
+
+  // ---- the two hand-written sub-panels: the relay switch and the standing grants ----
+  if (s.menu.path.at(-1) === 'access.remote') {
+    if (s.remoteBusy) {
+      return h(Box, { flexDirection: 'column' },
+        h(Text, { color: C.accent, bold: true }, '── Access · Remote '),
+        h(Spinner, { label: 'starting the relay and waiting for its hostname…' }));
+    }
+    const rows = s.remoteRows || [];
+    const cur = s.session?.remote || 'off';
+    return h(Box, { flexDirection: 'column' },
+      h(Text, { color: C.accent, bold: true }, '── Access · Remote '),
+      h(Text, { color: C.dim }, `now: ${cur}${s.session?.tunnelJoin ? ` · ${s.session.tunnelJoin}` : ''}`),
+      ...rows.filter((r) => r.disabled).flatMap((r) => String(r.reason).split('\n')
+        .map((line, i) => h(Text, { key: `${r.value}-${i}`, color: C.dimmer, wrap: 'truncate' }, i ? `    ${line}` : `  ${r.value} unavailable: ${line}`))),
+      h(Select, {
+        options: [
+          ...rows.filter((r) => !r.disabled).map((r) => ({ label: `${r.label}${r.value === cur ? '   (current)' : ''}`, value: r.value })),
+          // The links minted before a change embed the old address list, so the offer lives in
+          // the same step it is caused by (v0.22B's documented caveat, v0.24's answer to it).
+          ...rows.filter((r) => !r.disabled && r.value !== cur).map((r) => ({ label: `${r.value} — and re-issue every invite link`, value: `${r.value}!` })),
+          { label: 'Back', value: 'back' },
+        ],
+        onChange: (v) => {
+          if (v === 'back') return up();
+          const reissue = v.endsWith('!');
+          const mode = reissue ? v.slice(0, -1) : v;
+          close();
+          store.remoteBusy = true;
+          sys(`switching remote to ${mode}${reissue ? ' and re-issuing every invite link' : ''}…`);
+          sendMsg({ t: 'remote', mode, reissue });
+        },
+      }));
+  }
+  if (s.menu.path.at(-1) === 'people.grants') {
+    const list = s.grants || [];
+    return h(Box, { flexDirection: 'column' },
+      h(Text, { color: C.accent, bold: true }, '── People · Standing approvals '),
+      h(Text, { color: C.dim }, list.length
+        ? 'an `always` grant means that person is never asked again for that kind of request'
+        : 'nobody holds one — a grant is given by adding `always` to an /allow-… command'),
+      h(Select, {
+        options: [...list.map((g) => ({ label: `withdraw ${g.name}'s standing ${g.kind}`, value: `${g.kind}:${g.name}` })),
+          { label: 'Back', value: 'back' }],
+        onChange: (v) => {
+          if (v === 'back') return up();
+          const [kind, ...rest] = v.split(':');
+          close();
+          sendMsg({ t: 'grants', op: 'revoke', kind, name: rest.join(':') });
+          sendMsg({ t: 'grants' });
+        },
+      }));
+  }
+
+  const title = s.menu.path.length ? `${tree.title} · ${here.node.title || here.node.label}` : tree.title;
+  // The widest label in THIS list, capped — a column that fits the shortest one runs every
+  // other row together with its description.
+  const width = Math.min(32, Math.max(14, ...here.items.map((i) => (i.title || i.label || '').length + 2)));
+  return h(Box, { flexDirection: 'column' },
+    h(Text, { color: C.accent, bold: true }, `── ${title} `),
+    here.node.desc ? h(Text, { color: C.dim, wrap: 'truncate' }, here.node.desc) : null,
+    h(Select, {
+      visibleOptionCount: Math.max(6, Math.min(here.items.length + 1, (process.stdout.rows || 24) - 8)),
+      options: [
+        ...here.items.map((i) => ({
+          label: `${(i.title || i.label).padEnd(width)}${i.value ? `[${i.value}] ` : ''}${i.desc || ''}`,
+          value: i.id,
+        })),
+        { label: s.menu.path.length ? 'Back' : 'Close (Esc)', value: '..' },
+      ],
+      onChange: (v) => {
+        if (v === '..') return s.menu.path.length ? up() : close();
+        const item = here.items.find((i) => i.id === v);
+        if (!item) return;
+        if (item.items || (!s.menu.path.length && item.items !== undefined)) return down(item.id);
+        return s.menu.path.length ? act(item) : down(item.id);
+      },
+    }),
+    h(Text, { color: C.dimmer }, '↑↓ move · Enter · Esc back'));
+}
+
+// TextInput's value lives in React state, so prefilling it from outside needs a way in.
+let setInputExternal = () => {};
+const clientCmdName = () => 'claude-jam join';
+
 function App() {
   const s = useStore();
   const [input, setInput] = React.useState('');
   const [spin, setSpin] = React.useState(0);
+  // v0.24: `/menu` puts a command that needs an argument on the input line rather than running
+  // it, so the panel needs a way to write into React's state from outside a component.
+  setInputExternal = setInput;
 
   // The spinner runs ONLY while busy, and unref'd, so an idle client neither redraws nor
   // holds the loop open.
@@ -1161,6 +1430,14 @@ function App() {
   // poor way to ask somebody a question.
   const qText = s.passthrough ? '' : questionText(s.status);
   const qRows = qText ? qText.split('\n').length : 0;
+  // v0.24: while the panel is open it owns the whole live region AND the keyboard. An input row
+  // underneath would make one keystroke both a menu choice and a message; the mirror underneath
+  // would push the panel off the bottom of a short terminal.
+  if (s.menu && !s.passthrough) {
+    return h(Box, { flexDirection: 'column' },
+      h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
+      h(Menu, { s }));
+  }
   return h(Box, { flexDirection: 'column' },
     h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
     s.mirror ? h(Mirror, { frame: s.frame, reserve: (hints.length ? 1 : 0) + qRows }) : null,

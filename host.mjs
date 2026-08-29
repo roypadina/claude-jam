@@ -38,6 +38,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.31: the status is whatever the pane says, and a question is not a permission.
   classifyPrompt, questionBlock, promptStatusText, answersMode, answerDecision,
   resolveAnswerTarget, answerLock, ANSWER_TEXT_MAX,
+  // v0.24: invite-only, the runtime relay switch, and saying out loud when a relay comes up.
+  remoteRows, relaySwitchDecision, relayReadyLine, relayPendingLine, inviteState,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `jam end` are one code path with one set of gates.
@@ -68,6 +70,10 @@ function parseArgs(argv) {
     else if (a === '--view') o.view = true;
     else if (a === '--no-view') o.view = false;
     else if (a === '--no-popup') o.noPopup = true;
+    // v0.24: no knocking at all. A link (or the host minting one) is the ONLY door — which is
+    // what makes an invite-only jam meaningfully different from a token: every entry is
+    // individually revocable, name-bound and expiring.
+    else if (a === '--invite-only') o.inviteOnly = true;
     // v0.14: the host is in the client like everybody else, so the old host-chat layouts
     // (--split pane, cmux split, `chat` window) are gone. The flags stay accepted and do
     // nothing, so an old command line still runs.
@@ -182,14 +188,23 @@ let CLAUDE_PANE = claudeTarget(opts.tmux);
 const BOOT = randomUUID(); // clients drop their id-dedupe set when this changes
 // The live token, `/token new|set|off` away from the startup value. null = knock-only.
 let currentToken = opts.token;
+// v0.24: invite-links-only. A knock is refused outright rather than left waiting for a host who
+// has decided not to be asked. Runtime state, like the token — `/token invite-only on|off`.
+let inviteOnly = opts.inviteOnly === true;
+// v0.24b: a relay was asked for and has not resolved yet, so the welcome and the daemon console
+// say `tunnel: starting…` instead of printing a LAN-only line that is about to be wrong.
+const relayPending = () => relayMode !== 'off' && !tunnelHosts.ws;
 
 // Live view (ttyd): `--view` only (v0.14 — the mirror in every client made it a nice-to-have
 // for people who want the TUI in a browser tab). Both the launcher and the daemon compute
 // this, so they print the same view line; the launcher hands its key to the daemon with
 // --view-key so a knock-only run does not end up with two different keys.
 opts.viewPort = Number(opts.viewPort) || opts.port + 1;
-const ttyd = opts.view ? resolveTtyd(opts.viewTtyd, fs.existsSync) : null;
+// v0.24: resolved whether or not --view was given, because `/menu → Access → Browser view`
+// turns it on later. `viewOn` is the runtime state; `--view` is only its starting value.
+const ttyd = resolveTtyd(opts.viewTtyd, fs.existsSync);
 if (opts.view && !ttyd) console.error('--view needs ttyd and could not find it: brew install ttyd (or --view-ttyd <path>)');
+let viewOn = opts.view === true && !!ttyd;
 let viewKey = ttyd ? resolveViewKey(currentToken, () => opts.viewKey || newToken()) : null;
 
 // The daemon drops this into the state dir the moment an end begins; the launcher reads it and
@@ -541,12 +556,18 @@ function joinInfo() {
   const ip = externalIp();
   return {
     join: buildJoinLine(ip, opts.port, currentToken, opts.clientCmd),
-    view: buildViewUrl(ip, opts.viewPort, viewKey),
+    view: viewOn ? buildViewUrl(ip, opts.viewPort, viewKey) : null,
     tunnelJoin: buildTunnelJoinLine(tunnelHosts.ws, currentToken, opts.clientCmd),
     tunnelView: buildTunnelViewUrl(tunnelHosts.view, viewKey),
     // The lines carry the address with or without a token; `token` only decides whether the
     // "friends knock" hint rides along with them.
     token: currentToken,
+    // v0.24: everything `/menu` shows as state, on the frame that already carries the rest of it.
+    inviteOnly,
+    remote: relayMode,
+    relayPending: relayPending(),
+    replay: opts.replay,
+    answers: opts.answers,
   };
 }
 
@@ -554,7 +575,10 @@ function joinInfo() {
 // order, that a host client prints on connect and on `/join`.
 function printJoin() {
   const info = joinInfo();
-  const lines = inviteLines(info).map((l) => `  ${l}`).join('\n');
+  // v0.24b: with --tunnel/--funnel the hostname is ~10s away, so say what is pending under the
+  // LAN line instead of printing a set that is about to be wrong and never correcting it.
+  const pend = info.relayPending ? [relayPendingLine(relayMode)] : [];
+  const lines = [...inviteLines(info), ...pend].map((l) => `  ${l}`).join('\n');
   console.log(info.join || info.tunnelJoin ? `\nSend this to a friend:\n${lines}\n` : `\n${lines}\n`);
 }
 
@@ -715,7 +739,7 @@ const VIEW_SH = 'S="$2-view-$$"; exec "$1" -L "$3" new-session -t "$2" -s "$S" "
 let viewProc = null; // our ttyd child: killed by its own pid, never by pattern
 
 function startView() {
-  if (!ttyd || viewProc) return;
+  if (!ttyd || !viewOn || viewProc) return;
   // ttyd >= 1.7 is read-only unless -W is given, so read-only needs no flag of its own.
   const child = spawn(ttyd, ['-p', String(opts.viewPort), '-c', `jam:${viewKey}`,
     'sh', '-c', VIEW_SH, 'jam-view', TMUX, opts.tmux, SOCKET], { stdio: 'ignore' });
@@ -738,7 +762,7 @@ function stopView() {
 // ttyd cannot change its basic-auth credentials while running, so a new view key means a
 // new child. Wait for the old one to die before respawning, or the port is still bound.
 function restartView() {
-  if (!ttyd) return;
+  if (!ttyd || !viewOn) return;
   if (!viewProc) return startView();
   const child = viewProc;
   viewProc = null;
@@ -762,6 +786,11 @@ const relayAttempts = { ws: 0, view: 0 }; // consecutive deaths, reset the momen
 const relayTimers = { ws: null, view: null }; // pending respawns, cleared on shutdown
 let relayStopping = false; // a SIGTERM of ours is not a death to recover from
 
+// v0.24.1: WHICH relay is running is runtime state now — `/menu → Access → Remote` and
+// `claude-jam remote <off|tunnel|funnel>` change it while the jam is live. `opts.tunnel` /
+// `opts.funnel` are only the starting value.
+let relayMode = opts.funnel ? 'funnel' : opts.tunnel ? 'tunnel' : 'off';
+
 const RELAYS = {
   tunnel: {
     what: 'cloudflared',
@@ -782,10 +811,11 @@ const RELAYS = {
     stable: true,
   },
 };
-const relay = opts.funnel ? RELAYS.funnel : RELAYS.tunnel;
-const relayBin = () => (opts.funnel ? tailscaleBin : 'cloudflared');
+const relayBin = () => (relayMode === 'funnel' ? tailscaleBin : 'cloudflared');
 
 function spawnRelay(label, port) {
+  const relay = RELAYS[relayMode];
+  if (!relay) return;
   const child = spawn(relayBin(), relay.args(port, label), { stdio: ['ignore', 'pipe', 'pipe'] });
   tunnelProcs[label] = child;
   console.log(`tunnel (${label}): ${relay.what} connecting… (pid ${child.pid})`);
@@ -800,11 +830,14 @@ function spawnRelay(label, port) {
     if (tunnelHosts[label]) return; // already resolved, nothing left to parse for
     const host = relay.parse(buf);
     if (!host) return;
+    const before = lastAnnounced;
     tunnelHosts[label] = host;
     relayAttempts[label] = 0; // it worked: the next death waits 1s, not 30
     clearTimeout(timer);
     console.log(`tunnel (${label}) up: ${host}`);
-    onTunnelChange();
+    // v0.24b: a relay coming up is an EVENT. It used to be a silent {t:'token'} refresh, which
+    // in the mirror view (the default) went into the deferred strip and scrolled away unseen.
+    onTunnelChange({ ready: label === 'ws', changed: !!before });
   };
   child.stdout.on('data', onOut);
   child.stderr.on('data', onOut);
@@ -831,16 +864,17 @@ function spawnRelay(label, port) {
 }
 
 function startTunnels() {
-  if (!opts.tunnel && !opts.funnel) return;
-  if (opts.funnel) {
+  if (relayMode === 'off') return;
+  relayStopping = false; // a previous stop must not swallow this run's respawns
+  if (relayMode === 'funnel') {
     // The whole point of Funnel over a quick tunnel: this URL is the same after a respawn, a
     // daemon restart and a reboot. Say it up front — it is bookmarkable before it is even up.
-    console.log(`funnel: wss://${funnelHost(opts.funnelDns, FUNNEL_PORTS.ws)} (stable — same URL across restarts)`);
+    if (opts.funnelDns) console.log(`funnel: wss://${funnelHost(opts.funnelDns, FUNNEL_PORTS.ws)} (stable — same URL across restarts)`);
   }
   spawnRelay('ws', opts.port);
   // The view relay only makes sense when a view server is actually running — same gate
-  // startView() itself uses (`--view` given and ttyd found).
-  if (ttyd) spawnRelay('view', opts.viewPort);
+  // startView() itself uses (a view asked for, and ttyd found).
+  if (viewOn) spawnRelay('view', opts.viewPort);
 }
 
 function stopTunnels() {
@@ -852,11 +886,13 @@ function stopTunnels() {
     const child = tunnelProcs[label];
     if (!child) continue;
     tunnelProcs[label] = null;
+    tunnelHosts[label] = null;
+    relayAttempts[label] = 0;
     try { child.kill('SIGTERM'); } catch { /* already gone */ }
     // Foreground `tailscale funnel` is documented to drop its config when it exits, but a
     // funnel left open is a port on the public internet — so ask for that exact port to be
     // turned off too, scoped, never `funnel reset` (which would wipe config we never made).
-    if (opts.funnel) {
+    if (relayMode === 'funnel') {
       const r = spawnSync(tailscaleBin, ['funnel', '--yes', `--https=${FUNNEL_PORTS[label]}`, 'off'], { encoding: 'utf8' });
       if (r.status !== 0) console.log(`funnel (${label}) off failed: ${(r.stderr || r.stdout || '').trim().slice(0, 200)}`);
     }
@@ -867,11 +903,100 @@ function stopTunnels() {
 // block reflect it right away, and already-connected host clients hear about it on the same
 // frame `/token` uses. `/token` rotation itself does NOT call this — it never touches
 // tunnelHosts, only the join/view *strings*, which joinInfo() recomputes from the live token.
-function onTunnelChange() {
+//
+// v0.24b: and a relay that comes UP is announced. The observed failure was not that the
+// {t:'token'} push never arrived — it did — but that the client rendered it into the mirror
+// view's deferred strip, three rows that the next system line pushed away. So the daemon now
+// sends a distinct `relay` event as well, which the client prints into the transcript proper.
+let lastAnnounced = null; // the ws hostname we last announced, so a respawn to the SAME name is quiet
+// A re-issue asked for as part of a relay START has to WAIT for the hostname: minting the moment
+// the switch is made produces links carrying the same LAN address they already had, which is the
+// exact thing the re-issue exists to fix. (Measured 2026-08-29: it did.)
+let pendingReissue = false;
+function onTunnelChange({ ready = false, changed = false } = {}) {
   writeTokenFile();
   printJoin();
-  const { join, view, tunnelJoin, tunnelView } = joinInfo();
-  sendHosts({ t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView });
+  const info = joinInfo();
+  const { join, view, tunnelJoin, tunnelView } = info;
+  sendHosts({ t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView,
+    remote: relayMode, inviteOnly, relayPending: relayPending() });
+  if (!ready) { if (!tunnelHosts.ws) lastAnnounced = null; return; }
+  if (tunnelHosts.ws === lastAnnounced) return;
+  lastAnnounced = tunnelHosts.ws;
+  const line = relayReadyLine(relayMode, tunnelJoin, { changed });
+  if (!line) return;
+  sendHosts({ t: 'relay', mode: relayMode, host: tunnelHosts.ws, text: line, join: tunnelJoin });
+  console.log(line);
+  if (!pendingReissue) return;
+  pendingReissue = false;
+  const out = reissueInvites();
+  sendHosts({ t: 'sys', text: `re-issued ${out.length} invite link(s) with the new ${relayMode} address `
+    + '— the old ones are revoked, so send the new links out' });
+  console.log(`[invite] re-issued ${out.length} link(s) after the ${relayMode} hostname landed`);
+}
+
+// v0.24.1: the relay switch itself. One path in and out — the SAME startTunnels/stopTunnels the
+// launcher uses — so there is no second way to bring a tunnel up. Preconditions are checked here
+// rather than assumed, because the daemon is a different process from the launcher that
+// fail-fasted at boot and the answer can have changed underneath it.
+function relayProbe() {
+  let cloudflared = false;
+  try { cloudflared = spawnSync('cloudflared', ['--version'], { encoding: 'utf8' }).status === 0; } catch { /* no */ }
+  let funnel = { ok: false, error: `no tailscale CLI at ${tailscaleBin} — install Tailscale, or set JAM_TAILSCALE` };
+  try {
+    const st = spawnSync(tailscaleBin, ['status', '--json'], { encoding: 'utf8' });
+    if (!st.error) funnel = funnelPrecheck(st.stdout);
+  } catch (e) { funnel = { ok: false, error: e.message }; }
+  return remoteRows({ cloudflared, funnel });
+}
+
+// Every link minted before a relay change embeds the OLD address list, so the host is offered
+// this in the same step. The daemon keeps only the hash of each secret, so a link cannot be
+// re-encoded — a re-issue mints a NEW link for the same name, uses and expiry, and revokes the
+// old record, which is the honest version of "re-issue" and says so.
+function reissueInvites(now = Date.now()) {
+  const live = invites.filter((r) => inviteState(r, now) === 'live');
+  const out = [];
+  for (const old of live) {
+    const ttl = old.expires ? Math.max(1000, old.expires - now) : 0;
+    const minted = mintInvite({ name: old.name, maxUses: old.maxUses, ttl, now });
+    if (!minted.ok) continue;
+    old.revoked = true;
+    out.push({ id: minted.rec.id, was: old.id, name: old.name, link: minted.link });
+  }
+  if (out.length) saveInvites();
+  return out;
+}
+
+// off | tunnel | funnel, while the jam runs. Connected guests are never dropped: nothing here
+// touches a socket, only the relay children and the URLs the invite lines are built from.
+function setRemote(mode, { reissue = false } = {}) {
+  const rows = relayProbe();
+  const d = relaySwitchDecision({ from: relayMode, to: mode, rows });
+  if (!d.ok) return { ok: false, error: d.error };
+  if (d.action === 'noop') return { ok: true, action: 'noop', mode: relayMode, reissued: [] };
+  stopTunnels();
+  relayMode = d.to;
+  opts.tunnel = relayMode === 'tunnel';
+  opts.funnel = relayMode === 'funnel';
+  if (relayMode === 'funnel' && !opts.funnelDns) opts.funnelDns = rows.find((r) => r.value === 'funnel')?.dns || null;
+  lastAnnounced = null;
+  startTunnels();
+  // Turning a relay OFF has its final address list already (the LAN one), so a re-issue can
+  // happen now. Turning one ON does not: the hostname is ~10s away, and a link minted before it
+  // lands carries exactly the address it was supposed to replace. That one waits.
+  pendingReissue = reissue && relayMode !== 'off';
+  // The URLs are gone (stop) or not resolved yet (start/switch) — either way the invite lines
+  // just changed, so say so now rather than only when a hostname lands.
+  onTunnelChange();
+  const reissued = reissue && relayMode === 'off' ? reissueInvites() : [];
+  // Said out loud whoever drove it — a host client's `/menu`, `/remote`, or `claude-jam remote`
+  // from a shell. The host clients hear it either way, so the two surfaces read the same.
+  sendHosts({ t: 'sys', text: relayMode === 'off'
+    ? `remote is off — the public relay is down, the LAN address still works${reissued.length ? `, ${reissued.length} invite link(s) re-issued` : ''}`
+    : `remote is ${relayMode} — waiting for its hostname${pendingReissue ? ', then every invite link is re-issued' : ''}` });
+  return { ok: true, action: d.action, mode: relayMode, reissued, rows,
+    reissuePending: pendingReissue };
 }
 
 // -------------------------------------------------------- terminal mirror ----
@@ -1337,6 +1462,22 @@ function onRequest(req, res) {
     });
     return;
   }
+  // v0.24.1: `claude-jam remote <off|tunnel|funnel>`. Same guard as /admit, /end and /invite —
+  // loopback plus the internal secret out of the 0700 state dir — and the same setRemote().
+  if (req.method === 'POST' && req.url === '/remote') {
+    if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
+    if (!tokenMatches(req.headers['x-jam-secret'], opts.hookSecret)) return reply(403, { error: 'bad secret' });
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1e4) req.destroy(); });
+    req.on('end', () => {
+      let m;
+      try { m = JSON.parse(body || '{}'); } catch { return reply(400, { error: 'bad JSON' }); }
+      if (m.mode == null) return reply(200, { ok: true, mode: relayMode, rows: relayProbe() });
+      const r = setRemote(m.mode, { reissue: m.reissue === true });
+      return r.ok ? reply(200, { ok: true, ...r }) : reply(400, { error: r.error });
+    });
+    return;
+  }
   const hook = /^\/hook\/(\w[\w-]*)$/.exec(req.url || '');
   if (req.method === 'POST' && hook) {
     if (!isLoopback(req.socket.remoteAddress)) return reply(403, { error: 'loopback only' });
@@ -1455,6 +1596,20 @@ function onAdmit(ws, m) {
 // `/token new|set <v>|off` from a host client. Admission is checked only at hello time,
 // so rotating never disconnects anyone already in.
 function onToken(ws, m) {
+  // v0.24: the same command, because it is the same question — how people get in. Answered
+  // first, so it never falls through into a token rotation.
+  if (m.op === 'invite-only') {
+    inviteOnly = m.value === 'on';
+    const info = joinInfo();
+    sendHosts({ t: 'token', token: currentToken, join: info.join, view: info.view,
+      tunnelJoin: info.tunnelJoin, tunnelView: info.tunnelView,
+      remote: relayMode, inviteOnly, relayPending: relayPending() });
+    broadcast({ t: 'sys', text: inviteOnly
+      ? 'this jam is invite-only now — a knock is refused, an invite link is the only way in'
+      : 'knocking is allowed again — the host is asked when somebody wants in' });
+    writeTokenFile();
+    return;
+  }
   if (m.op === 'new') currentToken = newToken();
   else if (m.op === 'off') currentToken = null;
   else if (m.op === 'set') {
@@ -1541,6 +1696,44 @@ function onKick(ws, me, m) {
     + `${revoked ? `, ${revoked} invite(s) revoked` : ''}`);
 }
 
+// v0.24.1: `/menu → Access → Remote` and `/remote <off|tunnel|funnel>` from a host client. The
+// HTTP endpoint (`claude-jam remote`) goes through the same setRemote(), so the two surfaces
+// cannot drift — the same rule v0.22B's inviteOp() already follows.
+function onRemote(ws, me, m) {
+  if (!trusted(me)) return sendError(ws, 'a public relay is the host\'s to switch, on loopback only');
+  if (m.mode == null) {
+    return send(ws, { t: 'remote', id: nextId++, ts: Date.now(), state: 'rows',
+      mode: relayMode, rows: relayProbe() });
+  }
+  const r = setRemote(m.mode, { reissue: m.reissue === true });
+  if (!r.ok) return sendError(ws, r.error);
+  send(ws, { t: 'remote', id: nextId++, ts: Date.now(), state: 'done', mode: r.mode,
+    action: r.action, reissued: r.reissued, reissuePending: r.reissuePending === true });
+}
+
+// The standing approvals a guest holds, across every ladder — invisible until v0.24.
+function grants() {
+  const out = [];
+  for (const [kind, L] of Object.entries(ladders)) {
+    for (const name of L.always) out.push({ kind, name });
+  }
+  return out;
+}
+
+// Withdraw one, or everything one person holds. Names are stored lowercased by the ladder, so
+// the match is on that; a `kind` narrows it to a single grant.
+function revokeGrants(name, kind = null) {
+  const want = String(name ?? '').trim().toLowerCase();
+  if (!want) return [];
+  const gone = [];
+  for (const [k, L] of Object.entries(ladders)) {
+    if (kind && k !== kind) continue;
+    if (L.always.delete(want)) gone.push({ kind: k, name: want });
+  }
+  if (gone.length) console.log(`[grants] withdrew ${gone.map((g) => `${g.name}/${g.kind}`).join(', ')}`);
+  return gone;
+}
+
 function onSocket(ws, req) {
   const ip = String(req.socket.remoteAddress || '');
   // v0.17 T2: the other half of startHeartbeat's sweep. The browser-standard WebSocket every
@@ -1588,6 +1781,14 @@ function onSocket(ws, req) {
       }
       const c = classifyHello(m, currentToken, isLoopback(ip));
       if (!c.ok) { sendError(ws, c.error); return ws.close(c.code, c.error); }
+      // v0.24: invite-only. A knock is refused rather than left waiting for a host who has
+      // decided not to be asked — and the refusal says what to go and get. The host's own
+      // loopback client and a valid token still come in above this: this closes the KNOCK door.
+      if (inviteOnly && c.admit !== 'token') {
+        sendError(ws, 'this jam is invite-only — ask the host for a claude-jam invite link (cjam1_…)');
+        console.log(`[knock] ${c.name} from ${ip} refused: invite-only`);
+        return ws.close(4405, 'invite only');
+      }
       // Attribution is by name, and a knocker's name is reserved while it waits.
       if (nameTaken(c.name, [...names(), ...[...pending.values()].map((p) => p.name)])) {
         sendError(ws, `the name "${c.name}" is already taken here`);
@@ -1713,6 +1914,32 @@ function onSocket(ws, req) {
       send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: invitesReport(invites) });
     } else if (m.t === 'kick') {
       onKick(ws, me, m);
+      // v0.24.1: off | tunnel | funnel while the jam runs. Same gate as /end and /invite — host
+      // AND loopback — because a relay puts this port on the public internet.
+    } else if (m.t === 'remote') {
+      onRemote(ws, me, m);
+      // v0.24: the browser view (ttyd), on and off while the jam runs. Same gate as the relay
+      // switch — it publishes the real screen on a port, so it is the host's, on loopback.
+    } else if (m.t === 'view') {
+      if (!trusted(me)) return sendError(ws, 'the browser view is the host\'s to switch, on loopback only');
+      if (!ttyd) return sendError(ws, 'ttyd is not installed, so there is no browser view to turn on: brew install ttyd');
+      viewOn = m.on !== false;
+      if (viewOn) startView(); else stopView();
+      onTunnelChange();
+      broadcast({ t: 'sys', text: viewOn
+        ? `the browser view is on — the host can hand out its URL (${'read-only'})`
+        : 'the browser view is off' });
+      // v0.24C: the `always` grants a guest holds. They were invisible once given; now they are
+      // listed and individually revocable, which is what makes them safe to hand out.
+    } else if (m.t === 'grants') {
+      if (!trusted(me)) return sendError(ws, 'standing approvals are the host\'s, on loopback only');
+      if (m.op === 'revoke') {
+        const gone = revokeGrants(m.name, m.kind);
+        return send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: gone.length
+          ? `withdrew ${gone.map((g) => `${g.name}'s standing ${g.kind}`).join(', ')} — they will be asked again next time`
+          : `nobody holds a standing approval matching ${JSON.stringify(String(m.name ?? '').slice(0, 24))}` });
+      }
+      return send(ws, { t: 'grants', id: nextId++, ts: Date.now(), items: grants() });
       // v0.18-4: `/end`. This ends the session for everybody and kills the tmux session it runs
       // in, so it wears F3's gate — host AND loopback, i.e. the client the launcher spawned —
       // and the client asks its own `really end this jam for everyone?` before it ever gets here.
