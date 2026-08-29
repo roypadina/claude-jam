@@ -2575,10 +2575,16 @@ export function historyMove(list = [], idx = -1, dir = 'up', draft = '') {
 // Where the file lives. XDG if it is set, `~/.config/claude-jam/history` otherwise — pure, so the
 // clients (which are the only things that touch a disk here) decide when to read and write it.
 export const HISTORY_FILE = 'history';
-export function historyFilePath(home = os.homedir(), env = {}) {
+// v0.32 W0: the config directory is its own answer, because platform.mjs has to be able to give
+// it out without going through the history file — and because Windows will answer
+// `%APPDATA%\claude-jam` here and nowhere else.
+export function configDirPath(home = os.homedir(), env = {}) {
   const base = env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME)
     ? env.XDG_CONFIG_HOME : path.join(home, '.config');
-  return path.join(base, 'claude-jam', HISTORY_FILE);
+  return path.join(base, 'claude-jam');
+}
+export function historyFilePath(home = os.homedir(), env = {}) {
+  return path.join(configDirPath(home, env), HISTORY_FILE);
 }
 export function parseHistoryFile(text) {
   return String(text ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-HISTORY_FILE_MAX);

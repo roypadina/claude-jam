@@ -19,7 +19,7 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.17 Batch P: the read-only allowlist, the permission relay, per-client RTT.
   isSafeGuestCommand, parsePermOptions, permOptionsReport, validPermChoice, PERM_TEXT_MAX,
   // v0.18: jam owns the tmux session it made — the marker, the prompts, the way back in.
-  OWNED_OPTION, SESSION_FILE, stateDirFor, sessionInfo, parseSessionJson, exitDecision, EXIT_KEYS,
+  OWNED_OPTION, SESSION_FILE, sessionInfo, parseSessionJson, exitDecision, EXIT_KEYS,
   exitPromptText, reattachLines, TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName,
   promptChoice,
   // v0.22B: invite links — one command joins, no name, no token, no approval.
@@ -44,6 +44,9 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
 import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
+// v0.32 W0: $TMPDIR, and every file that must be readable by its owner and nobody else, come
+// from the one module that knows what operating system this is.
+import { stateDir, secureDir, secureWrite } from './platform.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -109,7 +112,7 @@ if (opts.help) {
 }
 opts.name ||= 'Host';
 opts.cwd = path.resolve(opts.cwd || process.cwd());
-opts.state ||= stateDirFor(os.tmpdir(), opts.port);
+opts.state ||= stateDir(opts.port);
 // v0.20: the tmux server this jam lives on. Named per port, so two jams never share one, and
 // `--tmux-socket default` puts jam back on the user's own server (F3's bare-key binding is then
 // skipped, because on a shared server it would be theirs too).
@@ -246,7 +249,7 @@ async function retarget(name) {
   opts.tmux = name;
   opts.port = port;
   opts.viewPort = port + 1;
-  opts.state = stateDirFor(os.tmpdir(), port);
+  opts.state = stateDir(port);
   // The socket is named per port, so it moves with it — unless the flag pinned one by hand.
   SOCKET = tmuxSocketFor(port, opts.tmuxSocket);
   CLAUDE_PANE = claudeTarget(name);
@@ -298,7 +301,7 @@ async function launch() {
   const { attach } = await resolveTargetSession();
   if (attach) return attachHostClient(attach);
   if (opts.resume) console.log(`resuming session ${opts.resume}`);
-  fs.mkdirSync(opts.state, { recursive: true, mode: 0o700 });
+  secureDir(opts.state);
   writeRoster([]);
   const hooks = path.join(HERE, 'hooks.sh');
   fs.writeFileSync(path.join(opts.state, 'settings.json'), JSON.stringify(buildSettings(hooks), null, 2));
@@ -401,7 +404,7 @@ function writeSystemPrompt() {
   }
   const file = path.join(opts.state, SYSTEM_PROMPT_FILE);
   try {
-    fs.writeFileSync(file, buildSystemPrompt({ hostName: opts.name }), { mode: 0o600 });
+    secureWrite(file, buildSystemPrompt({ hostName: opts.name }));
   } catch (e) {
     console.log(`could not write ${file} (${e.message}) — the contract stays in the hook`);
     return null;
@@ -442,7 +445,7 @@ function claimSession() {
     // popup already uses. It lives in the 0700 state dir beside token.json.
     secret: opts.hookSecret,
   });
-  fs.writeFileSync(path.join(opts.state, SESSION_FILE), `${JSON.stringify(info, null, 2)}\n`, { mode: 0o600 });
+  secureWrite(path.join(opts.state, SESSION_FILE), `${JSON.stringify(info, null, 2)}\n`);
   // Session option on OUR session only; the host's tmux config is never written.
   const r = tmux('set-option', '-t', opts.tmux, OWNED_OPTION, opts.state);
   if (r.status !== 0) console.error(`could not stamp ${OWNED_OPTION}: ${(r.stderr || '').trim()}`);
@@ -615,7 +618,7 @@ function loadInvites() {
 
 function saveInvites() {
   try {
-    fs.writeFileSync(invitesPath(), `${JSON.stringify({ v: INVITE_V, invites }, null, 2)}\n`, { mode: 0o600 });
+    secureWrite(invitesPath(), `${JSON.stringify({ v: INVITE_V, invites }, null, 2)}\n`);
   } catch (e) { console.log(`[invite] could not write ${invitesPath()}: ${e.message}`); }
 }
 
@@ -2532,9 +2535,9 @@ const outboxDir = () => path.join(opts.state, OUTBOX_DIR);
 function outboxWrite(name, payload) {
   const dir = outboxDir();
   try {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    secureDir(dir);
     const file = path.join(dir, outboxName(Date.now(), name));
-    fs.writeFileSync(file, payload, { mode: 0o600 });
+    secureWrite(file, payload);
     outboxPrune();
     return file;
   } catch (e) {
@@ -2569,7 +2572,7 @@ async function pasteChunk(chunk, probe, lines = null) {
   const buf = `jam${++bufN}`;
   const file = path.join(opts.state, 'inject.txt');
   try {
-    fs.writeFileSync(file, chunk, { mode: 0o600 }); // never argv, never a shell
+    secureWrite(file, chunk); // never argv, never a shell
     tmux('load-buffer', '-b', buf, file);
     tmux('paste-buffer', '-b', buf, '-d', '-p', '-t', CLAUDE_PANE);
     for (let i = 0; i < PASTE_POLLS; i++) {

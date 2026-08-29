@@ -1,5 +1,6 @@
-// claude-jam file transfers, the client's half (v0.12 export, v0.13 files). fs, the clipboard
-// and the one shell-free spawn live here so lib.mjs stays pure and both renderers share this.
+// claude-jam file transfers, the client's half (v0.12 export, v0.13 files). fs lives here so
+// lib.mjs stays pure and both renderers share this. v0.32 W0: the clipboard and the desktop
+// notification moved to platform.mjs — this file spawns nothing at all now.
 //
 // Everything written by a client lands in ITS OWN cwd: the transcript beside it as
 // `jam-session-<id>.jsonl`, an offered file under `./jam-downloads/`. Mode 0644, never
@@ -7,7 +8,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
 import { UPLOAD_MAX, safeBaseName, humanBytes, exportFileName } from './lib.mjs';
 
 export const DOWNLOAD_DIR = 'jam-downloads';
@@ -60,85 +60,4 @@ export function readForUpload(p) {
   if (st.size > UPLOAD_MAX) throw new Error(`${humanBytes(st.size)} is over the ${humanBytes(UPLOAD_MAX)} upload cap`);
   if (!safeBaseName(path.basename(abs))) throw new Error(`${path.basename(abs)} is not a name the host will write`);
   return { name: path.basename(abs), data: fs.readFileSync(abs), path: abs };
-}
-
-// `/paste`: the clipboard as a PNG. pngpaste when it is installed, else osascript — every mac
-// has it, and `«class PNGf»` is the clipboard type an image lands on. macOS only by nature:
-// no other platform has that clipboard class, so elsewhere this says so and stops.
-const OSASCRIPT_PNG = [
-  'set f to (open for access (POSIX file "%FILE%") with write permission)',
-  'try',
-  '  write (the clipboard as «class PNGf») to f',
-  '  close access f',
-  'on error e',
-  '  try',
-  '    close access f',
-  '  end try',
-  '  error e',
-  'end try',
-].join('\n');
-
-const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
-
-// ------------------------------------------------- v0.17 P4: the desktop nudge ----
-// Fired alongside P3's bell, because a bell only helps if the terminal is somewhere you can hear
-// it. Same `osascript` precedent /paste below already sets and documents: macOS only, argv only —
-// the title and the body arrive as arguments to a `run` handler, never interpolated into the
-// script, so a message containing a quote, a backslash or a `$` cannot become AppleScript.
-// Fire and forget by design: never awaited, output dropped, every failure swallowed. This is
-// called from a render path, and a notification must not be able to cost a frame or throw.
-export const NOTIFY_TITLE_MAX = 60;
-export const NOTIFY_BODY_MAX = 200;
-export function desktopNotify(title, body) {
-  if (process.platform !== 'darwin') return false;
-  try {
-    const child = spawn('osascript', ['-e', 'on run argv',
-      '-e', 'display notification (item 1 of argv) with title (item 2 of argv)',
-      '-e', 'end run',
-      String(body ?? '').slice(0, NOTIFY_BODY_MAX), String(title ?? 'claude-jam').slice(0, NOTIFY_TITLE_MAX)],
-    { stdio: 'ignore', detached: false });
-    child.on('error', () => { /* no osascript, or notifications are off: the bell still rang */ });
-    child.unref();
-    return true;
-  } catch { return false; }
-}
-
-export function clipboardPng() {
-  if (process.platform !== 'darwin') {
-    throw new Error('/paste reads a PNG off the macOS clipboard — on this platform use /send <path>');
-  }
-  // mkdtemp, so the path is ours and has no character AppleScript or a shell could read as
-  // anything but a path (there is no shell here either: spawnSync with an argv).
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-paste-'));
-  const file = path.join(dir, `paste-${stamp()}.png`);
-  try {
-    const png = spawnSync('pngpaste', [file], { encoding: 'utf8' });
-    if (png.error || png.status !== 0) {
-      const as = spawnSync('osascript', ['-e', OSASCRIPT_PNG.replace('%FILE%', file)], { encoding: 'utf8' });
-      if (as.error || as.status !== 0) {
-        const why = (as.stderr || png.stderr || '').trim().split('\n')[0] || 'nothing to paste';
-        throw new Error(`no image on the clipboard (${why})`);
-      }
-    }
-    const data = fs.readFileSync(file);
-    if (!data.length) throw new Error('the clipboard image came back empty');
-    if (data.length > UPLOAD_MAX) throw new Error(`${humanBytes(data.length)} is over the ${humanBytes(UPLOAD_MAX)} upload cap`);
-    return { name: path.basename(file), data };
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-// v0.22A/v0.24: put one line on the clipboard. An invite link is a credential the host has to
-// GET SOMEWHERE — into Slack, into a DM — and re-typing 200 base64url characters is not a plan.
-// The text goes in on stdin, never on a command line (a link on an argv is a link in `ps`).
-// Returns whether it landed, so the caller can say "copy this by hand" instead of lying.
-export function copyToClipboard(text) {
-  const cmd = process.platform === 'darwin' ? ['pbcopy', []]
-    : process.platform === 'win32' ? ['clip', []]
-      : ['xclip', ['-selection', 'clipboard']];
-  try {
-    const r = spawnSync(cmd[0], cmd[1], { input: String(text ?? ''), encoding: 'utf8' });
-    return !r.error && r.status === 0;
-  } catch { return false; }
 }

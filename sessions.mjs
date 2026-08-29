@@ -18,10 +18,11 @@
 // Other people's tmux sessions live on this machine. They are not ours to end.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import net from 'node:net';
+// v0.32 W0: where $TMPDIR is, is a platform question. Everything else here is fs and tmux.
+import { stateDir } from './platform.mjs';
 import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verifyOwned, classifyJam,
   cleanable, resolveTarget, pickNumber, confirmYes, uptimeText, sessionsTable, sessionsJson,
   // v0.22B: the invite CLI is this file too — it needs exactly what `claude-jam end` needs (find the
@@ -204,7 +205,7 @@ function relays(dir) {
 // ponytail: a jam-owned session whose state dir was deleted by hand is therefore invisible here
 // (and so cannot be `claude-jam end`ed by name — `tmux kill-session` is the manual way out). Enumerate
 // the tmux side too if that ever actually happens.
-export async function listRows(tmpdir = os.tmpdir()) {
+export async function listRows(tmpdir = stateDir()) {
   let entries = [];
   try { entries = fs.readdirSync(tmpdir); } catch { return []; }
   const rows = [];

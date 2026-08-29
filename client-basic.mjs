@@ -17,11 +17,13 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   // v0.31: the status line and the question block are drawn from the daemon's classification of
   // the live pane. v0.30-3: readline already gives ↑/↓ recall — this makes it survive a restart.
   promptStatusText, questionBlock,
-  historyPush, parseHistoryFile, serializeHistory, historyFilePath, HISTORY_LIVE } from './lib.mjs';
+  historyPush, parseHistoryFile, serializeHistory, HISTORY_LIVE } from './lib.mjs';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
+import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './xfer.mjs';
+// v0.32 W0: anything that touches this machine's clipboard, desktop or dot-directories goes
+// through the one module that knows what operating system this is.
+import { clipboardImage, notify, historyFile, secureWrite, secureDir } from './platform.mjs';
 
 const argv = process.argv.slice(2);
 const url = argv.find((a) => a.startsWith('ws'));
@@ -81,14 +83,14 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 // v0.30-3: readline gives `↑`/`↓` recall for free — what it does not do is remember across runs.
 // Seed rl.history (newest first, which is readline's own order) and write it back on every
 // submitted row. Every disk step is wrapped: a read-only home costs recall, never the client.
-const HISTORY_PATH = historyFilePath(os.homedir(), process.env);
+const HISTORY_PATH = historyFile();
 try { rl.history = parseHistoryFile(fs.readFileSync(HISTORY_PATH, 'utf8')).reverse().slice(0, HISTORY_LIVE); }
 catch { /* no file yet, or not readable */ }
 function rememberInput(text) {
   rl.history = historyPush(rl.history || [], text, HISTORY_LIVE);
   try {
-    fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(HISTORY_PATH, serializeHistory(rl.history), { mode: 0o600 });
+    secureDir(path.dirname(HISTORY_PATH));
+    secureWrite(HISTORY_PATH, serializeHistory(rl.history));
   } catch { /* the recall still works for this session */ }
 }
 
@@ -98,7 +100,7 @@ function nudge(title, body) {
   if (!bellAllowed(lastBell, Date.now())) return;
   lastBell = Date.now();
   try { process.stdout.write(BELL); } catch { /* stdout closed */ }
-  desktopNotify(title, body);
+  notify(title, body);
 }
 
 function statusLine() {
@@ -440,7 +442,7 @@ function doSend(p) {
 
 function doPaste(caption) {
   let img;
-  try { img = clipboardPng(); } catch (e) { return err(e.message); }
+  try { img = clipboardImage(); } catch (e) { return err(e.message); }
   stageUpload(img.name, img.data, caption);
 }
 
