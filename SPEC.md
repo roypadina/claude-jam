@@ -579,3 +579,181 @@ the DEFAULT view, the transcript is the F2 alternate. Web view demoted to opt-in
   guest for THIS jam. Dangerous by nature (commands change the session for everyone) —
   default deny, never auto-approve, and `/allow-cmd always` excludes `/exit`, `/clear`,
   `/resume` (session-lifecycle commands stay host-only, hard list server-side).
+
+## v0.14 — the full ceiling list (moved out of the README, 2026-08-29)
+
+The public README keeps a short list. This is all of them.
+
+
+- tmux slightly degrades Claude Code visuals — paler colors, OSC notifications lost.
+- The JSONL format is officially unstable. All parsing lives in `parseJsonlLine` in `lib.mjs`,
+  so a format change is a one-place fix.
+- A message injected mid-response is queued by Claude Code as the next turn, not merged.
+- `busy` is inferred; the `Stop` hook is the only authoritative end-of-turn signal. It fires
+  before claude has flushed the turn's last record, so the `Stop` handler drains the JSONL
+  tail until the file goes quiet (≤ 2 s) and only then pushes `busy:false` — so the final
+  `agent` text now always arrives before `busy:false`, instead of ~300 ms after it.
+- Injection verifies by looking for the message's own first visual line (up to 40 chars, less
+  on a narrow pane) in the pane, so two identical consecutive messages could match a stale
+  echo. Nonce-prefix it if that ever bites.
+- Friends cannot answer permission prompts; the host does that with F3 (or by attaching).
+  A friend's slash command runs only after the host approves it, and never at all if it is
+  `/exit`, `/clear` or `/resume`.
+- Admission is per person (`/accept`), but there are still no per-friend credentials: once in,
+  everybody is equally trusted, and `/deny` cannot kick somebody who is already admitted.
+- A knock popup that is answered elsewhere (a client's `/accept`, or the knock expiring) stays
+  on screen until a key or its TTL closes it, and it holds the queue while it is there — the
+  daemon is the source of truth, so it just gets a 404. A knock that arrives while nobody is
+  attached gets no popup at all, and none is re-opened when a client attaches later.
+- `status-right` is snapshotted once, when the daemon starts. Changing it yourself while jam
+  is running means the next restore puts the daemon's snapshot back, not your newer value.
+- The claude window is sized for the host's mirror, and `resize-window` pins it: an attaching
+  client (a `tmux attach`, a second browser viewer) gets blank padding instead of reshaping it,
+  and if something does take the size the daemon only puts it back once nobody is attached —
+  while you are attached, the size is yours. Two viewers of different sizes means the smaller
+  picture wins for one of them; that is tmux, not jam.
+- The host's client tracks its terminal, not the other way round: on a terminal that never
+  reports a size (a pipe, some CI shells) the window falls back to 80x19 and the mirror is that
+  small for everyone. Resize the terminal once and it corrects itself.
+- More than five tool results in one turn collapse to a single `⎿ …`; the full output is in
+  the host's TUI, and the count resets on the next turn.
+- The live tool region shows the last four `⚙`/`⎿` lines, and which of the two you see is up
+  to the turn: seven `tool_use` blocks in ONE assistant record arrive together, so the four
+  newest lines can all be `⎿` results. `/tools` after the turn has the whole list.
+- `/tools` remembers one turn — the last completed one. A summary line scrolled off the screen
+  cannot be expanded again; the host's TUI keeps everything.
+- The mirror streams the pane as it is, so a guest with a shorter terminal sees the **bottom**
+  of it and a host pane much taller than the guest's window looks half empty (that blank space
+  is really there). Cropping is reported, never compensated for; the `⚙`/status rows and the
+  input box are always in the kept part, which is what a watcher wants.
+- Mirror frames are not history: a client that flips to the mirror before the first frame
+  arrives sees `waiting for the host's screen…` for up to 250 ms, and a reconnect re-subscribes
+  from scratch. Nothing older than "now" is ever streamed.
+- The transcript printed before the mirror went up stays on screen above the frame (`<Static>`
+  output belongs to the terminal, not to ink). Lines that arrive *during* the mirror are held
+  back and flushed on the way out, so ordering survives, but the frame is drawn under whatever
+  was already there.
+- The key filter holds a partial escape sequence only when it is longer than one byte, so a
+  chunk boundary falling exactly after the `ESC` of `ESC[13;2u` leaks `[13;2u` as text. A
+  terminal writes a sequence in one `write()`, so this has not been observed; the alternative
+  (holding a lone `ESC`) would swallow the Escape key.
+- `Shift+Enter` needs a terminal that actually sends `ESC[13;2u` / `ESC[27;2;13~` (kitty,
+  Ghostty, WezTerm, iTerm2 with CSI-u on, tmux passing them through); `Option+Enter` needs
+  Alt-as-ESC. A trailing `\` is the mechanism that works everywhere, and `--basic` has only
+  that one.
+- The live view, the tool collapse, the newline keys and F2/F3 are ink-only: `--basic` appends
+  lines and never redraws, and it reads stdin through readline instead of the key filter. It is
+  a transcript-only client, and its onboarding footer says so.
+- Markdown-lite is applied per logical line, so a `**bold**` or `` `code` `` span that straddles
+  an explicit newline renders with its markers visible instead of styled. (In `--basic` it is
+  applied per already-wrapped line, so a soft wrap breaks a span there too.)
+- The transcript is append-only, so a line keeps the label-column width and the terminal width
+  it was drawn at: widening the column (a long name joining) or resizing the terminal aligns
+  everything from that point on, not what is already on screen. Redrawing history is what
+  `<Static>` exists to avoid.
+- The invite/view lines are handed to the terminal unwrapped on purpose, so they stay one
+  selectable run. On a pane narrower than the line (~85 columns) that means a soft wrap; the
+  copy is still whole, but a terminal that does not reflow on copy will paste a newline into
+  the command.
+- ink needs raw mode on stdin. With a pipe or a heredoc the client falls back to `--basic`
+  automatically; a terminal ink dislikes for any other reason needs the flag by hand.
+- `--config-dir` picks the profile; it cannot log it in. A brand-new profile lands in claude's
+  first-run onboarding, which only you can answer, in the `claude` window.
+- The token-in-context guard ("reveal only to the host") is an instruction to the model, not
+  a boundary. And a `kill -9` of the daemon orphans the ttyd child — that pid is logged at
+  launch.
+- `--tunnel`: a dead `cloudflared` child is never auto-restarted (v0 ceiling) — its line just
+  disappears from `/join`/the daemon log until the host restarts with `--tunnel` again. The
+  tunnel hostnames are fixed for the daemon's whole life; only `/token` off/on can drop or
+  regenerate the *credential* inside the URL, never the host itself. Cloudflare's edge
+  terminates TLS, so it (and anyone who can see its logs) is a party to the connection the
+  same way any TLS-terminating proxy is — the join token / knock approval is what actually
+  gates who gets in, same trust model as the LAN case. No IP allow-listing on a quick tunnel:
+  the URL itself is the only thing standing between a stranger and a knock/wrong-token attempt.
+- F3 passthrough is raw by design: the host's bytes reach claude unsanitized (that is what
+  answering a prompt means). The gate is the socket — `--host` **and** loopback, i.e. the client
+  the launcher spawned — plus a size cap per frame. Anything else on loopback that speaks the
+  protocol could claim the same trust; on a shared machine, that is the boundary to know about.
+- Slash passthrough types the command and presses Enter after 300 ms. claude's palette filters
+  as you type and Enter picks the highlighted row, so a command whose name is a prefix of
+  another could in principle submit the neighbour; every real command name we tried resolved to
+  itself. A picker that opens instead is normal — drive it with F3.
+- `/exit` and `/quit` in a client mean "leave my client"; they never reach claude. Ending the
+  session itself is `tmux attach -t jam` (or `tmux kill-session`).
+- Standing approval (`/allow-cmd always`) lives in daemon memory, is per name, and dies with
+  the daemon. A guest who reconnects under the same name keeps it; there is no way to revoke it
+  short of restarting (there is no `/deny-cmd always`).
+- A guest can have one command request in flight, and it expires after two minutes. The tmux
+  popup for it only appears if somebody is attached to the jam session, which in the normal
+  v0.14 layout nobody is — the host answers in their client.
+- The connect block is printed above the live view, so a client that reconnects to a busy
+  daemon replays up to 300 events into the terminal's scrollback before the frame comes back.
+  That is the transcript doing its job, but it does scroll.
+- Nothing tells a guest that the host is in TUI control: their view keeps updating (they can see
+  the keystrokes land), but the `⌨` marker is local to the host's client.
+- **Export scrubbing is best effort.** The only thing removed from an exported transcript is
+  jam's own token block (matched by the text hooks.sh writes) and the raw token string. Anything
+  else claude saw — file contents, tool output, another secret it happened to read — goes with
+  the copy. A changed hook wording would silently stop matching; the token replacement is the
+  backstop. `/token new` after an export is the real mitigation.
+- A transfer is held whole in memory at both ends (a 50 MB transcript is ~50 MB + its base64
+  frames a few at a time), there is no resume: a socket that drops mid-transfer loses it and the
+  partial file is never written. Uploads are 20 MB, the transcript and offers 50 MB.
+- `jam-uploads/` is append-only as far as jam is concerned: nothing is ever cleaned up, and a
+  repeat name gets `-1`, `-2`, … up to 99, then the upload is refused. Same for a guest's
+  `jam-downloads/`.
+- Offers live for the daemon's whole life and are never re-broadcast: a guest who joins after
+  `/send` is not told about it (they can still `/get <name>` if somebody tells them the name),
+  and an offer whose file is deleted or grown past the cap only fails when someone tries.
+- `/paste` is macOS-only by nature (`pngpaste`, else `osascript` `«class PNGf»`), and it takes
+  the clipboard as PNG only — a copied file, a PDF or an HTML snippet is not an image. The name
+  it invents is `paste-<yyyymmdd-hhmmss>.png`, so two pastes in the same second collide (and get
+  the `-1` suffix).
+- Standing approval (`/allow-export always`, `/accept-file always`) is per name, per kind, in
+  daemon memory, with no way to revoke it short of a restart — same ceiling as `/allow-cmd
+  always`. A guest reconnecting under the same name keeps it.
+- The host's `/export` writes into the host's own cwd, next to the project. It is the same file
+  claude is already writing, so it is a copy, not a move.
+- Nothing scans an uploaded file. It is written 0644, never executed, never opened, and claude is
+  merely told the path — but the moment claude `Read`s it, its contents are in the session's
+  context (and therefore in anybody's later `/export`).
+- No rate limiting, no web client, single session per host, no Windows.
+- First run in a fresh directory hits claude's "is this a folder you trust?" dialog. Before
+  every injection until one succeeds, the daemon waits up to 30 s for either that dialog (it
+  answers it, moving off the "No, exit" default first) or the input prompt — so a message sent
+  while claude is still booting still lands.
+
+
+## Running the seven end-to-end smokes
+
+Seven end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
+ttyd 1.7.7. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
+and a daemon with replayed history puts an older turn's collapsed-tool line there.
+
+```sh
+# zsh: `command -v claude` prints the alias text, not a path — ask for the binary.
+# Run the launcher inside a tmux session of your own so it has a real terminal size, and
+# --no-attach so no host client of its own opens (the smokes bring their own clients).
+tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
+  "JAM_CLAUDE=$(whence -p claude 2>/dev/null || command -v claude) node host.mjs \
+   --tmux jamtest --port 7799 --view-port 7801 --name Host --token smoketoken \
+   --hook-secret smokehooksecret --cwd '$PWD' --no-attach -- --model haiku; sleep 1800"
+
+node scripts/smoke-ink.mjs   ws://127.0.0.1:7799 smoketoken jamtest   # first: needs empty history
+node scripts/smoke-xfer.mjs  ws://127.0.0.1:7799 smoketoken jamtest smokehooksecret
+node scripts/smoke.mjs       ws://127.0.0.1:7799 smoketoken
+node scripts/smoke-mirror.mjs ws://127.0.0.1:7799 smoketoken
+node scripts/smoke-popup.mjs ws://127.0.0.1:7799 jamtest 7799 smokehooksecret
+node scripts/smoke-slash.mjs ws://127.0.0.1:7799 smoketoken jamtest   # last: see below
+tmux kill-session -t jamtest          # exact names only, never a pattern
+tmux kill-session -t jamdrive
+rm -rf "$TMPDIR/claude-jam-7799" jam-uploads
+
+# knock-only daemon (no --token) for the admission smoke
+tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
+  "JAM_CLAUDE=... node host.mjs --tmux jamtest --port 7799 --name Host --cwd '$PWD' \
+   --no-attach -- --model haiku; sleep 300"
+node scripts/smoke-knock.mjs ws://127.0.0.1:7799
+tmux kill-session -t jamtest; tmux kill-session -t jamdrive
+rm -rf "$TMPDIR/claude-jam-7799"
+```
