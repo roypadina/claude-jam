@@ -3212,3 +3212,256 @@ export function menuGaps({ host = true, state = {} } = {}) {
   const extra = host ? [] : [...described.keys()].filter((c) => HOST_MENU_ONLY.includes(c));
   return { commands, flags, extra };
 }
+
+// ============================== v0.23: named jams and LAN discovery ====
+// A jam has a NAME, and a jam on a LAN says so out loud over DNS-SD so that guests can FIND it
+// instead of being handed a URL. Everything in this section is pure: the name's default and its
+// validation, the TXT record, the parse of what `dns-sd` streams back, and the layout of the
+// answer. The spawning lives in platform.mjs (the one module allowed to name a platform binary)
+// and the advertising child's lifecycle in host.mjs, beside the other tracked children.
+//
+// DISCOVERY IS NOT A KEY. Finding a jam tells you that it exists and where; getting in is still
+// a knock the host answers, a token you hold, or an invite link. Nothing in this file admits
+// anybody, and `findTable` says so on every listing it prints.
+
+export const DISCOVERY_TYPE = '_claude-jam._tcp';
+export const DISCOVERY_DOMAIN = 'local';
+export const FIND_MS = 3000; // how long `claude-jam find` browses — mDNS answers in well under a second
+
+// ------------------------------------------------------------------ the name ----
+// A DNS-SD instance name is one label: 63 BYTES, not 63 characters, and no control character may
+// go into a record other machines parse. That is the whole rule. The name is COSMETIC — never
+// used for auth, never used to build a path, and never trusted on the way back in.
+export const JAM_NAME_MAX = 63;
+export function validJamName(v) {
+  const s = String(v ?? '');
+  if (!s.trim()) return false;
+  // stripControl is this project's one answer to "what may go on somebody else's terminal", and
+  // a record every machine on the LAN reads deserves the same bar. A name it would change is
+  // not a name. Newline and tab survive stripControl on purpose (it is used on prose), so they
+  // are refused here separately — a jam name is one line.
+  if (stripControl(s) !== s || /[\n\t]/.test(s)) return false;
+  return Buffer.byteLength(s, 'utf8') <= JAM_NAME_MAX;
+}
+
+// The default is the cwd's basename, so a jam is never nameless and the name means something
+// without anybody typing one. A cwd that cannot produce a usable label (`/`, an empty string, a
+// basename of 64 emoji) falls back to the product name rather than to nothing.
+export function defaultJamName(cwd = '') {
+  const base = path.basename(String(cwd ?? '').replace(/[/\\]+$/, ''));
+  return validJamName(base) ? base : 'claude-jam';
+}
+
+// `--jam-name` when it was given, the default otherwise. An INVALID name is not silently
+// replaced here — host.mjs validates and refuses, exactly the way it refuses a bad `--name` —
+// so this only ever resolves the ABSENT case.
+export function jamName(given, cwd = '') {
+  const s = String(given ?? '').trim();
+  return s ? s : defaultJamName(cwd);
+}
+
+// ------------------------------------------------------------- the TXT record ----
+// THE REDACTION RULE, and the reason this is a function rather than an object literal at the
+// call site: the record is built from an ALLOW-LIST of six keys, so a field that is not one of
+// them cannot reach the network by being added to the object handed in. Everyone on the local
+// network reads this. The token, an invite secret, the cwd and every path stay out BY
+// CONSTRUCTION and not by the caller remembering — hand it a whole session object, secret and
+// all, and it still publishes exactly six keys.
+export const DISCOVERY_TXT_KEYS = ['jam', 'host', 'id', 'access', 'view', 'v'];
+export const DISCOVERY_ID_LEN = 8; // the same `sessionId.slice(0, 8)` every other surface shows
+export const TXT_VALUE_MAX = 120; // one TXT string may be 255 bytes; nothing here is close
+export function discoveryTxt(info = {}) {
+  const one = (v) => stripControl(String(v ?? '')).replace(/[\n\t]/g, ' ').trim().slice(0, TXT_VALUE_MAX);
+  const values = {
+    jam: one(info.jam),
+    host: one(info.host),
+    id: one(info.id).slice(0, DISCOVERY_ID_LEN),
+    // Three words, and only three: an unknown access mode is published as a knock rather than
+    // as whatever string happened to arrive.
+    access: accessMode(info.access),
+    view: info.view ? 'yes' : 'no',
+    v: one(info.v),
+  };
+  return DISCOVERY_TXT_KEYS.map((k) => `${k}=${values[k]}`);
+}
+
+// ------------------------------------------------- parsing what dns-sd streams ----
+// Verified against the REAL /usr/bin/dns-sd on macOS 26 (2026-08-29), which is the only reason
+// any of this is shaped the way it is. `-Z` was chosen over `-B`/`-L` because it is the one mode
+// that hands back the instance name, the port, the target host and the whole TXT record
+// TOGETHER, in a stable zone-file layout, out of a single child:
+//
+//   _claude-jam._tcp                  PTR   probe\032two._claude-jam._tcp
+//   probe\032two._claude-jam._tcp     SRV   0 0 7902 Roys-MacBook-Pro-4.local. ; Replace with…
+//   probe\032two._claude-jam._tcp     TXT   "jam=probe two" "host=Someone Else" "id=deadbeef" …
+//
+// `-B` gives names with neither port nor TXT (so a second `-L` per name to fill them in), and
+// `-L` prints TXT backslash-escaped, which is strictly harder to read back than `-Z`'s quoted
+// strings. Two other things were measured, and both decided a design point: dns-sd FLUSHES on a
+// pipe (the first chunk arrived within milliseconds of the spawn, 1268 bytes, complete), so a
+// streaming parse works and no pty is needed; and a browse for a type nobody advertises prints
+// nothing whatsoever, so "no output" is simply the empty answer and not a failure to detect.
+
+// DNS presentation format: `\DDD` is a DECIMAL byte (`\032` is a space) and `\x` is a literal x
+// (`\.` is a dot INSIDE a label, which is why a jam called "a.b" comes back as `a\.b`).
+export function unescapeDnsLabel(s) {
+  return String(s ?? '').replace(/\\(\d{3}|[\s\S])/g, (_, c) => (/^\d{3}$/.test(c) ? String.fromCharCode(Number(c)) : c));
+}
+
+// `"jam=probe two" "host=Someone Else"` → the strings, unescaped. Falls back to whitespace
+// splitting when there is no quote at all, because a TXT whose values contain no space is
+// printed bare and a parser that only understood quotes would read that as empty.
+export function parseTxtStrings(text) {
+  const s = String(text ?? '');
+  const out = [];
+  for (const m of s.matchAll(/"((?:[^"\\]|\\[\s\S])*)"/g)) out.push(m[1].replace(/\\([\s\S])/g, '$1'));
+  if (out.length) return out;
+  return s.trim() ? s.trim().split(/\s+/) : [];
+}
+
+// key=value strings → an object. Split on the FIRST `=` only: a jam name may contain one, and
+// `jam=a=b` means a name of `a=b` rather than a parse error. A string with no `=` at all is not
+// a pair and is dropped, instead of becoming a key with an empty value.
+export function parseTxtPairs(strings = []) {
+  const out = {};
+  for (const s of strings) {
+    const at = String(s ?? '').indexOf('=');
+    if (at <= 0) continue;
+    const k = s.slice(0, at);
+    if (Object.hasOwn(out, k)) continue; // first wins, so a duplicate key cannot overwrite
+    out[k] = s.slice(at + 1);
+  }
+  return out;
+}
+
+// The streaming parse. TOTAL by design: every line that is not a complete SRV/TXT record for
+// this service type is skipped, so a half-written line at the tail of a buffer, dns-sd's banner,
+// its `;` comment block and any other service's records all cost nothing and produce no row.
+// Records come back in first-seen order, ONE per instance — dns-sd repeats each record per
+// network interface, and two rows for one jam would be a listing that lies about how many jams
+// are on the network.
+export function parseDnssdZone(text, type = DISCOVERY_TYPE) {
+  const suffix = `.${type}`;
+  const byLabel = new Map();
+  const at = (label) => {
+    if (!byLabel.has(label)) {
+      byLabel.set(label, { instance: unescapeDnsLabel(label), label, target: null, port: 0, txt: {} });
+    }
+    return byLabel.get(label);
+  };
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith(';')) continue;
+    const m = /^(\S+)\s+(SRV|TXT)\s+(.+)$/.exec(line);
+    if (!m) continue;
+    const [, owner, kind, rest] = m;
+    if (!owner.endsWith(suffix)) continue;
+    const label = owner.slice(0, -suffix.length);
+    if (!label) continue;
+    if (kind === 'SRV') {
+      // `0 0 7902 Roys-MacBook-Pro-4.local. ; Replace with unicast FQDN of target host` — the
+      // comment is stripped HERE and not for the whole line, because a `;` inside a quoted TXT
+      // value is part of somebody's jam name and not a comment.
+      const srv = /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)/.exec(rest.replace(/\s+;.*$/, ''));
+      if (!srv) continue;
+      const port = Number(srv[3]);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
+      const rec = at(label);
+      rec.port = port;
+      rec.target = srv[4].replace(/\.$/, ''); // the presentation form is fully qualified
+    } else {
+      const pairs = parseTxtPairs(parseTxtStrings(rest));
+      if (!Object.keys(pairs).length) continue;
+      at(label).txt = pairs;
+    }
+  }
+  return [...byLabel.values()];
+}
+
+// ------------------------------------------------------------ the found jams ----
+// One row per jam somebody could actually connect to. A record with no SRV has no port and so no
+// address — dropped, rather than listed as something you cannot join.
+export function discoveredJams(records = []) {
+  return records.filter((r) => r && r.port > 0 && r.target).map((r) => {
+    const t = r.txt || {};
+    // An access mode the TXT did not state is `?`, never a cheerful "knock". A refusal carries
+    // its own reason in this codebase, and so does an unknown.
+    const access = ACCESS_MODES.includes(t.access) ? t.access : '?';
+    return {
+      jam: t.jam || r.instance,
+      host: t.host || '—',
+      id: (t.id || '').slice(0, DISCOVERY_ID_LEN),
+      access,
+      view: t.view === 'yes',
+      target: r.target,
+      port: r.port,
+      address: `${r.target}:${r.port}`,
+      url: `ws://${r.target}:${r.port}`,
+      v: t.v || '',
+    };
+  });
+}
+
+export const FIND_COLS = ['#', 'jam', 'host', 'access', 'view', 'address'];
+export const FIND_EMPTY = 'no jams on this network — mDNS is link-local, so this only ever sees '
+  + 'the LAN you are on. A jam started with --no-announce is there but silent, and a jam behind '
+  + 'a tunnel is reached by its URL rather than by discovery.';
+// The gate, printed every single time the list is, because a list of doors is not a set of keys
+// and that difference is the whole security story of this feature.
+export const FIND_GATE = 'finding a jam is not being let into it: a knock still waits for the '
+  + 'host, a token jam still wants its token, and an invite-only jam still wants a link.';
+
+export function findTable(rows = [], { bin = 'claude-jam' } = {}) {
+  if (!rows.length) return FIND_EMPTY;
+  const cells = [FIND_COLS, ...rows.map((r, i) => [String(i + 1), r.jam, r.host,
+    r.access, r.view ? 'yes' : 'no', r.address])];
+  const w = FIND_COLS.map((_, c) => Math.max(...cells.map((row) => String(row[c] ?? '').length)));
+  const out = cells.map((row) => row.map((v, c) => String(v ?? '')
+    .padEnd(c === row.length - 1 ? 0 : w[c])).join(' ').trimEnd());
+  // The command per row, so the listing is the thing that TEACHES the join — the same promise
+  // the launcher menu makes about the command line.
+  const how = rows.map((r) => `  ${r.jam}: ${bin} join ${r.url} --name <you>`
+    + (r.access === 'token' ? ' --token <token>' : '')
+    + (r.access === 'invite' ? '   (invite-only: ask for a link instead)' : ''));
+  return [...out, '', ...how, '', FIND_GATE].join('\n');
+}
+
+// `claude-jam find --json`: the rows as measured, for scripting. Same facts, no layout.
+export function findJson(rows = []) {
+  return rows.map((r) => ({
+    jam: r.jam, host: r.host, id: r.id || null, access: r.access, view: !!r.view,
+    address: r.address, target: r.target, port: r.port, url: r.url, v: r.v || null,
+  }));
+}
+
+// The Join screen's rows: every discovered jam, and "paste a link or URL" LAST. The fallback
+// belongs at the bottom because the whole point of this version is that the common case became
+// a pick rather than a paste. `value` is what the menu switches on.
+export const JOIN_PASTE_VALUE = 'paste';
+export function joinRows(found = [], { bin = 'claude-jam' } = {}) {
+  const rows = found.map((r, i) => ({
+    value: `found:${i}`,
+    row: r,
+    label: `${r.jam}  — ${r.host} · ${r.access}${r.view ? ' · view' : ''} · ${r.address}`,
+  }));
+  rows.push({ value: JOIN_PASTE_VALUE, row: null,
+    label: `paste a link or URL  — an invite link (cjam1_…) or ws://…  (${bin} join <link>)` });
+  return rows;
+}
+
+// What picking a found jam still needs from the human. A knock needs a name and nothing else; a
+// token jam needs the token as well; an invite-only jam cannot be joined by URL at all, and is
+// told so here rather than connecting and being refused at the door.
+export function joinPlanFor(row = {}, { name = '', token = '' } = {}) {
+  const access = String(row?.access ?? '?');
+  if (access === 'invite') {
+    return { ok: false, needs: 'link',
+      error: `${row.jam} is invite-only — a knock is refused, so ask the host for an invite link (cjam1_…) and paste that` };
+  }
+  if (!validName(name)) return { ok: false, needs: 'name', error: 'a name is 1-24 chars of letters, digits, space, _ or -' };
+  if (access === 'token' && !validTokenValue(token)) {
+    return { ok: false, needs: 'token', error: `${row.jam} wants its shared token: 8-64 chars of [A-Za-z0-9_-]` };
+  }
+  const argv = ['join', row.url, '--name', name, ...(token ? ['--token', token] : [])];
+  return { ok: true, argv, command: hostCommandLine(argv), access };
+}
