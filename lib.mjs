@@ -1992,23 +1992,30 @@ export function verifyOwned(name, marker, session) {
   return { ok: true, dir, info: session };
 }
 
-// What state one row of jam's namespace is in. Three measured facts in, one word out:
+// What state one row of jam's namespace is in. Four measured facts in, one word out:
 //   live       the tmux session is there, its marker verifies, the daemon answers
+//   adopted    the same, except the claude being shared is in a pane jam did NOT create —
+//              healthy, and a standing reminder that ending this jam ends the daemon and
+//              nothing else (v0.33)
 //   no-daemon  session and marker fine, nothing listening — the daemon died under it
 //   orphan     no tmux session and no listener: the state dir is all that is left, and this is
 //              the ONLY state `claude-jam clean` may delete
 //   no-session no tmux session but something IS on that port — flagged, never cleaned, because
 //              whatever holds the port is not ours to remove
 //   foreign    the tmux session exists and does NOT verify: shown, never touched, ever
-export const JAM_STATES = ['live', 'no-daemon', 'orphan', 'no-session', 'foreign'];
-export function classifyJam({ tmuxAlive = false, owned = false, portAlive = false } = {}) {
+export const JAM_STATES = ['live', 'adopted', 'no-daemon', 'orphan', 'no-session', 'foreign'];
+export function classifyJam({ tmuxAlive = false, owned = false, portAlive = false, adopted = false } = {}) {
   if (!tmuxAlive) return portAlive ? 'no-session' : 'orphan';
   if (!owned) return 'foreign';
-  return portAlive ? 'live' : 'no-daemon';
+  // `adopted` only ever replaces `live`: when the daemon is gone or the session is, the
+  // ACTIONABLE fact is the one that was actionable before, and it is the one to say.
+  if (!portAlive) return 'no-daemon';
+  return adopted ? 'adopted' : 'live';
 }
 
-// The `!` in the table: anything that is not a healthy live jam wants the host's eye.
-export function jamMark(state) { return state === 'live' ? ' ' : '!'; }
+// The `!` in the table: anything that is not a healthy jam wants the host's eye. An adopted jam
+// is healthy — it is a different KIND of jam, not a broken one.
+export function jamMark(state) { return state === 'live' || state === 'adopted' ? ' ' : '!'; }
 
 // `claude-jam clean` removes state dirs and nothing else, and only in the one state that means the
 // session behind them is provably gone.
@@ -2174,8 +2181,17 @@ export function sessionsTable(rows = [], now = 0) {
   const out = cells.map((row) => row.map((v, c) => String(v ?? '').padEnd(c === row.length - 1 ? 0 : w[c])).join(' ').trimEnd());
   const notes = [];
   // v0.20: a bare `tmux attach` no longer finds a jam, so the exact line is printed per live jam.
+  // v0.33: for an adopted one the raw TUI is the pane it is driving, on that pane's own server —
+  // jam's own session holds only the daemon's log, and attaching to it would show a log.
   for (const r of rows) {
-    if (r.name && r.state !== 'foreign') notes.push(`  raw TUI: ${tmuxAttachLine(r.socket, r.name, claudeTarget(r.name))}`);
+    if (!r.name || r.state === 'foreign') continue;
+    notes.push(r.adopt?.pane
+      ? `  raw TUI: ${tmuxAttachLine(r.adopt.socket, r.adopt.pane, r.adopt.pane)}  (adopted pane, not claude-jam's)`
+      : `  raw TUI: ${tmuxAttachLine(r.socket, r.name, claudeTarget(r.name))}`);
+  }
+  if (rows.some((r) => r.state === 'adopted')) {
+    notes.push('  adopted = the claude being shared runs in a pane claude-jam did not create; '
+      + '`claude-jam end` stops the daemon and leaves that pane, its tmux session and claude alone');
   }
   if (rows.some((r) => r.state === 'orphan')) notes.push('! orphan = the tmux session is gone; `claude-jam clean` removes those state dirs');
   if (rows.some((r) => r.state === 'no-daemon')) notes.push('! no-daemon = the session is up but nothing answers on its port; `claude-jam end <name>` clears it');
@@ -2200,6 +2216,13 @@ export function sessionsJson(rows = [], now = 0) {
     view: !!r.view,
     tunnel: !!r.tunnel,
     socket: r.socket ?? TMUX_DEFAULT_SOCKET, // v0.20: which tmux server it lives on
+    // v0.33: null for an ordinary jam. When it is not null, `name`/`socket` above still name
+    // claude-jam's OWN session (the daemon's, the one `claude-jam end` may kill) and this names
+    // the pane being shared, which claude-jam may only read and type into.
+    adopted: !!r.adopt?.pane,
+    adopt: r.adopt?.pane
+      ? { pane: r.adopt.pane, socket: r.adopt.socket ?? TMUX_DEFAULT_SOCKET, session: r.adopt.session || null }
+      : null,
     state_dir: r.dir ?? null,
     cleanable: cleanable(r),
   }));

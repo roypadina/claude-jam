@@ -752,7 +752,7 @@ The public README keeps a short list. This is all of them.
 
 ## Running the end-to-end smokes
 
-Sixteen end-to-end smokes, verified 2026-08-29 on node 24.15 / tmux 3.7c /
+Seventeen end-to-end smokes, verified 2026-08-29 on node 24.15 / tmux 3.7c /
 claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -858,6 +858,23 @@ node scripts/smoke-nudge.mjs
 # real ink client on a real pty as a GUEST and compares what that guest sees, scrolled back,
 # with `capture-pane -S` on the host pane, row for row. Verified 2026-08-29: all 11 steps pass.
 node scripts/smoke-scroll.mjs
+
+# v0.33: the seventeenth smoke. NO arguments, no daemon of yours, no real claude (the adopted
+# pane is scripts/fake-tui.mjs). Own $TMPDIR **and own $HOME**, because adoption finds a session
+# by globbing ~/.claude/projects/<cwd-slug>/ and the transcripts it invents must be the only ones
+# there. Ports 7921/7923/7925; sessions jamadopt* on a socket of its own — plus EXACTLY ONE on
+# the DEFAULT tmux socket, named jamadopt-<random> and removed by that exact name, because the
+# user's own server is the case v0.33 exists for. ~6 s, costs nothing.
+#
+# Most of it is refusals. The load-bearing steps are S6 — the ownership marker is on claude-jam's
+# OWN session and NOT on the adopted one, no status option is written on the adopted server and
+# no bare F3 is bound in its root key table — and S11/S12, where after `claude-jam end` the
+# adopted session still exists and the process in its pane has the SAME pid.
+#
+# Its fixtures are realpathed on purpose: on macOS $TMPDIR is a symlink, and both a real claude
+# (filing under its own process.cwd()) and tmux (#{pane_current_path}) report the resolved path.
+# Verified 2026-08-29: all 12 steps pass.
+node scripts/smoke-adopt.mjs
 ```
 
 ### What each smoke covers of v0.25/v0.26/v0.27

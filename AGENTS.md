@@ -49,7 +49,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `platform.mjs` | the platform seam. The **only** module allowed to spawn a platform binary (`osascript`, `pngpaste`, `afplay`, `pbcopy`, `open`, …) or to decide where `$TMPDIR`/`~/.config` are. |
 | `popup.mjs` | the one-key `tmux display-popup` approval. |
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
-| `test.mjs` | the unit suite. `scripts/` holds the sixteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
+| `test.mjs` | the unit suite. `scripts/` holds the seventeen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
 
 **tmux, claude, git, curl, cloudflared, tailscale and ttyd are not platform binaries** — they are
 the tool's dependencies, spelled the same everywhere, and they stay where they are used.
@@ -62,7 +62,7 @@ the tool's dependencies, spelled the same everywhere, and they stay where they a
 node --test test.mjs      # the whole unit suite; must be green before every commit
 ```
 
-338 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
+356 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
 framework. Add tests to `test.mjs` next to the ones for the same version heading.
 
 Two of them are lints rather than assertions about behaviour, and both exist because the thing
@@ -79,7 +79,7 @@ binaries** and stay where they are used — see §1.
 
 If you add a module to the repo root, both lints pick it up automatically. That is deliberate.
 
-### The sixteen smokes, and the order
+### The seventeen smokes, and the order
 
 They are end-to-end and they are the only thing that proves the tmux/injection/WS half works.
 The full recipe — driver session, ports, arguments — is in `SPEC.md` under **"Running the
@@ -143,7 +143,22 @@ Then, in any order, the ones that bring their own everything:
     kills that client while the mirror is up and watches tmux's `#{alternate_on}` go 1 → 0 — by
     the exact pid of a process this smoke started, found by parent pid, never by name.
 
-Prefer 8–16 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
+17. `smoke-adopt.mjs` — no arguments, no real claude. Own `$TMPDIR`, own **`$HOME`** (so the
+    `~/.claude/projects` transcripts it invents are the only ones adoption can find), ports
+    7921/7923/7925, sessions `jamadopt*` on a socket of its own — plus **exactly one session on
+    the DEFAULT tmux socket**, named `jamadopt-<random>` and removed by that exact name, because
+    the user's own server is the case v0.33 exists for and the one it must be most careful with.
+    ~6 s, costs nothing. Most of it is refusals; the load-bearing steps are S6 (the ownership
+    marker is on jam's own session and NOT on the adopted one, no status option, no root F3
+    binding on the adopted server) and S11/S12 (after `claude-jam end` the adopted session still
+    exists and the process in its pane has the SAME pid).
+
+    Note: the fixtures are **realpathed**. On macOS `$TMPDIR` is a symlink, and both a real claude
+    (which files its transcript under its own `process.cwd()`) and tmux (`#{pane_current_path}`)
+    report the resolved path — a fixture under the unresolved one slugs to a directory adoption
+    can never find. The first run of this smoke failed exactly that way.
+
+Prefer 8–17 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
 real tokens, so run them once, at the end, and use `--model haiku`.
 
 ---
