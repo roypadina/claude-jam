@@ -83,6 +83,10 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   landed) is therefore proven; the marker itself is a guess. Prove: capture a real `/compact` and
   a real `/clear` into `fixtures/pane/`, then assert against those. A false negative here is an
   agent that has quietly forgotten the two standing rules, so it is worth a real capture.
+  (For whoever does it: writing that step found two real bugs — the re-brief's own wording
+  matching the watcher, i.e. an injection loop on a live session, and the baseline being taken by
+  whichever tick happened to run first. Both are fixed and both have tests. It was a
+  run-it-twelve-times step, not a run-it-once step; treat the real-capture version the same way.)
 - 2026-08-29 · The ROSTER re-brief has unit tests (`briefUpdateDecision`, `rosterKey`) but no
   end-to-end run: proving it needs a fake clock, because the 10-minute rate limit is armed by the
   adoption briefing seconds earlier. Prove: either a `--brief-min-gap` test hook, or a campaign

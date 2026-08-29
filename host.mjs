@@ -1595,10 +1595,18 @@ const PROMPT_GAP = 400;
 // v0.33: the same capture answers a second question on an adopted jam — has the context the
 // briefing was injected into just gone? A `/compact` or a `/clear` is the one moment where an
 // agent that knew the rules stops knowing them, and there is no hook to tell us.
-// `undefined` = never looked. The FIRST look only records what is on screen: a session adopted
-// seconds after its own `/clear`, or with a `Compacted` line still visible from before
-// claude-jam was there, has already been briefed by then, and a second copy on top of the first
-// would be noise. Only a CHANGE from what was there at adoption is a context that has just gone.
+//
+// `undefined` = never looked, and the FIRST look only RECORDS: a session adopted seconds after
+// its own `/clear`, or with a `Compacted` line still on screen from before claude-jam was there,
+// has just been briefed anyway. Only a CHANGE from what was on the pane AT ADOPTION is a context
+// that has just gone — which is why the baseline is taken once, at boot, by primeContext() below.
+// It used to be taken by whichever tick happened first, and that tick only runs while somebody is
+// connected: a compaction between adoption and the first guest was then recorded as the baseline
+// and never fired. Found by smoke-adopt, which failed roughly one run in four exactly that way.
+//
+// ponytail: the watch itself still rides pumpPrompt, so a compaction while NOBODY is connected is
+// only noticed if its marker is still on screen when somebody joins. The roster re-brief is the
+// backstop. Give it its own slow timer if that turns out to matter.
 let lostSig;
 function watchContext(screen) {
   if (!ADOPTED || opts.brief === false) return;
@@ -1633,6 +1641,15 @@ function pumpPrompt() {
   }
   watchContext(screen);
   return prompt;
+}
+
+// The baseline, taken once, from the pane as it is at adoption — before anything has connected
+// and before the briefing has been typed in. Everything the watcher calls "a context that has
+// just gone" is a change from this.
+function primeContext() {
+  if (!ADOPTED || opts.brief === false) return;
+  watchContext(capture());
+  console.log(`[brief] watching this pane for a lost context — it starts ${lostSig ? `at ${lostSig}` : 'clear'}`);
 }
 function startPromptPoll() {
   const timer = setInterval(pumpPrompt, PROMPT_GAP);
@@ -1805,6 +1822,9 @@ function daemon() {
     if (ADOPTED && opts.brief === false) {
       console.log('[brief] --no-brief: claude has NOT been told this session is shared');
     }
+    // The baseline BEFORE the briefing is typed in, so the briefing's own echo can never be the
+    // thing the watcher was started on.
+    primeContext();
     brief('adoption');
     if (ttyd) startView();
     startTunnels();
@@ -3378,6 +3398,7 @@ async function inject(name, text, ws = null, kept = null, { keep = true } = {}) 
 // transcript is noise. The room gets one line saying it happened.
 let briefedAt = 0;
 let briefing = false;
+let briefFails = 0; // one retry per daemon, not one per tick — see the catch below
 function brief(reason) {
   if (!ADOPTED || opts.brief === false || briefing) return;
   briefing = true;
@@ -3400,6 +3421,12 @@ function brief(reason) {
       // A briefing that did not land is not a message anybody lost — but it IS the difference
       // between an agent that knows the rules and one that does not, so it is said out loud.
       console.error(`[brief] the briefing did not land in the pane (${e.message}) — claude has NOT been told`);
+      // …and tried ONCE more. Measured while writing smoke-adopt: the compaction marker and the
+      // re-brief race each other, and if the paste arrives while the pane is still redrawing it
+      // is swallowed — a moment later it lands. Re-arming the watcher lets the marker that is
+      // still on screen fire again. Once only: a pane that cannot take a paste at all must not
+      // be pasted at on every 400 ms tick.
+      if (reason === 'compaction' && briefFails++ < 1) lostSig = undefined;
       broadcast({ t: 'sys', text: 'claude-jam could not tell claude that this session is shared — '
         + 'the message did not land in the pane. Say so yourself, or /retry-brief is not a thing: '
         + 'end the jam and adopt again.' });
