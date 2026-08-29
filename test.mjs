@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
-  exportFileName, resumeInstructions, stripTokenBlock, clientCommand } from './lib.mjs';
+  exportFileName, resumeInstructions, stripTokenBlock, clientCommand,
+  // v0.15 adaptive cadence, v0.16 approval bar.
+  frameCadence, FRAME_FAST_GAP, FRAME_RATE_CAP, FRAME_ACTIVE_MS,
+  countdownText, approvalBar, barKeyAction, APPROVAL_COMMANDS } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -913,7 +916,11 @@ test('onboardingLines: the host block leads with F2/F3 and slash passthrough', (
   const body = host.join('\n');
   assert.match(body, /attributed \[Roy\]/); // v0.14: attribution is symmetric
   assert.match(body, /F2 +→ transcript ⇄ live TUI/);
-  assert.match(body, /F3 +→ type INTO the TUI/);
+  // v0.15: F3 attaches the real TUI instead of proxying keys into it, and the way back is
+  // tmux's own detach — a host who does not know that is stuck in there.
+  assert.match(body, /F3 +→ attach the real TUI \(Ctrl-b d back\)/);
+  // v0.16: the single keys that answer the approval bar are host-only too.
+  assert.match(body, /a \/ d +→ answer the ⚑ bar/);
   assert.match(body, /\/model \/compact/);
   assert.match(body, /\/help/);
 });
@@ -1158,3 +1165,160 @@ test('tunnelJoinLines: labelled distinctly from the LAN invite/view lines, empty
   assert.deepEqual(tunnelJoinLines(null, null), []);
 });
 
+
+// --- v0.15: adaptive frame cadence ----------------------------------------------
+
+test('frameCadence: fast while somebody watches and something moved, 250 ms once it is quiet', () => {
+  const now = 100000;
+  // Nobody watching: no poll at all, whatever just happened.
+  assert.equal(frameCadence({ viewers: 0, lastActivityAt: now, now }), null);
+  assert.equal(frameCadence({ viewers: 0, lastActivityAt: 0, now }), null);
+  // Watching + activity inside the window: the fast gap.
+  assert.equal(frameCadence({ viewers: 1, lastActivityAt: now, now }), FRAME_FAST_GAP);
+  assert.equal(frameCadence({ viewers: 3, lastActivityAt: now - (FRAME_ACTIVE_MS - 1), now }), FRAME_FAST_GAP);
+  // The edge and beyond it: back to the idle gap.
+  assert.equal(frameCadence({ viewers: 1, lastActivityAt: now - FRAME_ACTIVE_MS, now }), FRAME_MIN_GAP);
+  assert.equal(frameCadence({ viewers: 1, lastActivityAt: now - 60000, now }), FRAME_MIN_GAP);
+  // Never any activity: idle, not fast.
+  assert.equal(frameCadence({ viewers: 1, lastActivityAt: 0, now }), FRAME_MIN_GAP);
+  // Defaults are safe: no arguments must not produce a 0 ms timer.
+  assert.equal(frameCadence(), null);
+});
+
+test('frameCadence: the fast gap IS the 25 frames/s cap, and it is faster than idle', () => {
+  assert.equal(FRAME_RATE_CAP, 25);
+  assert.equal(FRAME_FAST_GAP * FRAME_RATE_CAP, 1000);
+  assert.ok(FRAME_FAST_GAP < FRAME_MIN_GAP, `${FRAME_FAST_GAP} vs ${FRAME_MIN_GAP}`);
+  // A clock that jumped backwards errs fast for one tick instead of freezing the mirror.
+  assert.equal(frameCadence({ viewers: 1, lastActivityAt: 5000, now: 4000 }), FRAME_FAST_GAP);
+});
+
+test('frameDecision at the fast gap: change detection still wins, and the cap still holds', () => {
+  const rows = ['one'];
+  // Unchanged is unchanged, however fast the poll runs.
+  assert.equal(frameDecision({ rows, prev: ['one'], now: 9999, lastAt: 1, minGap: FRAME_FAST_GAP }), 'skip');
+  // 40 ms apart is exactly the cap: allowed. One millisecond under it is not.
+  assert.equal(frameDecision({ rows, prev: ['zero'], now: 1000 + FRAME_FAST_GAP, lastAt: 1000, minGap: FRAME_FAST_GAP }), 'send');
+  assert.equal(frameDecision({ rows, prev: ['zero'], now: 1039, lastAt: 1000, minGap: FRAME_FAST_GAP }), 'wait');
+});
+
+// --- v0.16: the in-client approval bar -------------------------------------------
+
+test('countdownText: m:ss, floored at zero', () => {
+  assert.equal(countdownText(120000), '2:00');
+  assert.equal(countdownText(119000), '1:59');
+  assert.equal(countdownText(6200), '0:07'); // rounded up: 6.2 s left still reads as time left
+  assert.equal(countdownText(0), '0:00');
+  assert.equal(countdownText(-5000), '0:00'); // expired, and the daemon has not pushed yet
+  assert.equal(countdownText(undefined), '0:00');
+});
+
+test('approvalBar: nothing waiting is no bar', () => {
+  assert.equal(approvalBar([], 0, true), null);
+  assert.equal(approvalBar(undefined, 0, true), null);
+  assert.equal(approvalBar(null, 0, true), null);
+});
+
+test('approvalBar: the knock line carries glyph, name, ip, the keys and the countdown', () => {
+  const bar = approvalBar([{ kind: 'knock', name: 'Dana', ip: '100.86.8.97', expires: 120000 }], 0, true);
+  assert.equal(bar.kind, 'knock');
+  assert.equal(bar.name, 'Dana');
+  assert.equal(bar.more, 0);
+  assert.match(bar.text, /^⚑ Dana wants to join \(100\.86\.8\.97\)/);
+  assert.match(bar.text, /\[a\]ccept/);
+  assert.match(bar.text, /\[d\]eny/);
+  assert.match(bar.text, /\[i\]gnore/);
+  assert.match(bar.text, /2:00$/);
+  assert.equal(bar.text.includes('\n'), false); // one row, always
+});
+
+test('approvalBar: every kind keeps its popup wording, and a file names its size', () => {
+  const at = 60000;
+  const one = (item) => approvalBar([{ expires: 120000, ...item }], at, true).text;
+  assert.match(one({ kind: 'cmd', name: 'Dana', detail: '/compact' }), /^⌘ Dana wants to run \/compact/);
+  assert.match(one({ kind: 'export', name: 'Eli' }), /^⇩ Eli wants the session transcript/);
+  assert.match(one({ kind: 'file', name: 'Noa', detail: 'photo.png', size: 2202009 }),
+    /^⇪ Noa wants to send photo\.png \(2\.1 MB\)/);
+  // Same wording as the popup that answers the same request.
+  assert.ok(one({ kind: 'cmd', name: 'Dana', detail: '/compact' })
+    .startsWith(popupPrompt('cmd', 'Dana', '', '/compact')));
+  assert.match(one({ kind: 'export', name: 'Eli' }), /1:00/); // counted from `at`
+});
+
+test('approvalBar: several waiting shows the first and counts the rest', () => {
+  const items = [
+    { kind: 'knock', name: 'Dana', ip: '10.0.0.2', expires: 90000 },
+    { kind: 'cmd', name: 'Eli', detail: '/model', expires: 90000 },
+    { kind: 'export', name: 'Noa', expires: 90000 },
+  ];
+  const bar = approvalBar(items, 0, true);
+  assert.equal(bar.more, 2);
+  assert.match(bar.text, /Dana/);
+  assert.match(bar.text, /\+2 more$/);
+  assert.equal(bar.text.includes('Eli'), false); // the bar is one row, not a list
+});
+
+test('approvalBar: disarmed says so instead of offering keys that would not fire', () => {
+  const item = [{ kind: 'knock', name: 'Dana', ip: '10.0.0.2', expires: 60000 }];
+  const off = approvalBar(item, 0, false);
+  assert.equal(off.armed, false);
+  assert.equal(off.text.includes('[a]ccept'), false);
+  assert.match(off.text, /Esc re-arms/);
+  assert.equal(approvalBar(item, 0, true).armed, true);
+});
+
+test('barKeyAction: a/d/i answer only while armed and the input line is empty', () => {
+  const armed = { armed: true, input: '' };
+  assert.deepEqual(barKeyAction('a', armed), { act: 'accept', text: '' });
+  assert.deepEqual(barKeyAction('A', armed), { act: 'accept', text: '' });
+  assert.deepEqual(barKeyAction('d', armed), { act: 'deny', text: '' });
+  assert.deepEqual(barKeyAction('D', armed), { act: 'deny', text: '' });
+  assert.deepEqual(barKeyAction('i', armed), { act: 'ignore', text: '' });
+  // Something already typed: the key is text, and nothing is approved.
+  for (const k of ['a', 'd', 'i']) {
+    assert.deepEqual(barKeyAction(k, { armed: true, input: 'do ' }), { act: 'disarm', text: k }, k);
+    assert.deepEqual(barKeyAction(k, { armed: false, input: '' }), { act: 'disarm', text: k }, k);
+  }
+});
+
+test('barKeyAction: typing disarms, so a message starting with d can never deny somebody', () => {
+  // A bare `d` on an empty line is the answer — that is the feature.
+  assert.equal(barKeyAction('d', { armed: true, input: '' }).act, 'deny');
+  // So the rest of "deploy this" must not be: once anything is in the line, no key answers.
+  for (const [ch, input] of [['e', 'd'], ['a', 'de'], ['d', 'dep']]) {
+    assert.deepEqual(barKeyAction(ch, { armed: true, input }), { act: 'disarm', text: ch });
+  }
+  // A pasted run is never a single keypress, even on an empty line.
+  assert.deepEqual(barKeyAction('deny it', { armed: true, input: '' }), { act: 'disarm', text: 'deny it' });
+});
+
+test('barKeyAction: Esc dismisses while armed and re-arms once typing turned the keys off', () => {
+  assert.deepEqual(barKeyAction('\x1b', { armed: true, input: '' }), { act: 'ignore', text: '' });
+  assert.deepEqual(barKeyAction('\x1b', { armed: false, input: 'hello' }), { act: 'rearm', text: '' });
+  assert.deepEqual(barKeyAction('\x1b', { armed: false, input: '' }), { act: 'rearm', text: '' });
+});
+
+test('barKeyAction: keys that are not typing pass through with the arming untouched', () => {
+  for (const k of ['\r', '\n', '\x03', '\x7f', '\x1b[A', '\x1b[13;2u', '\x1bOR']) {
+    assert.deepEqual(barKeyAction(k, { armed: true, input: '' }), { act: null, text: k }, JSON.stringify(k));
+  }
+  // Nothing at all: nothing happens.
+  assert.deepEqual(barKeyAction('', { armed: true, input: '' }), { act: null, text: '' });
+  assert.deepEqual(barKeyAction(undefined, { armed: true, input: '' }), { act: null, text: '' });
+  // No options: never armed by accident.
+  assert.equal(barKeyAction('a').act, 'disarm');
+});
+
+test('APPROVAL_COMMANDS: one key per ladder kind, and every one is a real jam command', () => {
+  assert.deepEqual(Object.keys(APPROVAL_COMMANDS).sort(), ['cmd', 'export', 'file', 'knock']);
+  for (const [kind, pair] of Object.entries(APPROVAL_COMMANDS)) {
+    assert.deepEqual(Object.keys(pair).sort(), ['allow', 'deny'], kind);
+    for (const cmd of Object.values(pair)) {
+      assert.ok(JAM_COMMANDS.includes(cmd), `${cmd} is not a jam command`);
+      // And the client parses it into the action that answers that ladder, name and all.
+      const act = parseClientLine(`${cmd} Dana`);
+      assert.ok(['accept', 'deny', 'cmd', 'export-ok', 'file-ok'].includes(act.kind), `${cmd} -> ${act.kind}`);
+      assert.equal(act.name, 'Dana', cmd);
+    }
+  }
+});
