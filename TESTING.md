@@ -40,6 +40,27 @@ Run when the feature list is done. Not a smoke re-run — an adversarial pass ov
 
 ## Release gates that have actually run
 
+- **0.21.1 — 2026-08-30 (the security release).** All eighteen suites, in the documented order,
+  one at a time, on node 24.15 / tmux 3.7c / claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2,
+  from a verified-clean machine state (no live tmux server on any socket). Every one green; unit
+  suite **405/0**.
+
+  The gate carried one extra question, because the release's own fix narrows the loopback gate
+  and the host reaches its own daemon over loopback: **is the host still the host?** No suite
+  asserted it directly — the pieces were scattered (`smoke-knock` S1 proved the flag on a
+  token-less jam, `smoke-slash` used the host's F3 keys only as setup, `smoke-perm` proved the
+  approval ladder), and none of them would have failed on a silent demotion. `smoke-slash` now
+  has one step that asserts all three surfaces in one place: the host-only payload in the welcome
+  (`session.tmux` and `session.join`, with the guest as the control), an F3 keystroke typed into
+  the real claude pane and read back off it, and a `trusted()`-gated `/grants` report the guest is
+  refused.
+
+  It has a canary: with `localSocket()` forced to `false` — the shape of an over-tightened gate —
+  the new step is the **only** one of the fifteen that goes red. Everything else still passed,
+  including "host slash: /cost is typed into the real TUI", because a demoted host falls straight
+  through to the read-only allowlist and the pane looks the same. That is exactly the blind spot
+  the step exists to close, and it was measured rather than argued.
+
 - **0.21.0 — 2026-08-29.** All eighteen suites, in the documented order, one at a time, on node
   24.15 / tmux 3.7c / claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2. Every one green; unit
   suite 389/0. Nothing was left behind: no tmux server on a socket the gate created, no `dns-sd`
