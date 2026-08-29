@@ -1710,3 +1710,42 @@ possible because `broadcast()` runs before `enqueueInject()`, i.e. by luck, not 
 5. Docs: README (a "your message was kept" troubleshooting entry), MANUAL (claude must be able to
    say where a failed message went), wiki Troubleshooting, CHANGELOG; `/retry`, `/outbox` and the
    `↑`/`↓` recall go in `/menu` (v0.24 completeness test).
+
+## v0.31 — questions are not permissions: classify the prompt, let anyone answer (observed live)
+
+Observed 2026-08-29 15:26: the status row said `⚠ waiting for permission` while the pane was
+actually showing an **AskUserQuestion** picker, and the flag stayed up after the questions were
+answered. Root causes: one `waiting` boolean fed by the Notification hook regardless of what the
+prompt is, cleared only when the next assistant record happens to arrive.
+
+1. **Derive the state from the pane, not from a hook event.** The frame pipeline already captures
+   the pane 25×/s; classify the CURRENT frame into `none | question | permission | dialog`
+   (AskUserQuestion header + numbered options + `Other`; a tool-approval prompt naming a tool;
+   the trust/onboarding dialogs) with one pure, tested classifier over captured rows. The hook
+   event may still trigger the sound/notification, but the STATUS is whatever the screen says,
+   so it can never go stale. Frames already stop when nobody watches — poll the classifier on the
+   same cadence and cache it.
+2. **Distinct, honest wording**, and the question itself is shown, not just its existence:
+   - question → `⚠ claude is asking: <first line>` and the numbered options rendered as a
+     highlighted block **in every client, in both views** (a guest in transcript view must see
+     it), with `/answer <n>` right there.
+   - permission → `⚠ waiting for permission (<tool>)` — unchanged host-gated behavior.
+   - dialog → `⚠ claude needs the host at the keyboard — F3`.
+3. **Anyone may answer a question; only the host may grant a permission.** A question is a
+   product decision, not a security grant:
+   - `question`: any participant's `/answer <n>` goes straight through — validated against the
+     options visible in the CURRENT frame, digit-only, first answer wins (others told
+     `already answered by Dana`), and the room sees `* Dana answered: 2. Mix both`.
+     `--answers host|anyone` (default `anyone`) and a `/menu → Access` toggle for hosts who want
+     it locked.
+   - `permission`: the v0.17 P2 ladder stays exactly as it is (guest requests, host approves,
+     digit-only, five gates).
+   - `Other`/free-text options: host only, because typing arbitrary text into the TUI is raw
+     keyboard access (`/answer other <text>` for the host; a guest asking for that gets the
+     ladder, i.e. host approval, and the text is shown to the host before it is typed).
+4. **Multi-question forms** (AskUserQuestion can ask several at once): the block shows question
+   1..N with their options; `/answer <q> <n>` targets one, plain `/answer <n>` answers the
+   currently-highlighted one; the classifier reports which is focused so the client can say so.
+5. Docs: README, MANUAL (claude must be able to say "anyone can answer my questions, only Roy
+   can approve tools"), wiki Joining-a-Jam + Security-Model, CHANGELOG; `/answer` wording and the
+   `--answers` toggle appear in `/menu` (v0.24 completeness test).
