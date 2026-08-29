@@ -42,9 +42,9 @@ plugins, MCP servers and version), so nothing there is a guess.
 - **Host** — started the session (`./jam host --name <Name> --cwd <dir>`). Their client runs
   full-screen in the terminal they launched from; the tmux session (`jam`, windows `daemon` and
   `claude`) stays **detached** — `tmux attach -t jam` is the escape hatch for the raw TUI, and
-  closing the client leaves everything running. Host extras: F3, the approval bar's one-key
-  answers, claude's slash commands, `/accept`/`/deny`, `/token`, `/join`, and answering your
-  permission prompts.
+  closing the client asks whether to keep the jam running or end it (see "Ending a jam"). Host
+  extras: F3, the approval bar's one-key answers, claude's slash commands, `/accept`/`/deny`,
+  `/token`, `/join`, `/end`, and answering your permission prompts.
 - **Guest** — joins from their own machine:
   `jam join ws://<host-ip>:7777 --name <Name>` (plus `--token <t>` when one is set) — or, if the
   host is running from a source checkout instead of the Homebrew install, `node client.mjs` in
@@ -157,6 +157,37 @@ off — that is the terminal's own bell setting.
   when `--view` is on, and the `--tunnel` pair when a tunnel is up.
 - You may also be asked for the token: reveal it ONLY to the host (messages **without** a
   `[Name]:` prefix), never to bridged participants — tell them to ask the host.
+
+## Ending a jam, and coming back to one
+
+jam owns the tmux sessions it creates, so nobody has to remember a `tmux kill-session` line.
+
+- **Closing the host's client does not end the jam.** They are asked:
+  `this jam is still running (2 guests connected) — [k]eep it running · [e]nd it · [c]ancel`.
+  `k` keeps it and prints the way back, `e` ends it for everybody, `c` returns to the client.
+  A host who launched with `--no-prompt` / `--keep-on-exit` / `--end-on-exit`, or whose stdin is
+  not a terminal, is not asked — and every one of those cases except `--end-on-exit` **keeps**
+  the jam.
+- **`jam host --attach`** reopens the host's client on a jam that is already running.
+- **`jam sessions`** (or `jam ls`) lists jam's own sessions: name, port, state, uptime, session
+  id, who is here, which relays are on, cwd. `jam sessions --json` for scripting. A `!` marks
+  anything unhealthy — an `orphan` state dir whose tmux session is gone, or a session whose
+  daemon has died (`no-daemon`).
+- **`jam end [name]`** ends one jam: every client is told (they print `<Host> ended the jam` and
+  exit), the daemon stops its children (ttyd, the tunnel, popups), the tmux session is killed and
+  the state dir removed. No name and exactly one jam → that one; several → a numbered picker.
+  `jam kill` is the same command. **`/end` in the host's client** does the same thing from inside,
+  after asking `really end this jam for everyone? [y/N]`.
+- **`jam clean`** removes leftover state dirs whose session is gone, and only those, after
+  listing exactly what it will delete.
+- **jam will only ever end a session it created.** It stamps `@jam-owned <state-dir>` on the tmux
+  session and writes `session.json` into that dir; ending anything requires that pair to line up
+  for that exact name. A tmux session of the user's own — or one carrying a hand-written marker —
+  is refused, never listed, and never touched. If asked to end a jam and jam refuses: the answer
+  is that this is deliberate, and `tmux kill-session -t <name>` is the human's own call to make.
+- **`jam host` when the name is taken** by one of jam's own offers `[a]ttach as host ·
+  [n]ew session (jam-2) · [e]nd it and start fresh · [c]ancel`. Taken by anything else, it
+  refuses and suggests `--tmux <other-name>`.
 
 ## Talking
 
@@ -292,7 +323,8 @@ Shift+Enter, Option+Enter or a trailing `\` for multi-line.
 Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` · `/join` ·
 `/allow-cmd [name] [always]` · `/deny-cmd <name>` · `/allow-export [name] [always]` ·
 `/deny-export <name>` · `/accept-file [name] [always]` · `/deny-file <name>` ·
-`/allow-perm [name] [always]` · `/deny-perm <name>` ·
+`/allow-perm [name] [always]` · `/deny-perm <name>` · `/end` end the jam for everybody (asks
+`[y/N]` first) ·
 **F3** attach the real TUI (`Ctrl-b d` back) · **a**/**d**/**i** answer the approval bar.
 Any other `/command` is one of yours — see Slash commands above.
 
@@ -306,7 +338,11 @@ ttyd) · `--no-popup` no tmux knock popup · `--no-token-in-context` don't tell 
 `--tunnel` two Cloudflare quick tunnels · `--funnel` Tailscale Funnel instead, with a stable
 URL (`--funnel-cli <path>` if the CLI is not on PATH — on macOS it lives inside
 Tailscale.app) · `--no-attach` set everything up without opening the
-host's client · `-- <args>` passed to claude (e.g. `-- --model haiku`).
+host's client · `--attach` reopen the client on a jam that is already running ·
+`--no-prompt` / `--keep-on-exit` / `--end-on-exit` decide the "keep it running?" question up
+front · `-- <args>` passed to claude (e.g. `-- --model haiku`).
+Other subcommands: `jam sessions [--json]` / `jam ls`, `jam end [name] [--all]` / `jam kill`,
+`jam clean [--yes]`.
 Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `--no-view`.
 
 ## Troubleshooting quickies
@@ -372,11 +408,24 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
 - Their screen looks cropped or half empty → their terminal is smaller than the host's window;
   the dim `— mirror:` line says how much was cut. The host's own client keeps the window sized
   to their terminal, so a guest with a bigger terminal simply sees blank space.
-- Host wants their client back after closing it → the line the launcher printed
-  (`jam join ws://127.0.0.1:<port> … --host`, or `node client.mjs …` from a source checkout),
-  or just `jam host` again after `tmux kill-session -t jam`.
-- Host wants a clean restart → `tmux kill-session -t jam`, then `./jam host …`
-  (`--resume <session-id>` keeps this conversation).
+- Host wants their client back after closing it → `jam host --attach` (or the
+  `jam join ws://127.0.0.1:<port> … --host` line the launcher printed).
+- Host wants a clean restart → `jam end` (or `jam host` on the same name and answer
+  `[e]nd it and start fresh`), then `jam host …` (`--resume <session-id>` keeps this
+  conversation).
+- Everybody's client said `<Host> ended the jam` and exited → it did end, on purpose. There is
+  nothing to reconnect to; the host starts a new one (`--resume <session-id>` to continue this
+  conversation).
+- `jam end` says it refuses → jam only ends a session it created and can prove it created (see
+  "Ending a jam"). The message names what did not line up. `tmux kill-session -t <name>` is the
+  human's own call, not jam's.
+- `jam sessions` does not show a jam that is clearly running → it was started before v0.18, so
+  it has no marker and no `session.json`; jam treats it as none of its business. End that one
+  with `tmux kill-session -t <name>`.
+- A jam shows `! no-daemon` → the tmux session is up but nothing answers on its port. `jam end
+  <name>` clears it out.
+- `jam host` refuses a name as "NOT one of jam's" → that tmux session belongs to something else
+  and jam will not touch it. Use `--tmux <another-name>`.
 - Your replies stop with a spend-limit message → the host's Claude account hit its usage limit;
   they can restart with `--config-dir` pointing at another profile.
 

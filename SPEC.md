@@ -741,9 +741,9 @@ The public README keeps a short list. This is all of them.
   while claude is still booting still lands.
 
 
-## Running the ten end-to-end smokes
+## Running the eleven end-to-end smokes
 
-Ten end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
+Eleven end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
 ttyd 1.7.7 / cloudflared 2026.8.2. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -798,6 +798,14 @@ node scripts/smoke-replay.mjs
 # and with that (or --dangerously-skip-permissions) nothing ever asks and there is no prompt to
 # relay. If the prompt does not appear it says which setting to look at. ~2 min, costs a haiku turn.
 node scripts/smoke-perm.mjs
+
+# v0.18: the eleventh smoke. NO arguments, no daemon of yours, no real claude/ttyd/cloudflared
+# (stand-ins that hold a pid and sleep) — and it runs with a $TMPDIR of its own, so
+# `jam sessions|end|clean` inside it cannot even SEE a state dir that is not the smoke's. Its
+# own ports (7851/7853/7855) and its own tmux sessions, all named jamlife*, killed by exact
+# name. It starts with the refusals: a plain session of its own, a hand-written @jam-owned
+# marker, and — read-only, never touched — the live `jam` on :7777 if one is running. ~20s.
+node scripts/smoke-lifecycle.mjs
 ```
 
 ## v0.15 — native-speed host TUI control + faster frames (Roy: F3 typing feels remote)
