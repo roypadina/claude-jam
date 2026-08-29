@@ -25,7 +25,15 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   sessionInfo, parseSessionJson, verifyOwned, classifyJam, JAM_STATES, jamMark, cleanable,
   resolveTarget, pickNumber, promptChoice, exitDecision, EXIT_KEYS, exitPromptText, reattachLines,
   TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName, endingNotice, confirmYes,
-  uptimeText, sessionsTable, sessionsJson, sessionsRow } from './lib.mjs';
+  uptimeText, sessionsTable, sessionsJson, sessionsRow,
+  // v0.22B: invite links — the format, the store, the five gates, the two command surfaces.
+  INVITE_V, INVITE_PREFIX, INVITE_LINK_RE, INVITE_SECRET_RE, INVITE_TTL_MS, INVITE_TTL_MAX,
+  INVITE_MAX_USES, INVITE_ADDR_MAX, INVITE_CONNECT_MS, validInviteSecret, inviteAddresses,
+  inviteWsAddresses, encodeInvite, decodeInvite, inviteHash, inviteId, hashEq, inviteRecord,
+  parseInvitesFile, checkInvite, inviteRefusal, resolveInvites, inviteLeft, inviteState,
+  invitesReport, inviteMintedLines, parseDuration, parseInviteCommand, INVITE_USAGE,
+  // v0.22C: /kick.
+  KICK_CODE, resolveKick, parseKickCommand, kickOffer } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -2516,4 +2524,261 @@ test('v0.18-2 --json carries the facts a script needs, including what clean woul
   assert.equal(j[1].uptimeMs, null);
   // It has to survive JSON.stringify unchanged — that is the whole point of --json.
   assert.deepEqual(JSON.parse(JSON.stringify(j)), j);
+});
+
+// ============================================================ v0.22B: invite links ====
+
+const SECRET = 'aaaaaaaabbbbbbbbcccccccc'; // 24 url-safe chars, the shape newInviteSecret makes
+const ADDRS = ['wss://random-words.trycloudflare.com', 'ws://100.64.0.1:7777'];
+const mintLink = (over = {}) => encodeInvite({ jam: 'abc12345', name: 'Yossi', secret: SECRET, ws: ADDRS, expires: 0, ...over });
+
+test('v0.22B an invite link round-trips, and carries only what the guest needs', () => {
+  const link = mintLink();
+  assert.match(link, /^cjam1_[A-Za-z0-9_-]+$/);
+  const got = decodeInvite(link);
+  assert.equal(got.ok, true, got.error);
+  assert.deepEqual(got.invite, { v: 1, jam: 'abc12345', name: 'Yossi', secret: SECRET, ws: ADDRS, exp: 0 });
+  // The address order IS the try order: tunnel first, LAN second (v0.22B).
+  assert.deepEqual(got.invite.ws, ADDRS);
+  // Nothing else rides along: no token, no view key, no cwd, no path.
+  assert.deepEqual(Object.keys(got.invite).sort(), ['exp', 'jam', 'name', 'secret', 'v', 'ws']);
+});
+
+test('v0.22B exp is epoch seconds on the wire and milliseconds everywhere inside', () => {
+  const at = 1_800_000_000_000; // ms
+  const got = decodeInvite(mintLink({ expires: at }), at - 1000);
+  assert.equal(got.ok, true, got.error);
+  assert.equal(got.invite.exp, Math.floor(at / 1000));
+});
+
+test('v0.22B a tampered, wrong-version or damaged link is refused with its own reason', () => {
+  const link = mintLink();
+  // Flip a character in the payload: the base64url still decodes, the JSON does not.
+  const broken = `${link.slice(0, -6)}AAAAAA`;
+  assert.equal(decodeInvite(broken).ok, false);
+  assert.match(['bad-payload', 'bad-name', 'bad-secret', 'no-address'].join(','), new RegExp(decodeInvite(broken).reason));
+  // A future format is a version error, not a parse error — that is what the prefix is for.
+  const v2 = link.replace(/^cjam1_/, 'cjam2_');
+  assert.equal(decodeInvite(v2).reason, 'bad-version');
+  assert.match(decodeInvite(v2).error, /cjam2 .*speaks cjam1|update claude-jam/);
+  // A link that kept the prefix but edited `v` in the payload is tampering, and says so.
+  const innerV2 = INVITE_PREFIX + Buffer.from(JSON.stringify({ v: 2, name: 'Yossi', secret: SECRET, ws: ADDRS, exp: 0 })).toString('base64url');
+  assert.equal(decodeInvite(innerV2).reason, 'bad-version');
+  // Not a link at all.
+  for (const junk of ['', 'hello', 'ws://127.0.0.1:7777', 'cjam1_', 'cjam1_!!!!!!!!', null, 42, {}]) {
+    assert.equal(decodeInvite(junk).reason, 'not-a-link', JSON.stringify(junk));
+  }
+  // Structurally valid base64url, structurally invalid contents — one reason each.
+  const payload = (o) => INVITE_PREFIX + Buffer.from(JSON.stringify(o)).toString('base64url');
+  assert.equal(decodeInvite(payload({ v: 1, name: 'no', secret: SECRET, ws: ADDRS })).ok, true, 'a two-letter name is legal');
+  assert.equal(decodeInvite(payload({ v: 1, name: '[Roy]', secret: SECRET, ws: ADDRS })).reason, 'bad-name');
+  assert.equal(decodeInvite(payload({ v: 1, name: 'Yossi', secret: 'short', ws: ADDRS })).reason, 'bad-secret');
+  assert.equal(decodeInvite(payload({ v: 1, name: 'Yossi', secret: SECRET, ws: [] })).reason, 'no-address');
+  assert.equal(decodeInvite(payload({ v: 1, name: 'Yossi', secret: SECRET, ws: ['http://x'] })).reason, 'no-address');
+  assert.equal(decodeInvite(payload([1, 2, 3])).reason, 'bad-payload');
+});
+
+test('v0.22B an expired link is refused BUT still hands back its address and name, for the knock', () => {
+  const now = 1_800_000_000_000;
+  const got = decodeInvite(mintLink({ expires: now - 60_000 }), now);
+  assert.equal(got.ok, false);
+  assert.equal(got.reason, 'expired');
+  assert.equal(got.invite.name, 'Yossi', 'the fall-through knock needs the name');
+  assert.deepEqual(got.invite.ws, ADDRS, 'and the addresses, or there is nothing to knock at');
+  assert.match(got.error, /expired/);
+  // One second before it expires it is simply valid.
+  assert.equal(decodeInvite(mintLink({ expires: now + 1000 }), now).ok, true);
+});
+
+test('v0.22B minting refuses what it cannot make a credential out of', () => {
+  assert.throws(() => encodeInvite({ name: '[Roy]', secret: SECRET, ws: ADDRS }), /bad invite name/);
+  assert.throws(() => encodeInvite({ name: 'Yossi', secret: 'nope', ws: ADDRS }), /bad invite secret/);
+  assert.throws(() => encodeInvite({ name: 'Yossi', secret: SECRET, ws: [] }), /at least one/);
+  assert.throws(() => encodeInvite({ name: 'Yossi', secret: SECRET, ws: ['ftp://x'] }), /at least one/);
+});
+
+test('v0.22B the address list is order-preserving, deduped, validated and capped', () => {
+  assert.deepEqual(inviteAddresses(['ws://a:1', 'wss://b', 'ws://a:1']), ['ws://a:1', 'wss://b']);
+  assert.deepEqual(inviteAddresses(['nope', 'ws://a:1']), ['ws://a:1']);
+  assert.deepEqual(inviteAddresses(['ws://a:1/path']), [], 'an address is a host, never a path');
+  assert.deepEqual(inviteAddresses(['ws://a:1?x=1']), []);
+  assert.deepEqual(inviteAddresses(['ws://user:pw@a:1']), [], 'and never carries a credential of its own');
+  assert.equal(inviteAddresses(Array.from({ length: 20 }, (_, i) => `ws://h${i}:1`)).length, INVITE_ADDR_MAX);
+  assert.deepEqual(inviteAddresses(null), []);
+  // The tunnel goes first because it is the one that works from anywhere.
+  assert.deepEqual(inviteWsAddresses({ tunnelHost: 'x.trycloudflare.com', ip: '100.64.0.1', port: 7777 }),
+    ['wss://x.trycloudflare.com', 'ws://100.64.0.1:7777']);
+  assert.deepEqual(inviteWsAddresses({ ip: '100.64.0.1', port: 7777 }), ['ws://100.64.0.1:7777']);
+  assert.deepEqual(inviteWsAddresses({}), []);
+});
+
+test('v0.22B the daemon stores a hash, never the secret', () => {
+  const rec = inviteRecord({ name: 'Yossi', secret: SECRET, createdAt: 1000 });
+  assert.match(rec.hash, /^[0-9a-f]{64}$/);
+  assert.equal(rec.id, rec.hash.slice(0, 8));
+  assert.equal(JSON.stringify(rec).includes(SECRET), false, 'the secret must not be in the record');
+  assert.equal(inviteHash(SECRET), rec.hash, 'and the hash is what a hello is checked against');
+  assert.notEqual(inviteHash(SECRET), inviteHash(`${SECRET}x`));
+  // Defaults: multi-use, so a guest whose laptop slept can reconnect.
+  assert.equal(rec.maxUses, 0);
+  assert.equal(rec.uses, 0);
+  assert.equal(rec.revoked, false);
+  // hashEq is length-safe and never true for empty input.
+  assert.equal(hashEq(rec.hash, rec.hash), true);
+  assert.equal(hashEq(rec.hash, `${rec.hash}x`), false);
+  assert.equal(hashEq('', ''), false);
+  assert.equal(hashEq(null, null), false);
+});
+
+test('v0.22B checkInvite admits on all five gates and names the one that closed', () => {
+  const now = 2_000_000_000_000;
+  const live = inviteRecord({ name: 'Yossi', secret: SECRET, expires: now + 60_000 });
+  const ok = checkInvite([live], SECRET, { now, liveNames: ['Roy'] });
+  assert.equal(ok.ok, true, ok.why);
+  assert.equal(ok.name, 'Yossi', 'the NAME comes off the record, never off the hello');
+  // Each refusal, with its own reason.
+  assert.equal(checkInvite([live], 'nope', { now }).reason, 'malformed');
+  assert.equal(checkInvite([live], `${SECRET.slice(0, -1)}z`, { now }).reason, 'unknown');
+  assert.equal(checkInvite([], SECRET, { now }).reason, 'unknown');
+  assert.equal(checkInvite([{ ...live, revoked: true }], SECRET, { now }).reason, 'revoked');
+  assert.equal(checkInvite([{ ...live, expires: now - 1 }], SECRET, { now }).reason, 'expired');
+  assert.equal(checkInvite([{ ...live, maxUses: 2, uses: 2 }], SECRET, { now }).reason, 'used-up');
+  assert.equal(checkInvite([{ ...live, maxUses: 2, uses: 1 }], SECRET, { now }).ok, true);
+  assert.equal(checkInvite([live], SECRET, { now, liveNames: ['yossi'] }).reason, 'name-taken');
+  // expires 0 means no expiry, not "expired in 1970".
+  assert.equal(checkInvite([{ ...live, expires: 0 }], SECRET, { now }).ok, true);
+  // Every refusal has a sentence a guest can read, and every one of them ends in a knock.
+  for (const r of ['malformed', 'unknown', 'revoked', 'expired', 'used-up', 'name-taken']) {
+    assert.match(inviteRefusal(r), /knocking instead/);
+    assert.notEqual(inviteRefusal(r), inviteRefusal('mystery'), r);
+  }
+});
+
+test('v0.22B invites survive a restart, and a record that is not jam\'s own does not', () => {
+  const recs = [inviteRecord({ name: 'Yossi', secret: SECRET, maxUses: 3, uses: 1, createdAt: 5 }),
+    inviteRecord({ name: 'Dana', secret: 'ddddddddeeeeeeeeffffffff' })];
+  const back = parseInvitesFile(JSON.stringify({ v: 1, invites: recs }));
+  assert.deepEqual(back, recs);
+  assert.deepEqual(parseInvitesFile(JSON.stringify(recs)), recs, 'a bare array reads too');
+  // A live invite still works after the round trip — that is the whole point of persisting it.
+  assert.equal(checkInvite(back, SECRET, { now: 1 }).ok, true);
+  for (const junk of ['', 'not json', '{}', '[]', JSON.stringify([{ name: 'Yossi' }]),
+    JSON.stringify([{ hash: 'zz', name: 'Yossi' }]), JSON.stringify([{ hash: 'a'.repeat(64), name: '[Roy]' }])]) {
+    assert.deepEqual(parseInvitesFile(junk), [], JSON.stringify(junk).slice(0, 40));
+  }
+});
+
+test('v0.22B revoking resolves by id or by name, and never touches an already-revoked one', () => {
+  const a = inviteRecord({ name: 'Yossi', secret: SECRET });
+  const b = inviteRecord({ name: 'Yossi', secret: 'ddddddddeeeeeeeeffffffff' });
+  const c = inviteRecord({ name: 'Dana', secret: 'gggggggghhhhhhhhiiiiiiii', revoked: true });
+  const recs = [a, b, c];
+  assert.deepEqual(resolveInvites(recs, a.id), { ok: true, hits: [a] });
+  assert.deepEqual(resolveInvites(recs, a.id.toUpperCase()), { ok: true, hits: [a] });
+  // A name takes every live link that person holds — which is what typing a name means.
+  assert.deepEqual(resolveInvites(recs, 'yossi'), { ok: true, hits: [a, b] });
+  assert.equal(resolveInvites(recs, 'Dana').ok, false, 'the only Dana link is already revoked');
+  assert.match(resolveInvites(recs, 'Dana').why, /no live invite matches/);
+  assert.match(resolveInvites(recs, '').why, /name an invite/);
+  assert.match(resolveInvites([], 'Yossi').why, /no live invite/);
+});
+
+test('v0.22B the listing says state and uses, and never a link or a secret', () => {
+  const now = 3_000_000_000_000;
+  const recs = [
+    inviteRecord({ name: 'Yossi', secret: SECRET, expires: now + 2 * 3_600_000, uses: 2 }),
+    inviteRecord({ name: 'Dana', secret: 'ddddddddeeeeeeeeffffffff', maxUses: 1, uses: 1 }),
+    inviteRecord({ name: 'Eli', secret: 'gggggggghhhhhhhhiiiiiiii', revoked: true }),
+    inviteRecord({ name: 'Noa', secret: 'jjjjjjjjkkkkkkkkllllllll', expires: now - 1 }),
+  ];
+  const r = invitesReport(recs, now);
+  assert.match(r, /4 invite link\(s\)/);
+  assert.match(r, new RegExp(`${recs[0].id}\\s+Yossi\\s+live\\s+2 uses\\s+2h 0m left`));
+  assert.match(r, /Dana\s+used-up\s+1\/1 uses\s+no expiry/);
+  assert.match(r, /Eli\s+revoked/);
+  assert.match(r, /Noa\s+expired\s+0 uses\s+expired/);
+  assert.equal(r.includes(SECRET), false, 'a listing is read in a shared terminal');
+  assert.equal(/cjam1_/.test(r), false);
+  assert.match(invitesReport([], now), /no invite links yet/);
+  // The states are exactly the five the check can produce.
+  assert.equal(inviteState(recs[0], now), 'live');
+  assert.equal(inviteState(null), 'gone');
+  assert.equal(inviteLeft(0), 'no expiry');
+  assert.equal(inviteLeft(now - 1, now), 'expired');
+});
+
+test('v0.22B the minted lines are the guest\'s whole command, plus the honest warning', () => {
+  const rec = inviteRecord({ name: 'Yossi', secret: SECRET, expires: 4_000_000_000_000 });
+  const link = mintLink();
+  const lines = inviteMintedLines(rec, link, 'jam join', 4_000_000_000_000 - 3_600_000);
+  assert.match(lines[0], /invite for Yossi \([0-9a-f]{8}\) — multi-use, 1h 0m left:/);
+  assert.equal(lines[1], `jam join ${link}`, 'one line, selectable as one thing');
+  assert.match(lines[2], /is a password/);
+  assert.match(lines[2], /\/invite revoke Yossi/);
+});
+
+test('v0.22B --expires and --uses parse strictly, and a bare number is refused', () => {
+  assert.equal(parseDuration('30m'), 30 * 60_000);
+  assert.equal(parseDuration('24h'), 24 * 3_600_000);
+  assert.equal(parseDuration('7d'), 7 * 86_400_000);
+  assert.equal(parseDuration('90s'), 90_000);
+  assert.equal(parseDuration('24H'), 24 * 3_600_000);
+  for (const bad of ['', '24', 'h', '0h', '-1h', '1y', '99d', 'soon', null, undefined, '1 h ']) {
+    assert.equal(parseDuration(bad), null, JSON.stringify(bad));
+  }
+  assert.equal(parseDuration('30d'), INVITE_TTL_MAX);
+});
+
+test('v0.22B /invite parses the same way on the command line and in the client', () => {
+  assert.deepEqual(parseInviteCommand('Yossi'), { ok: true, op: 'new', name: 'Yossi', maxUses: 0, ttl: INVITE_TTL_MS });
+  assert.deepEqual(parseInviteCommand('Yossi B'), { ok: true, op: 'new', name: 'Yossi B', maxUses: 0, ttl: INVITE_TTL_MS });
+  assert.deepEqual(parseInviteCommand('Yossi --uses 3 --expires 30m'),
+    { ok: true, op: 'new', name: 'Yossi', maxUses: 3, ttl: 30 * 60_000 });
+  assert.deepEqual(parseInviteCommand('revoke Yossi'), { ok: true, op: 'revoke', target: 'Yossi' });
+  assert.deepEqual(parseInviteCommand('revoke ab12cd34'), { ok: true, op: 'revoke', target: 'ab12cd34' });
+  assert.deepEqual(parseInviteCommand('list'), { ok: true, op: 'list' });
+  for (const bad of ['', '   ', 'revoke', '[Roy]', 'Yossi --uses 0', 'Yossi --uses x', 'Yossi --uses 99999',
+    'Yossi --expires 3', 'Yossi --nope 1']) {
+    assert.equal(parseInviteCommand(bad).ok, false, JSON.stringify(bad));
+    assert.ok(parseInviteCommand(bad).error.length > 10, JSON.stringify(bad));
+  }
+  // And the client's own parse routes them.
+  assert.deepEqual(parseClientLine('/invites'), { kind: 'invites' });
+  assert.deepEqual(parseClientLine('/invite Yossi'), { kind: 'invite', ok: true, op: 'new', name: 'Yossi', maxUses: 0, ttl: INVITE_TTL_MS });
+  assert.deepEqual(parseClientLine('/invite revoke Yossi'), { kind: 'invite', ok: true, op: 'revoke', target: 'Yossi' });
+  assert.equal(parseClientLine('/invite').kind, 'error');
+  // They are jam's own, so the client answers them instead of typing them into claude.
+  for (const c of ['/invite', '/invites', '/kick']) assert.ok(JAM_COMMANDS.includes(c), c);
+  assert.ok(commandMatches('/inv').includes('/invite'));
+});
+
+// ============================================================ v0.22C: /kick ====
+
+test('v0.22C /kick names one live participant, exactly, and never yourself', () => {
+  const live = ['Roy', 'Yossi', 'Dana'];
+  assert.deepEqual(resolveKick('Yossi', live, 'Roy'), { ok: true, name: 'Yossi' });
+  assert.deepEqual(resolveKick('yossi', live, 'Roy'), { ok: true, name: 'Yossi' }, 'names match case-insensitively');
+  assert.equal(resolveKick('Roy', live, 'Roy').ok, false);
+  assert.match(resolveKick('Roy', live, 'Roy').why, /cannot kick yourself/);
+  assert.equal(resolveKick('Yoss', live, 'Roy').ok, false, 'no prefix matching decides who leaves');
+  assert.match(resolveKick('Yoss', live, 'Roy').why, /nobody here is called/);
+  for (const bad of ['', '   ', null, undefined, 42]) assert.equal(resolveKick(bad, live, 'Roy').ok, false, JSON.stringify(bad));
+  assert.equal(resolveKick('Yossi', [], 'Roy').ok, false);
+  // 4406 is inside the band every client already treats as final, so a kick is not a reconnect.
+  assert.ok(KICK_CODE >= 4400 && KICK_CODE <= 4429);
+});
+
+test('v0.22C /kick parses its optional one-shot revoke, and offers it otherwise', () => {
+  assert.deepEqual(parseKickCommand('Yossi'), { ok: true, name: 'Yossi', revoke: false });
+  assert.deepEqual(parseKickCommand('Yossi revoke'), { ok: true, name: 'Yossi', revoke: true });
+  assert.deepEqual(parseKickCommand('Yossi B REVOKE'), { ok: true, name: 'Yossi B', revoke: true });
+  assert.equal(parseKickCommand('').ok, false);
+  assert.equal(parseKickCommand('revoke').ok, false, 'revoke alone names nobody');
+  assert.deepEqual(parseClientLine('/kick Yossi revoke'), { kind: 'kick', name: 'Yossi', revoke: true });
+  assert.deepEqual(parseClientLine('/kick Yossi'), { kind: 'kick', name: 'Yossi', revoke: false });
+  assert.equal(parseClientLine('/kick').kind, 'error');
+  // The offer only appears when there is a link to take back.
+  assert.match(kickOffer('Yossi', 'invite'), /revoke their invite link.*\[y\/N\]/);
+  assert.match(kickOffer('Yossi', 'knock'), /no link to revoke/);
+  assert.match(kickOffer('Yossi', 'token'), /no link to revoke/);
 });
