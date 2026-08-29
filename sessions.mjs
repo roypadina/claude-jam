@@ -327,7 +327,9 @@ async function cmdInvite(argv, forced = null) {
   const jamAt = argv.indexOf('--jam');
   const jamName = jamAt >= 0 ? argv[jamAt + 1] : null;
   const json = argv.includes('--json');
-  const words = argv.filter((a, i) => i !== jamAt && i !== jamAt + 1 && a !== '--json');
+  // Drop `--jam <name>` only when it is actually there: with jamAt = -1, `i !== jamAt + 1` would
+  // quietly eat argument 0, which is the invited name.
+  const words = argv.filter((a, i) => (jamAt < 0 || (i !== jamAt && i !== jamAt + 1)) && a !== '--json');
   const v = forced ? { ok: true, op: forced } : parseInviteCommand(words.join(' '));
   if (!v.ok) { console.error(v.error); return 2; }
 
