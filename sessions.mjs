@@ -5,7 +5,7 @@
 //
 // THE SAFETY RULE (v0.18, and the reason this file is small and boring): jam may end a tmux
 // session ONLY when it was named explicitly (or picked out of jam's own verified list) AND its
-// `@jam-owned` option resolves to a state dir holding the session.json jam wrote for that exact
+// `@claude-jam-owned` option resolves to a state dir holding the session.json jam wrote for that exact
 // name. So:
 //   * nothing here ever runs `tmux list-sessions` — enumeration is over jam's OWN namespace,
 //     the `$TMPDIR/claude-jam-<port>` state dirs, and a dir with no session.json of jam's is
@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import net from 'node:net';
-import { OWNED_OPTION, SESSION_FILE, portFromStateDir, parseSessionJson, verifyOwned, classifyJam,
+import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verifyOwned, classifyJam,
   cleanable, resolveTarget, pickNumber, confirmYes, uptimeText, sessionsTable, sessionsJson,
   // v0.22B: the invite CLI is this file too — it needs exactly what `jam end` needs (find the
   // jam, POST to it on loopback with the secret out of its 0700 state dir).
@@ -48,11 +48,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const hasSession = (name, socket = TMUX_DEFAULT_SOCKET) =>
   !!name && tmux(socket, 'has-session', '-t', `=${name}`).status === 0;
 
+// v0.21: both names, new one first. A jam built by 0.18.0 carries the OLD `@jam-owned` option,
+// and it stays listable and endable — the value still has to point at a state dir whose
+// session.json names this session back, so reading the old option grants nothing the new one
+// would not.
 export function sessionMarker(name, socket = TMUX_DEFAULT_SOCKET) {
-  const r = tmux(socket, 'show-options', '-t', name, '-v', OWNED_OPTION);
-  if (r.status !== 0) return null;
-  const v = (r.stdout || '').replace(/\n$/, '').trim();
-  return v || null;
+  for (const opt of OWNED_OPTIONS) {
+    const r = tmux(socket, 'show-options', '-t', name, '-v', opt);
+    if (r.status !== 0) continue;
+    const v = (r.stdout || '').replace(/\n$/, '').trim();
+    if (v) return v;
+  }
+  return null;
 }
 
 export function readSessionFile(dir) {
