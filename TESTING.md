@@ -291,6 +291,14 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   session `claude-jam`, so two at once make `claude-jam end <name>` ambiguous — S13's note) or a
   restructure of S7b's guest lifetime, for a third proof of a path already proven twice. Prove:
   fold a `cleared`-mode paint into S7b when that step is next touched.
+- 2026-08-30 · **F5 — fixed, and still unrunnable on the platform it is for.** `safeBaseName` now
+  renames the Windows device names (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, with
+  any extension) and strips trailing dots. Pinned by `safeBaseName: the Windows device names,
+  which are not files at all`, including the near-misses that must NOT be renamed (`console.log`,
+  `com10.txt`, `lpt0.txt`, `CONIN$.txt`) and idempotence. `smoke-nudge` (the upload-policy suite)
+  re-run and green in 13s. The skip that remains is the platform itself: **no Windows box**, so
+  "the file is now usable there" is reasoned from the API contract, not observed. Prove: the
+  Windows run in the W3 work — send `con.txt` into a jam from a Windows client and open it.
 - 2026-08-30 · **F4 — the stand-in was not the thing it stood in for.** `scripts/fake-claude.mjs`
   emitted one stream event per turn; 2.1.251 emits one per CONTENT BLOCK under a shared
   `message.id`, so the only path `smoke-peer` could reach was the no-id fallback and the turn-cap

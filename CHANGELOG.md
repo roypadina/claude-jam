@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed — Windows device names passed the upload filter (campaign F5)
+
+`con`, `prn`, `aux`, `nul`, `com1`…`com9` and `lpt1`…`lpt9` went through `safeBaseName`
+unchanged. They are not files on Windows — a write to `nul` silently discards, `con` is the
+console — and the reservation holds with any extension (`con.txt`) and through a trailing dot
+(`nul.`), which Windows strips itself. Harmless on macOS and Linux, and the reason to fix it now
+rather than when the Windows client lands is that a name is sanitized on the **host** and used on
+whatever machine the participant is on. Such a name now gets an underscore in front — `con.txt`
+becomes `_con.txt` — and trailing dots are dropped from every name, so `report.` and `report` are
+not two names for one file.
+
 ### Tests — the peer stand-in now emits the shape it claims to model (campaign F4)
 
 `scripts/fake-claude.mjs` emitted one stream event per turn. Claude 2.1.251 emits one per

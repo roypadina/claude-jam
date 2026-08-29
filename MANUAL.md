@@ -526,6 +526,12 @@ transfer at a time per person, writes go only into `<cwd>/jam-uploads/`, nothing
 opened, and an announced-vs-actual byte mismatch drops the upload. The policy only decides
 whether the host is *asked*.
 
+Sanitizing can **rename** a file, and if somebody asks why, this is the answer: anything outside
+`[A-Za-z0-9._-]` becomes `_`, a leading dot goes (no dotfiles), a very long name is cut but keeps
+its extension, trailing dots go, and a Windows device name — `con`, `prn`, `aux`, `nul`, `com1`…,
+`lpt1`…, with or without an extension — gets an underscore in front, so `con.txt` lands as
+`_con.txt`. Those are not files on Windows; a write to `nul` there silently discards.
+
 **The quota `auto` needs.** An `auto` session may take **40 files or 200 MB**, whichever comes
 first (`--upload-quota 80files` / `--upload-quota 500MB` changes it). After that the policy falls
 back to `ask` and says so once: `upload quota reached — asking again`. The host can reset it from
