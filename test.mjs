@@ -15,7 +15,11 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   toolDiffText, toolFile, toolLiveLine, DIFF_TOOLS, FILE_TOOLS, TOOL_DIFF_LINES, TOOL_DIFF_LINE_MAX,
   noteFilePath, filesNewestFirst, filesReport, FILES_MAX,
   validDiffPath, gitDiffArgs, capOutput, OUT_MAX_LINES, OUT_MAX_CHARS, DIFF_PATH_MAX,
-  maskSecrets, SECRET_MASK } from './lib.mjs';
+  maskSecrets, SECRET_MASK,
+  // v0.17 Batch P: the guest allowlist, the permission relay, the bell, RTT, autocomplete.
+  GUEST_SAFE_COMMANDS, isSafeGuestCommand, parsePermOptions, permOptionsReport, validPermChoice,
+  PERM_OPTIONS_MAX, PERM_TEXT_MAX, PERM_ROW_GAP, BELL, BELL_MIN_GAP, bellAllowed, mentionsMe,
+  rttText, RTT_STALE_AFTER, commandMatches, COMMAND_HINTS_MAX } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -1320,14 +1324,15 @@ test('barKeyAction: keys that are not typing pass through with the arming untouc
 });
 
 test('APPROVAL_COMMANDS: one key per ladder kind, and every one is a real jam command', () => {
-  assert.deepEqual(Object.keys(APPROVAL_COMMANDS).sort(), ['cmd', 'export', 'file', 'knock']);
+  // v0.17 P2 added the fourth kind; the bar answers it exactly like the other three.
+  assert.deepEqual(Object.keys(APPROVAL_COMMANDS).sort(), ['cmd', 'export', 'file', 'knock', 'permission']);
   for (const [kind, pair] of Object.entries(APPROVAL_COMMANDS)) {
     assert.deepEqual(Object.keys(pair).sort(), ['allow', 'deny'], kind);
     for (const cmd of Object.values(pair)) {
       assert.ok(JAM_COMMANDS.includes(cmd), `${cmd} is not a jam command`);
       // And the client parses it into the action that answers that ladder, name and all.
       const act = parseClientLine(`${cmd} Dana`);
-      assert.ok(['accept', 'deny', 'cmd', 'export-ok', 'file-ok'].includes(act.kind), `${cmd} -> ${act.kind}`);
+      assert.ok(['accept', 'deny', 'cmd', 'export-ok', 'file-ok', 'perm-ok'].includes(act.kind), `${cmd} -> ${act.kind}`);
       assert.equal(act.name, 'Dana', cmd);
     }
   }
@@ -1851,4 +1856,339 @@ test('F4 the hint gate is the hot path: a row with no secret shape costs one sca
     'A_CREDENTIAL=0123456789', 'A_CREDENTIALS=0123456789']) {
     assert.match(maskSecrets(s), /\[masked\]/, `the hint gate swallowed ${s}`);
   }
+});
+
+// --- v0.17 Batch P: guest parity and polish ------------------------------------
+
+// --- P1: the read-only guest allowlist ---
+
+test('P1 the allowlist runs read-only commands without the host, and only in its exact bare form', () => {
+  for (const cmd of GUEST_SAFE_COMMANDS) {
+    assert.equal(guestSlashDecision(cmd), 'run', cmd);
+    assert.equal(isSafeGuestCommand(cmd), true, cmd);
+    assert.equal(isSafeGuestCommand(cmd.toUpperCase()), true, cmd); // /COST is still /cost
+    // An argument is behaviour the list has not read, so it goes back on the ask path.
+    assert.equal(guestSlashDecision(`${cmd} --json`), 'ask', `${cmd} --json`);
+    assert.equal(isSafeGuestCommand(`${cmd} --json`), false, `${cmd} --json`);
+  }
+  // Nothing else was let in with them.
+  for (const cmd of ['/compact', '/model', '/mcp', '/init', '/agents']) {
+    assert.equal(guestSlashDecision(cmd), 'ask', cmd);
+    assert.equal(isSafeGuestCommand(cmd), false, cmd);
+  }
+  assert.equal(isSafeGuestCommand(''), false);
+  assert.equal(isSafeGuestCommand(null), false);
+});
+
+test('P1 the allowlist can never contain, or grow into, the hard host-only list', () => {
+  for (const cmd of HOST_ONLY_COMMANDS) {
+    assert.equal(GUEST_SAFE_COMMANDS.includes(cmd), false, cmd);
+    assert.equal(guestSlashDecision(cmd), 'refuse', cmd);
+  }
+  // And the order of the two checks is what guarantees it: even if a lifecycle command were
+  // added to the allowlist by mistake, the hard list is consulted first.
+  assert.equal(guestSlashDecision('/clear', true), 'refuse');
+  // Every allowlisted command is one of claude's, not one jam already owns.
+  for (const cmd of GUEST_SAFE_COMMANDS) {
+    assert.equal(JAM_COMMANDS.includes(cmd), false, cmd);
+    assert.equal(parseClientLine(cmd).kind, 'slash', cmd);
+  }
+});
+
+// --- P2: the permission relay ---
+
+// A real Bash permission prompt, transcribed VERBATIM from `tmux capture-pane -p` against
+// claude 2.1.251 (probed 2026-08-29, `--permission-mode manual`, 100x40): a horizontal rule
+// rather than a box, the question line, then the numbered choices with claude's own ❯ on the
+// highlighted one. Also verified there: the bare digit answers it — no Enter needed.
+const permScreen = (opts = ['Yes', 'Yes, and always allow access to /tmp from this project', 'No']) => [
+  '  ⏺ I will create the file now.',
+  '',
+  '  ⎿  $ touch /tmp/jam-perm-probe.txt',
+  '',
+  '────────────────────────────────────────────────────────────────────────────',
+  ' Bash command',
+  '',
+  '   touch /tmp/jam-perm-probe.txt',
+  '   Create file at /tmp/jam-perm-probe.txt',
+  '',
+  ' Do you want to proceed?',
+  ...opts.map((o, i) => ` ${i === 0 ? '❯' : ' '} ${i + 1}. ${o}`),
+  '',
+  ' Esc to cancel · Tab to amend · ctrl+e to explain',
+].join('\n');
+
+// And the same prompt boxed, which is how other Claude Code versions draw it.
+const permBoxed = [
+  '╭──────────────────────────────────────────╮',
+  '│ Edit file                                │',
+  '│ Do you want to make this edit to lib.mjs?│',
+  '│ ❯ 1. Yes                                 │',
+  '│   2. Yes, allow all edits this session    │',
+  '│   3. No, and tell Claude what to do (esc)│',
+  '╰──────────────────────────────────────────╯',
+].join('\n');
+
+test('P2 parsePermOptions reads the numbered options off a real prompt, box drawing and all', () => {
+  const got = parsePermOptions(permScreen());
+  assert.equal(got.length, 3);
+  assert.deepEqual(got.map((o) => o.n), [1, 2, 3]);
+  assert.equal(got[0].text, 'Yes');
+  assert.equal(got[0].marked, true, 'the ❯ row is the one claude has highlighted');
+  assert.equal(got[1].marked, false);
+  assert.match(got[1].text, /^Yes, and always allow access/);
+  assert.equal(got[2].text, 'No');
+  // The boxed spelling parses to the same shape, frame characters and all.
+  const boxed = parsePermOptions(permBoxed);
+  assert.deepEqual(boxed.map((o) => o.n), [1, 2, 3]);
+  assert.equal(boxed[0].marked, true);
+  assert.equal(boxed[0].text, 'Yes');
+  // `2)` is as valid a numbering as `2.`, and a wrapped option one row down still belongs.
+  const paren = parsePermOptions(['Do you want to proceed?', '1) Allow', '   (this session only)', '2) Deny'].join('\n'));
+  assert.deepEqual(paren.map((o) => o.n), [1, 2]);
+});
+
+test('P2 anything it cannot read cleanly is NO options at all — which is the refusal', () => {
+  for (const junk of ['', null, undefined, 'no options here', '❯ ', 'Do you want to proceed?',
+    'Do you want to proceed?\n❯ 1. the only option', // a lone option is not a picker
+    'Do you want to proceed?\n2. second\n3. third', // never reaches 1
+    'Do you want to proceed?\n❯ 1. a\n\n\n\n\n\n2. b', // too far apart to be one block
+    'Do you want to proceed?\n❯ 1.no space after the number\n2.same',
+    '1 file changed, 2 insertions']) {
+    assert.deepEqual(parsePermOptions(junk), [], JSON.stringify(String(junk).slice(0, 40)));
+  }
+  // Ten options would need two digits, and two digits is not one keypress — so rather than
+  // silently offering the first nine of a prompt it cannot fully drive, it offers nothing.
+  const ten = ['Do you want to proceed?', ...Array.from({ length: 10 }, (_, i) => `❯ ${i + 1}. option`)].join('\n');
+  assert.deepEqual(parsePermOptions(ten), []);
+  assert.equal(PERM_OPTIONS_MAX, 9);
+  assert.ok(PERM_ROW_GAP >= 1 && PERM_TEXT_MAX > 20);
+});
+
+test('P2 a numbered list on screen cannot be mistaken for the prompt', () => {
+  // The dangerous false positive: claude printing a numbered plan, or reading a file full of
+  // them, while nothing is actually being asked. Numbering alone is not enough — the picker's own
+  // ❯ marker or a question line right above the options has to be there too.
+  const plan = ['A plan:', '1. read the file', '2. edit it', '3. run the tests', '',
+    'and then some prose', 'nothing numbered here'].join('\n');
+  assert.deepEqual(parsePermOptions(plan), []);
+  // The question line has to be NEAR the options, not anywhere on the screen.
+  assert.deepEqual(parsePermOptions(`Do you want to proceed?\n\n\n\n\n\n${plan}`), []);
+  // With a real prompt under it, the prompt wins and the plan is no part of it.
+  const got = parsePermOptions(`${plan}\n${permScreen()}`);
+  assert.equal(got.length, 3);
+  assert.equal(got[0].text, 'Yes');
+  assert.equal(got.some((o) => /read the file|edit it/.test(o.text)), false);
+});
+
+test('P2 validPermChoice: the digit must be on the screen — out of range and junk both refuse', () => {
+  const options = parsePermOptions(permScreen());
+  const ok = validPermChoice(2, options);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.n, 2);
+  assert.match(ok.text, /always allow access/);
+  assert.equal(validPermChoice('3', options).ok, true, 'a string digit is the same digit');
+  for (const bad of [4, 9, '7']) {
+    const r = validPermChoice(bad, options);
+    assert.equal(r.ok, false, String(bad));
+    assert.match(r.error, /no option .* screen|showing 3/);
+  }
+  for (const bad of ['a', '', null, undefined, '1 2', '-1', '0', '10', 'C-m', '\x1b[B', 2.5]) {
+    const r = validPermChoice(bad, options);
+    assert.equal(r.ok, false, JSON.stringify(bad));
+    assert.match(r.error, /not one of the numbered options/);
+  }
+  // With no options at all nothing validates, whatever the digit.
+  assert.equal(validPermChoice(1, []).ok, false);
+});
+
+test('P2 permOptionsReport shows the options and says the host still has to approve', () => {
+  const text = permOptionsReport(parsePermOptions(permScreen()));
+  const lines = text.split('\n');
+  assert.match(lines[0], /waiting for an answer/);
+  assert.match(lines[1], /❯ 1\. Yes$/);
+  assert.match(lines[2], /^ {4}2\. Yes, and always allow access/);
+  assert.match(text, /\/answer <number>/);
+  assert.match(text, /host has to approve/);
+  assert.match(permOptionsReport([]), /no numbered options/);
+});
+
+test('P2 the client parses the relay: /answer lists, /answer <n> asks, the host allows or denies', () => {
+  assert.deepEqual(parseClientLine('/answer'), { kind: 'perm', choice: null });
+  assert.deepEqual(parseClientLine('/answer 2'), { kind: 'perm', choice: 2 });
+  assert.deepEqual(parseClientLine('/answer  9 '), { kind: 'perm', choice: 9 });
+  // Everything that is not one digit is a usage error in the CLIENT, before the wire.
+  for (const bad of ['/answer 0', '/answer 10', '/answer yes', '/answer 1 2', '/answer -1', '/answer C-m']) {
+    const a = parseClientLine(bad);
+    assert.equal(a.kind, 'error', bad);
+    assert.match(a.text, /usage: \/answer/);
+  }
+  assert.deepEqual(parseClientLine('/allow-perm'), { kind: 'perm-ok', op: 'allow', name: null, always: false });
+  assert.deepEqual(parseClientLine('/allow-perm Dana'), { kind: 'perm-ok', op: 'allow', name: 'Dana', always: false });
+  assert.deepEqual(parseClientLine('/allow-perm Dana K always'), { kind: 'perm-ok', op: 'allow', name: 'Dana K', always: true });
+  assert.deepEqual(parseClientLine('/deny-perm Dana'), { kind: 'perm-ok', op: 'deny', name: 'Dana', always: false });
+  // A one-key bar answer never grants standing approval, on this ladder either.
+  assert.equal(parseClientLine('/deny-perm Dana always').always, false);
+  for (const cmd of ['/answer', '/allow-perm', '/deny-perm']) assert.ok(JAM_COMMANDS.includes(cmd), cmd);
+});
+
+test('P2 the permission request wears its own glyph in the popup and in the approval bar', () => {
+  assert.equal(popupPrompt('permission', 'Dana', '', 'answer 2: Yes, and don\'t ask again'),
+    '⏎ Dana wants to answer 2: Yes, and don\'t ask again');
+  const bar = approvalBar([{ kind: 'permission', name: 'Dana', detail: 'answer 1: Yes', expires: 60000 }], 0, true);
+  assert.match(bar.text, /^⏎ Dana wants to answer 1: Yes {2}·/);
+  assert.match(bar.text, /\[a\]ccept {2}\[d\]eny {2}\[i\]gnore/);
+  assert.match(bar.text, /1:00/);
+  assert.equal(bar.kind, 'permission');
+});
+
+// --- P3: the bell ---
+
+test('P3 mentionsMe is whole-word and case-insensitive, @Name included', () => {
+  for (const t of ['Dana can you look', 'hey dana', 'DANA!', 'ask @Dana about it', '@dana,', 'Dana', 'ok Dana?']) {
+    assert.equal(mentionsMe(t, 'Dana'), true, t);
+  }
+  for (const t of ['bandana', 'Danae', 'Dana_K', 'xDana', 'danax', 'nothing here', '']) {
+    assert.equal(mentionsMe(t, 'Dana'), false, t);
+  }
+  // A name with a space or a dash is a name, not a regex.
+  assert.equal(mentionsMe('thanks Dana K for that', 'Dana K'), true);
+  assert.equal(mentionsMe('ping Ann-Marie now', 'Ann-Marie'), true);
+  assert.equal(mentionsMe('a-b-c', 'a.b'), false, 'the dot is escaped, so "a.b" does not match "a-b"');
+  assert.equal(mentionsMe('anything', ''), false);
+  assert.equal(mentionsMe(null, 'Dana'), false);
+});
+
+test('P3 bellAllowed rings once per burst, and a backwards clock still rings', () => {
+  assert.equal(bellAllowed(0, 5000), true, 'nothing has rung yet');
+  assert.equal(bellAllowed(1000, 1000 + BELL_MIN_GAP), true);
+  assert.equal(bellAllowed(1000, 1500), false, 'a burst of mentions is one bell');
+  assert.equal(bellAllowed(1000, 1000 + BELL_MIN_GAP - 1), false);
+  assert.equal(bellAllowed(9000, 1000), true, 'the clock went backwards: ring rather than go mute');
+  assert.equal(BELL, '\x07');
+});
+
+// --- P5: connection quality ---
+
+test('P5 rttText: one dim figure, and staleness counted in heartbeats not seconds', () => {
+  assert.equal(rttText({ rtt: 118.6, at: 1000 }, 2000), '~119ms');
+  assert.equal(rttText({ rtt: 0, at: 1000 }, 1000), '~0ms');
+  // Nothing measured yet says nothing at all, rather than a fake zero.
+  assert.equal(rttText(null, 1000), '');
+  assert.equal(rttText({}, 1000), '');
+  assert.equal(rttText({ rtt: 12 }, 1000), '');
+  assert.equal(rttText({ rtt: NaN, at: 1000 }, 1000), '');
+  // Overdue by more than RTT_STALE_AFTER heartbeats: the number is a lie, so say stale instead.
+  const hb = 30000;
+  assert.equal(rttText({ rtt: 20, at: 0 + 1 }, 1 + hb * 2), '~20ms');
+  assert.equal(rttText({ rtt: 20, at: 1 }, 1 + hb * RTT_STALE_AFTER + 1000), `⚠ stale ${Math.round((hb * RTT_STALE_AFTER + 1000) / 1000)}s`);
+  // A test-sized --heartbeat must not make every client look broken.
+  assert.equal(rttText({ rtt: 5, at: 1000 }, 3000, 200), '⚠ stale 2s');
+  assert.equal(rttText({ rtt: 5, at: 1000 }, 1200, 200), '~5ms');
+});
+
+// --- P6: slash-command autocomplete ---
+
+test('P6 commandMatches filters jam\'s own commands, and stops at the first space', () => {
+  assert.deepEqual(commandMatches('/to'), ['/tools', '/token']);
+  assert.deepEqual(commandMatches('/TO'), ['/tools', '/token'], 'typing in caps still matches');
+  assert.deepEqual(commandMatches('/quit'), [], 'the only match, already typed in full');
+  assert.deepEqual(commandMatches('/tools '), [], 'a space means arguments now, not a name');
+  assert.deepEqual(commandMatches('/tools on'), []);
+  assert.deepEqual(commandMatches('/zzz'), []);
+  // Not a command at all: a plain message must never raise the list.
+  for (const t of ['', 'hello', 'a/b', ' /who', null]) assert.deepEqual(commandMatches(t), [], JSON.stringify(t));
+  // A bare slash offers a capped page of the list, never all 26 rows.
+  const all = commandMatches('/');
+  assert.equal(all.length, COMMAND_HINTS_MAX);
+  for (const c of all) assert.ok(JAM_COMMANDS.includes(c), c);
+  // /answer is discoverable exactly where a guest would look for it.
+  assert.ok(commandMatches('/an').includes('/answer'));
+  // Only jam's own: claude's commands are unknowable client-side and must not be guessed at.
+  for (const c of commandMatches('/c')) assert.ok(JAM_COMMANDS.includes(c), c);
+  assert.equal(commandMatches('/cost').length, 0, 'one of claude\'s is not in the list');
+});
+
+// --- P7: the palette pass ---
+
+// The colour math the P7 claims are made of: xterm-256 -> sRGB, WCAG relative luminance and
+// contrast, and CIE76 ΔE (plus the standard Viénot dichromat matrices) for "do these two look
+// the same". Test-only on purpose — the palette is data, and this is what pins it.
+const xtermRgb = (n) => {
+  const LEV = [0, 95, 135, 175, 215, 255];
+  if (n >= 16 && n <= 231) { const i = n - 16; return [LEV[Math.floor(i / 36)], LEV[Math.floor((i % 36) / 6)], LEV[i % 6]]; }
+  if (n >= 232) { const v = 8 + (n - 232) * 10; return [v, v, v]; }
+  return [[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0], [0, 0, 128], [128, 0, 128], [0, 128, 128],
+    [192, 192, 192], [128, 128, 128], [255, 0, 0], [0, 255, 0], [255, 255, 0], [0, 0, 255], [255, 0, 255],
+    [0, 255, 255], [255, 255, 255]][n];
+};
+const srgbLin = (c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
+const contrast = (a, b) => {
+  const [hi, lo] = [a, b].map(([r, g, bl]) => 0.2126 * srgbLin(r) + 0.7152 * srgbLin(g) + 0.0722 * srgbLin(bl))
+    .sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+const cieLab = (c) => {
+  const [r, g, b] = c.map(srgbLin);
+  const w = [0.95047, 1, 1.08883];
+  const [x, y, z] = [r * 0.4124 + g * 0.3576 + b * 0.1805, r * 0.2126 + g * 0.7152 + b * 0.0722,
+    r * 0.0193 + g * 0.1192 + b * 0.9505].map((v, i) => v / w[i])
+    .map((v) => (v > 0.008856 ? Math.cbrt(v) : 7.787 * v + 16 / 116));
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+};
+const deltaE = (a, b) => { const p = cieLab(a); const q = cieLab(b); return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]); };
+// The roles a participant colour must never be confused with, plus the terminal's own foreground.
+const RESERVED_COLORS = { 208: 'claude orange', 213: 'chat magenta', 203: 'error red', 114: 'self green', 245: 'dim', 240: 'dimmer', 231: 'white fg', 253: 'light grey fg' };
+
+test('P7 every palette colour is readable on a dark terminal (WCAG AA, measured)', () => {
+  for (const n of COLOR_PALETTE) {
+    const c = xtermRgb(n);
+    assert.ok(n >= 16 && n <= 231, `${n} is outside the 256-colour cube`);
+    // 4.5:1 is AA for normal text; the whole set actually clears 6:1 on both grounds.
+    assert.ok(contrast(c, [30, 30, 30]) >= 4.5, `${n} on #1e1e1e is ${contrast(c, [30, 30, 30]).toFixed(2)}:1`);
+    assert.ok(contrast(c, [0, 0, 0]) >= 5.5, `${n} on black is ${contrast(c, [0, 0, 0]).toFixed(2)}:1`);
+  }
+});
+
+test('P7 no palette colour collides with a role colour — least of all the self green', () => {
+  for (const n of COLOR_PALETTE) {
+    assert.equal(n in RESERVED_COLORS, false, `${n} is ${RESERVED_COLORS[n]}`);
+    // The v0.17 P7 fix: 78 #5FD787 sat ΔE 11.2 from the self green 114 #87D787, which made
+    // somebody else's name look like your own. Nothing in the pool may be green-dominant.
+    // Green-DOMINANT, strictly: a cyan (g == b) is not a green, and 44/81 are cyans.
+    const [r, g, b] = xtermRgb(n);
+    assert.equal(g > r && g > b, false, `${n} is in the green sector, which belongs to "you"`);
+    assert.ok(deltaE(xtermRgb(n), xtermRgb(114)) >= 20, `${n} is ΔE ${deltaE(xtermRgb(n), xtermRgb(114)).toFixed(1)} from the self green`);
+  }
+  assert.equal(COLOR_PALETTE.includes(78), false, 'the pale green went in v0.17 P7');
+  assert.ok(COLOR_PALETTE.includes(211), 'and 211 rose took its slot');
+});
+
+test('P7 the eight are mutually distinguishable, and every pair is measured', () => {
+  const all = [...COLOR_PALETTE, ...Object.keys(RESERVED_COLORS).map(Number)];
+  let worst = { d: Infinity };
+  for (let i = 0; i < COLOR_PALETTE.length; i++) {
+    for (const m of all) {
+      if (m === COLOR_PALETTE[i]) continue;
+      const d = deltaE(xtermRgb(COLOR_PALETTE[i]), xtermRgb(m));
+      if (d < worst.d) worst = { d, a: COLOR_PALETTE[i], b: m };
+    }
+  }
+  // 20 is comfortably above "these read as the same colour"; the set measures 22.0 (81 vs 110).
+  assert.ok(worst.d >= 20, `closest pair is ${worst.a} vs ${worst.b} at ΔE ${worst.d.toFixed(1)}`);
+});
+
+test('P7 the swap did not disturb the stable-per-name property', () => {
+  // The hash is untouched: a name maps to the same slot it always did, and only slot 2 moved.
+  assert.equal(COLOR_PALETTE.length, 8);
+  assert.equal(new Set(COLOR_PALETTE).size, 8);
+  assert.deepEqual(COLOR_PALETTE, [39, 44, 211, 81, 110, 141, 178, 183]);
+  for (const n of ['Roy', 'Dana', 'Eli', 'Noa', 'Konstantina', '', 'x']) {
+    assert.equal(userColor(n), userColor(n), n);
+    assert.ok(COLOR_PALETTE.includes(userColor(n)), n);
+  }
+  // The names whose colour actually changed are the ones that hashed to the old pale green.
+  assert.equal(userColor('Eli'), 211);
+  assert.equal(userColor('Dana'), 39, 'unchanged by the swap');
+  assert.equal(userColor('Roy'), 110, 'unchanged by the swap');
 });
