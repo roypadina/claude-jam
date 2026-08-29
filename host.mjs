@@ -28,7 +28,7 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.22C: /kick — the one thing /deny never could do.
   KICK_CODE, resolveKick,
   // v0.20: jam's own tmux server, and the F3 that comes back out.
-  tmuxSocketFor, tmuxSocketArgs, tmuxAttachLine, TMUX_DEFAULT_SOCKET, F3_BIND_ARGS, statusRightText,
+  tmuxSocketFor, tmuxSocketArgs, tmuxAttachLine, TMUX_DEFAULT_SOCKET, DEFAULT_TMUX, F3_BIND_ARGS, statusRightText,
   // v0.19: the durable half of what jam tells claude, as an appended system prompt.
   SYSTEM_PROMPT_FILE, CLAUDE_CAPS_FILE, buildSystemPrompt, systemPromptProbeArgs,
   systemPromptSupported,
@@ -55,7 +55,7 @@ const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 const tmux = (...a) => spawnSync(TMUX, [...tmuxSocketArgs(SOCKET), ...a], { encoding: 'utf8' });
 
 function parseArgs(argv) {
-  const o = { port: 7777, host: '0.0.0.0', tmux: 'jam', extra: [] };
+  const o = { port: 7777, host: '0.0.0.0', tmux: DEFAULT_TMUX, extra: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') { o.extra = argv.slice(i + 1); break; }
@@ -288,7 +288,7 @@ async function resolveTargetSession() {
   }
   // `c`, no answer, or --no-prompt: the pre-v0.18 refusal, with the v0.18 ways out named.
   console.error(`tmux session "${opts.tmux}" is already a jam.\n`
-    + `  reopen your client:  jam host --attach${opts.tmux === 'jam' ? '' : ` --tmux ${opts.tmux}`}\n`
+    + `  reopen your client:  claude-jam host --attach${opts.tmux === DEFAULT_TMUX ? '' : ` --tmux ${opts.tmux}`}\n`
     + `  end it:              jam end ${opts.tmux}\n`
     + `  a second jam:        jam host --tmux ${next || '<name>'}`);
   process.exit(1);
