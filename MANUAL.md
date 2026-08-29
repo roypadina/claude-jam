@@ -106,12 +106,47 @@ ask the host, to send a `/command` request, or (for a permission prompt specific
     everyone, so a guest cannot request them at all and `always` never covers them. (`/exit`
     and `/quit` in a client just leave that client — the session keeps running.)
 
-## Answering your permission prompts (`/answer`)
+## Questions vs permissions — who may answer what (`/answer`)
+
+**This is the one distinction to get right if somebody asks you.** Two very different things put a
+`⚠` in everyone's status row, and jam treats them differently on purpose:
+
+| what is on your screen | who may answer | how |
+| --- | --- | --- |
+| **a question** — your own `AskUserQuestion` picker | **anyone in the jam** | `/answer <n>`, straight through, first answer wins |
+| **a permission** — a tool wanting approval | **the host only** | a guest `/answer <n>` asks; the host allows or denies |
+| **a dialog** — trust-this-folder and friends | the host, at the keyboard | F3; jam types nothing |
+
+Say it plainly when asked: *"anyone here can answer my questions; only the host can approve a
+tool."* A question is a product decision, so it belongs to whoever is in the room. A permission is a
+security grant, so it stays with the person whose machine it is.
+
+Which of the three you are showing is read off your **actual screen**, 2.5 times a second — not
+from an event — so the `⚠` says what is really there and goes away by itself when the prompt does.
+
+### When you ask a question
+
+Everyone sees the question and its numbered options in their client, in **both** views, and any of
+them can answer:
+
+- **`/answer <n>`** — typed straight in, no approval. The room is told: `* Dana answered:
+  2. Spaces`. **First answer wins**; anybody slower is told `already answered by Dana` and nothing
+  of theirs is typed.
+- **`/answer <q> <n>`** when you ask several at once — `q` is which question. Only the one actually
+  on screen can be answered, because moving between them is a Tab keypress, i.e. raw keyboard, and
+  that is the host's. The refusal says which one is up.
+- **The free-text option** (`Type something.`) is the **host's alone**, whatever else is true: it
+  is arbitrary text into the terminal, which is raw keyboard access by another name. The host uses
+  `/answer other <text>`; a guest asking for it goes to the host, who sees the exact text before a
+  character of it is typed.
+- **`--answers host`** at launch puts questions back on the host's approval ladder. The default is
+  `anyone`.
+
+### When you ask for permission
 
 When you ask for permission — a `Bash` command, an edit, a tool — everyone sees the prompt on their
-mirror, and the status row says `⚠ waiting for permission`. Until v0.17 only the host could answer
-it. Now a guest can too, and it is worth knowing exactly how far that goes, because you may be
-asked:
+mirror, and the status row says `⚠ waiting for permission (Bash command)`. Until v0.17 only the
+host could answer it. A guest can now ask to, and it is worth knowing exactly how far that goes:
 
 - **`/answer`** (no number) — the daemon reads the numbered options off your screen and shows them
   to whoever asked, and to nobody else. Nothing is typed; looking is not acting.
@@ -122,19 +157,44 @@ asked:
   everybody is told: `* Dana answered the permission prompt: 2. … (approved by Roy)`.
 - **A guest never gets raw keys.** That is F3, and it is host-only on purpose. The relay can type
   one digit that was on the screen, for one prompt, with the host's yes — and nothing else, ever.
-- Five things all have to be true or nothing is typed: you are actually waiting; the daemon can
-  read numbered options off the screen; the number is one of them; the host approved that number;
-  and the screen still shows the same options when the key goes in. If your screen moved on in
+- Five things all have to be true or nothing is typed: your screen is really showing a prompt; the
+  daemon can read numbered options off it; the number is one of them; the host approved that
+  number; and the screen still says exactly the same thing when the key goes in. If your screen moved on in
   between, the answer is dropped and the guest is told to look again — better a wasted request
   than a digit answering a different question.
 - It refuses rather than guesses. No prompt up, a screen it cannot parse (it wants your own `❯`
   marker or a question line above the options), a number that is not on screen, more than nine
-  options: all refused, and the host can always answer with F3. If somebody says `/answer` "does
+  options: all refused, and the host can always answer with F3. A numbered picker jam cannot
+  recognise is treated as a **permission**, not a question — being wrong that way costs the host
+  one approval; being wrong the other way would hand a guest a tool grant. If somebody says `/answer` "does
   nothing", it is one of those, and the exact reason went to their own client as a `!` line.
 - `always` (`/allow-perm Dana always`) lets that guest answer prompts for the rest of the jam
   without asking. It is the widest grant in the tool — say so plainly if anyone asks — though even
   then it is still one on-screen digit, re-checked against the live screen every time. A one-key
   `a` on the bar never grants it; only the typed command does.
+
+## If a message never reaches you (`/outbox`, `/retry`)
+
+Sometimes a message cannot be confirmed to have landed in your input box — the pane was busy, the
+screen changed shape, a paste arrived short. **The message is never destroyed.** Before anything is
+pasted, jam writes it to `<state>/outbox/<when>-<who>.txt` (0600), and deletes it only once your
+input box is seen to empty, which is what submitting does.
+
+So if somebody says "my message vanished", the true answer is:
+
+- they got `couldn't confirm your message reached claude — kept at <path> · /retry to send it
+  again`, and that path holds their exact text;
+- **`/outbox`** lists what is kept (whose, how long ago, which file);
+- **`/retry`** sends the newest kept one again — theirs, or, for the host, anybody's. It goes back
+  in under the **original sender's** name, not the name of whoever pressed `/retry`;
+- `↑`/`↓` in their own client walk their last 50 submissions, so they can also just recall it;
+- nothing was retyped into your box behind their back: on a failure jam captures the box first and
+  clears it **only if something is actually in it**.
+
+Long messages go in as 2 KB pieces on line boundaries, with Enter only after the last one, and each
+piece is checked against the count in your own `[Pasted text +N lines]` marker — a piece that
+arrives short is a truncation, so the whole message is kept rather than half-sent. A single message
+is capped at 20 000 characters on the wire; over that, ask for a file (`/send`).
 
 ## Bells and notifications
 
@@ -355,7 +415,9 @@ to be told anything.
 `/c <text>` humans-only chat · `/who` participants · `/help` reprint the onboarding block ·
 `/mirror` (or F2) swap views · `/tools [on|off]` tool log / collapse mode · `/quit` leave ·
 `/files` paths this session touched · `/diff [path]` git diff of the working tree ·
-`/answer [n]` answer a permission prompt (host approves) ·
+`/answer [n]` answer a question (anyone) or a permission prompt (host approves) ·
+`/answer <q> <n>` one question of a multi-question form · `/outbox` what was kept ·
+`/retry` send the newest kept message again · `↑`/`↓` recall your own last 50 submissions ·
 `/send <path>` send a file (host: offer one) · `/paste [caption]` the clipboard's image ·
 `/get [name]` take an offered file · `/export` this session's transcript ·
 Shift+Enter, Option+Enter or a trailing `\` for multi-line.
@@ -364,7 +426,7 @@ Host-only: `/accept [name]` · `/deny <name>` · `/token new|set <v>|off` · `/j
 `/invite revoke <Name|id>` · `/kick <name> [revoke]` remove somebody already in ·
 `/allow-cmd [name] [always]` · `/deny-cmd <name>` · `/allow-export [name] [always]` ·
 `/deny-export <name>` · `/accept-file [name] [always]` · `/deny-file <name>` ·
-`/allow-perm [name] [always]` · `/deny-perm <name>` · `/end` end the jam for everybody (asks
+`/allow-perm [name] [always]` · `/deny-perm <name>` · `/answer other <text>` free-text answer · `/end` end the jam for everybody (asks
 `[y/N]` first) ·
 **F3** attach the real TUI (`Ctrl-b d` back) · **a**/**d**/**i** answer the approval bar.
 Any other `/command` is one of yours — see Slash commands above.
@@ -376,6 +438,8 @@ Any other `/command` is one of yours — see Slash commands above.
 `--tmux-socket <name>` which tmux server to build on (default: `claude-jam-<port>`, jam's own;
 `default` puts it on the shared server and leaves F3-out unbound) ·
 `--no-system-prompt` keep the shared-session contract in the SessionStart hook only (see below) ·
+`--answers host|anyone` who may answer a QUESTION outright (default `anyone`; permissions are
+always the host's) ·
 `--resume <uuid>`
 continue an existing conversation · `--replay <N>` how many events of an existing transcript a
 joining guest is replayed (default 300, `0` for none) · `--tmux <name>` a second jam · `--view` browser view (needs
@@ -395,6 +459,22 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
 
 - Guest stuck "waiting for host approval" → the host must `/accept` them (or press `a` on the
   tmux popup if they are attached).
+- **"My message vanished"** → it did not. Look for `couldn't confirm your message reached claude —
+  kept at <path>` in their own client: the exact text is in that file. `/outbox` lists what is
+  kept, `/retry` sends the newest one again (under the original sender's name), and `↑`/`↓` recall
+  their own last 50 submissions. Nothing is ever wiped from the input box unless something was
+  actually in it.
+- **A long message did not go in** → it is pasted as 2 KB pieces, and each is checked against the
+  count in the `[Pasted text +N lines]` marker; a short piece is treated as a truncation and the
+  whole message is kept. Over 20 000 characters a message is refused on the wire anyway — send a
+  file with `/send` instead.
+- **The `⚠` says something different from what is on screen** → it should not any more: the status
+  is read off the pane 2.5 times a second, not from an event. If it is stale, the daemon log's
+  `[prompt] …` lines say what it last classified, and `fixtures/pane/` is what the classifier was
+  built against.
+- **"Why can Dana answer that but not this?"** → a question of claude's is anybody's to answer; a
+  tool permission is the host's. See "Questions vs permissions" above — that distinction is the
+  answer to most `/answer` confusion.
 - "Do you still remember the jam rules after /compact?" → yes: the shared-session contract is an
   appended system prompt (v0.19), not context, so compaction does not touch it. The roster and the
   token block ARE context and are re-sent by the hooks when they change.
