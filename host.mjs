@@ -53,6 +53,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.27: the upload policy, its session quota, and the export toggle that stays separate.
   uploadPolicy, uploadDecision, exportDecision, parseUploadQuota, UPLOAD_QUOTA, UPLOAD_POLICIES,
   quotaText, QUOTA_LINE,
+  // v0.33: the pane jam adopted rather than created — validated here, driven below.
+  validPaneId, SOCKET_NAME_RE,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -76,6 +78,12 @@ const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 // sessions. The escape hatch is `--tmux-socket default`, which is tmux's own shared server
 // (`-L default` resolves to the same socket path as no flag at all).
 const tmux = (...a) => spawnSync(TMUX, [...tmuxSocketArgs(SOCKET), ...a], { encoding: 'utf8' });
+// v0.33: and every call that targets the CLAUDE PANE goes through this one instead. For an
+// ordinary jam the two are the same server. For an ADOPTED jam this one is somebody else's, so
+// the rule for what may go through here is absolute: reads (`capture-pane`, `display-message`,
+// `list-panes`) and typing into the adopted pane (`send-keys`, `paste-buffer`) — never
+// `new-session`, `kill-session`, `set-option`, `bind-key` or anything with `-g`.
+const ptmux = (...a) => spawnSync(TMUX, [...tmuxSocketArgs(paneSocket()), ...a], { encoding: 'utf8' });
 
 function parseArgs(argv) {
   const o = { port: 7777, host: '0.0.0.0', tmux: DEFAULT_TMUX, extra: [] };
@@ -120,6 +128,9 @@ function parseArgs(argv) {
     // v0.18: reopen the client on a jam that is already running, and the three ways to answer
     // the "keep it running or end it?" prompt before it is ever asked.
     else if (a === '--attach') o.attach = true;
+    // v0.33: adoption tells claude, once, that it is now in a shared session. Value-less, so it
+    // needs naming here or the generic branch below eats the next argument as its value.
+    else if (a === '--no-brief') o.brief = false;
     else if (a === '--no-prompt') o.noPrompt = true;
     else if (a === '--end-on-exit') o.endOnExit = true;
     else if (a === '--keep-on-exit') o.keepOnExit = true;
@@ -148,6 +159,46 @@ opts.state ||= stateDir(opts.port);
 // skipped, because on a shared server it would be theirs too).
 let SOCKET = tmuxSocketFor(opts.port, opts.tmuxSocket);
 const ownSocket = () => SOCKET !== TMUX_DEFAULT_SOCKET;
+// v0.33: the pane this daemon drives instead of one it created, and the tmux server that pane
+// lives on. Validated here rather than trusted, because `--adopt-pane` becomes the `-t` of every
+// capture-pane, send-keys and paste-buffer below — `claude-jam adopt` resolves and confirms it,
+// and this is the gate for anybody who calls host.mjs directly.
+if (opts.adoptPane != null || opts.adoptSocket != null) {
+  if (opts.attach) {
+    console.error('--attach reopens your client on a jam that is already running, and --adopt-pane '
+      + 'starts a new one: pick one. `claude-jam sessions` shows which adopted jams are up.');
+    process.exit(2);
+  }
+  if (!validPaneId(opts.adoptPane)) {
+    console.error(`bad --adopt-pane: expected a tmux pane id like %23, got ${JSON.stringify(opts.adoptPane ?? null)}`);
+    process.exit(2);
+  }
+  if (opts.adoptSocket != null && !SOCKET_NAME_RE.test(String(opts.adoptSocket))) {
+    console.error(`bad --adopt-socket: ${JSON.stringify(opts.adoptSocket)} is not a tmux socket name`);
+    process.exit(2);
+  }
+  opts.adoptSocket ||= TMUX_DEFAULT_SOCKET;
+  // Read before `opts.sessionId ||= randomUUID()` below, on purpose: a random id here would tail
+  // a transcript that does not exist and hand every guest a blank room.
+  if (!opts.resume && !opts.sessionId) {
+    console.error('--adopt-pane needs --session-id <uuid>: the daemon has to tail the transcript '
+      + 'of the session already running in that pane. `claude-jam adopt` works it out for you.');
+    process.exit(2);
+  }
+}
+// Adoption mode in one word. jam did not create this pane, so nothing below may end it.
+const ADOPTED = !!opts.adoptPane;
+// The tmux server every call that targets the CLAUDE PANE goes to. The same as jam's own server
+// for an ordinary jam; somebody else's for an adopted one, where jam may only read and type.
+const paneSocket = () => (ADOPTED ? opts.adoptSocket : SOCKET);
+// Read-only, and the only two questions jam ever asks ABOUT the adopted session rather than
+// about its pane: what it is called (for the listing and for the F3 attach line) and whether it
+// is still there (the watchdog — a pane that went away leaves a daemon driving nothing).
+const adoptedSessionName = () => (ADOPTED
+  ? (ptmux('display-message', '-p', '-t', opts.adoptPane, '#{session_name}').stdout || '').trim()
+  : '');
+const adoptedPaneAlive = () => !ADOPTED
+  || ptmux('display-message', '-p', '-t', opts.adoptPane, '#{pane_id}').status === 0;
 // v0.18: two contradictory flags are a startup error, never a guess about which was meant.
 if (exitDecision({ endOnExit: opts.endOnExit, keepOnExit: opts.keepOnExit }) === 'conflict') {
   console.error('--end-on-exit and --keep-on-exit say opposite things: pick one (or neither, and answer the prompt).');
@@ -259,7 +310,10 @@ if (opts.funnel) {
 // so pane and window are the same thing — the mirror, and a ttyd viewer, see only Claude Code.
 // `let`, not `const`, only because v0.18's `[n]ew session` can rename this jam before it is
 // built (see retarget()); once the session exists nothing ever moves it.
-let CLAUDE_PANE = claudeTarget(opts.tmux);
+// v0.33: for an adopted jam this is the pane id `claude-jam adopt` resolved, on somebody else's
+// server — the target shape changes, nothing else does, which is the whole reason adoption is
+// possible at all.
+let CLAUDE_PANE = ADOPTED ? opts.adoptPane : claudeTarget(opts.tmux);
 const BOOT = randomUUID(); // clients drop their id-dedupe set when this changes
 // The live token, `/token new|set|off` away from the startup value. null = knock-only.
 let currentToken = opts.token;
@@ -323,8 +377,22 @@ async function retarget(name) {
   opts.state = stateDir(port);
   // The socket is named per port, so it moves with it — unless the flag pinned one by hand.
   SOCKET = tmuxSocketFor(port, opts.tmuxSocket);
-  CLAUDE_PANE = claudeTarget(name);
+  // v0.33: an adopted jam's pane belongs to somebody else and does not move with jam's own
+  // session name. Only the daemon's own session is being renamed here.
+  if (!ADOPTED) CLAUDE_PANE = claudeTarget(name);
   console.log(`starting a second jam as "${name}" on :${port} (view :${opts.viewPort})`);
+}
+
+// v0.33: an adopted jam still needs a tmux session of jam's OWN to hold the daemon — that is
+// what keeps `claude-jam end` pointed at something jam created. It is never the thing the human
+// is looking at, so there is nothing to ask them about: take the first free name and the first
+// free port pair, silently. (`claude-jam adopt` is very often run by claude itself, from the Bash
+// tool, where there is no terminal to answer a prompt on at all.)
+async function retargetForAdopt() {
+  const next = autoSessionName(opts.tmux, takenNames(opts.tmux));
+  if (!next) { console.error('every name from that base is taken — pass --tmux <name>'); process.exit(1); }
+  if (next === opts.tmux && !await portBusy(opts.port)) return;
+  await retarget(next);
 }
 
 // v0.18-5: `claude-jam host` when the name it wants is taken, and `claude-jam host --attach`. A jam of jam's
@@ -369,13 +437,20 @@ async function resolveTargetSession() {
 }
 
 async function launch() {
+  // v0.33: an adopted jam never contends for a name a human chose — the tmux session it makes is
+  // the daemon's own and nothing looks at it, so it takes the first free one rather than asking.
+  if (ADOPTED) await retargetForAdopt();
   const { attach } = await resolveTargetSession();
   if (attach) return attachHostClient(attach);
   if (opts.resume) console.log(`resuming session ${opts.resume}`);
   secureDir(opts.state);
   writeRoster([]);
   const hooks = path.join(HERE, 'hooks.sh');
-  fs.writeFileSync(path.join(opts.state, 'settings.json'), JSON.stringify(buildSettings(hooks), null, 2));
+  // v0.33: an adopted claude was started by somebody else and is already running, so it can
+  // never be given these hooks — `--settings` is read once, at startup. Turn-end and
+  // permission-wait come from the v0.31 pane classifier instead, which is already the
+  // authoritative source; the file is simply not written, so nothing implies otherwise.
+  if (!ADOPTED) fs.writeFileSync(path.join(opts.state, 'settings.json'), JSON.stringify(buildSettings(hooks), null, 2));
 
   const self = new URL(import.meta.url).pathname;
   const common = ['--port', String(opts.port), '--host', opts.host, '--name', opts.name,
@@ -410,6 +485,10 @@ async function launch() {
     '--jam-name', opts.jamName,
     ...(opts.announce ? [] : ['--no-announce']),
     ...(opts.configDir ? ['--config-dir', opts.configDir] : []), // daemon globs that profile's transcripts too
+    // v0.33: the daemon drives a pane on a server jam does not own, and is told exactly which.
+    ...(ADOPTED ? ['--adopt-pane', opts.adoptPane, '--adopt-socket', opts.adoptSocket] : []),
+    ...(opts.brief === false ? ['--no-brief'] : []),
+    ...(opts.briefUpdates ? ['--brief-updates', String(opts.briefUpdates)] : []),
     ...(opts.resume ? ['--resume', opts.resume] : [])]; // daemon needs this to skip pre-existing JSONL history
 
   // First window: the daemon (its own window, not a pane — its log is for when something
@@ -425,38 +504,52 @@ async function launch() {
   claimSession();
   waitForHealth();
 
-  // JAM_NODE: hooks.sh must not depend on whatever PATH tmux/claude inherited.
-  const env = ['env', `JAM_STATE=${opts.state}`, `JAM_PORT=${opts.port}`, `JAM_HOOK_SECRET=${opts.hookSecret}`,
-    `JAM_HOST_NAME=${opts.name}`, `JAM_NODE=${process.execPath}`,
-    // Picks the claude account/profile for this window only; nothing global changes.
-    ...(opts.configDir ? [`CLAUDE_CONFIG_DIR=${opts.configDir}`] : [])];
-  console.log(`claude binary: ${opts.claude}`);
-  if (opts.configDir) console.log(`claude profile: ${opts.configDir}`);
-  // v0.19: written before the window exists, because the flag is read at claude's startup and
-  // never again. null when it is off, or when this claude cannot take the flag.
-  const sysPrompt = writeSystemPrompt();
-  must(tmux('new-window', '-d', '-t', opts.tmux, '-c', opts.cwd, '-n', 'claude',
-    ...env, opts.claude,
-    ...(opts.resume ? ['--resume', opts.resume] : ['--session-id', opts.sessionId]),
-    ...(sysPrompt ? ['--append-system-prompt-file', sysPrompt] : []),
-    '--settings', path.join(opts.state, 'settings.json'), ...opts.extra));
-  // v0.9 addendum: a client bigger than the window (a browser viewer, or anyone who
-  // attaches) gets tmux's `·` padding around the TUI, which reads as a broken screen.
-  // Window option on OUR window only — the host's global config is never written.
-  tmux('set-option', '-w', '-t', CLAUDE_PANE, 'fill-character', ' ');
-  // v0.20-2: F3 goes IN (the client attaches) so F3 has to come back OUT. Key tables are
-  // server-global, which is exactly why jam has a server of its own — and why the one case where
-  // it does not (`--tmux-socket default`) skips this rather than rebinding the user's F3.
-  if (ownSocket()) {
-    const bind = tmux(...F3_BIND_ARGS);
-    if (bind.status !== 0) console.error(`could not bind F3 to detach-client: ${(bind.stderr || '').trim()}`);
+  if (ADOPTED) {
+    // v0.33: there is nothing to start. claude is already running in that pane, it already has
+    // whatever system prompt it was given, and every tmux OPTION the branch below sets belongs to
+    // a session jam did not create — so none of them is set here, not even saved-and-restored.
+    // The one thing jam still owes this session is being TOLD it is shared, which the daemon does
+    // by injecting a briefing once it is up (--no-brief skips it).
+    console.log(`\nclaude-jam up. session ${opts.sessionId}\n`
+      + `  ADOPTED pane ${opts.adoptPane} on tmux socket ${opts.adoptSocket} — claude-jam did NOT start it\n`
+      + `        \`${tmuxAttachLine(opts.adoptSocket, opts.adoptPane, opts.adoptPane)}\` for the raw TUI\n`
+      + `  daemon: tmux session ${opts.tmux} on socket ${SOCKET} (claude-jam's own — this is what \`claude-jam end\` ends)\n`
+      + '  F3 is NOT bound to detach-client: that key table belongs to your tmux server — Ctrl-b d comes back\n'
+      + `  ending this jam stops the daemon and leaves the pane, the session and claude exactly as they are`);
   } else {
-    console.log('--tmux-socket default: F3 is NOT bound to detach-client (that table is your server\'s) — Ctrl-b d comes back');
+    // JAM_NODE: hooks.sh must not depend on whatever PATH tmux/claude inherited.
+    const env = ['env', `JAM_STATE=${opts.state}`, `JAM_PORT=${opts.port}`, `JAM_HOOK_SECRET=${opts.hookSecret}`,
+      `JAM_HOST_NAME=${opts.name}`, `JAM_NODE=${process.execPath}`,
+      // Picks the claude account/profile for this window only; nothing global changes.
+      ...(opts.configDir ? [`CLAUDE_CONFIG_DIR=${opts.configDir}`] : [])];
+    console.log(`claude binary: ${opts.claude}`);
+    if (opts.configDir) console.log(`claude profile: ${opts.configDir}`);
+    // v0.19: written before the window exists, because the flag is read at claude's startup and
+    // never again. null when it is off, or when this claude cannot take the flag.
+    const sysPrompt = writeSystemPrompt();
+    must(tmux('new-window', '-d', '-t', opts.tmux, '-c', opts.cwd, '-n', 'claude',
+      ...env, opts.claude,
+      ...(opts.resume ? ['--resume', opts.resume] : ['--session-id', opts.sessionId]),
+      ...(sysPrompt ? ['--append-system-prompt-file', sysPrompt] : []),
+      '--settings', path.join(opts.state, 'settings.json'), ...opts.extra));
+    // v0.9 addendum: a client bigger than the window (a browser viewer, or anyone who
+    // attaches) gets tmux's `·` padding around the TUI, which reads as a broken screen.
+    // Window option on OUR window only — the host's global config is never written.
+    ptmux('set-option', '-w', '-t', CLAUDE_PANE, 'fill-character', ' ');
+    // v0.20-2: F3 goes IN (the client attaches) so F3 has to come back OUT. Key tables are
+    // server-global, which is exactly why jam has a server of its own — and why the one case where
+    // it does not (`--tmux-socket default`) skips this rather than rebinding the user's F3.
+    if (ownSocket()) {
+      const bind = tmux(...F3_BIND_ARGS);
+      if (bind.status !== 0) console.error(`could not bind F3 to detach-client: ${(bind.stderr || '').trim()}`);
+    } else {
+      console.log('--tmux-socket default: F3 is NOT bound to detach-client (that table is your server\'s) — Ctrl-b d comes back');
+    }
+    console.log(`\nclaude-jam up. session ${opts.sessionId}\n` +
+      `  tmux: ${opts.tmux} on socket ${SOCKET} (windows: daemon, claude) — detached;\n` +
+      `        \`${tmuxAttachLine(SOCKET, opts.tmux, CLAUDE_PANE)}\` for the raw TUI`);
   }
   if (opts.retiredLayout) console.log(`${opts.retiredLayout} is retired in v0.14 — the host uses the same client as everyone (ignored)`);
-  console.log(`\nclaude-jam up. session ${opts.sessionId}\n` +
-    `  tmux: ${opts.tmux} on socket ${SOCKET} (windows: daemon, claude) — detached;\n` +
-    `        \`${tmuxAttachLine(SOCKET, opts.tmux, CLAUDE_PANE)}\` for the raw TUI`);
   // The tunnel dials out from the daemon process (a separate node process from this one), so
   // it has not resolved anything yet by the time this print runs — the daemon window logs the
   // URLs a few seconds later, once cloudflared reports them.
@@ -525,6 +618,12 @@ function claimSession() {
     sessionId: opts.sessionId, createdAt: Date.now(), pid, state: opts.state,
     socket: SOCKET, // v0.20: which tmux server to look for this session on
     jamName: opts.jamName, // v0.23: the display name, so `claude-jam sessions` need not ask a daemon
+    // v0.33: the pane this jam ADOPTED, if any — recorded on the STATE DIR and nowhere else. It
+    // is deliberately not a tmux option on the adopted session: jam does not write to a session
+    // it did not create, and marking somebody's session as owned is exactly the claim it must
+    // never make. `claude-jam sessions` reads it here to say `adopted`, and `claude-jam adopt`
+    // reads it to refuse sharing one pane twice.
+    adopt: ADOPTED ? { pane: opts.adoptPane, socket: opts.adoptSocket, session: adoptedSessionName() } : null,
     // How `claude-jam end` authenticates its POST /end: loopback plus this, the same gate the knock
     // popup already uses. It lives in the 0700 state dir beside token.json.
     secret: opts.hookSecret,
@@ -597,7 +696,10 @@ async function runHostClient(info) {
     }
     // `k`, no answer at all, --keep-on-exit, --no-prompt, or a stdin that is not a terminal.
     console.log(`\nclient closed — the jam is still running.\n`
-      + `${reattachLines({ tmux: info.tmux, port: info.port, clientCmd: opts.clientCmd, name: opts.name, token, socket: info.socket || SOCKET }).map((l) => `  ${l}`).join('\n')}\n`);
+      + `${reattachLines({ tmux: info.tmux, port: info.port, clientCmd: opts.clientCmd, name: opts.name, token,
+        socket: info.socket || SOCKET,
+        // v0.33: the raw TUI of an adopted jam is somebody else's pane on their own server.
+        adopt: info.adopt || null }).map((l) => `  ${l}`).join('\n')}\n`);
     return;
   }
 }
@@ -1295,13 +1397,13 @@ let paneSize = { w: 0, h: 0, at: 0 };
 function paneDims(rows) {
   const now = Date.now();
   if (paneSize.at && now - paneSize.at < SIZE_TTL) return paneSize;
-  const out = (tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width} #{pane_height}').stdout || '').trim().split(/\s+/);
+  const out = (ptmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width} #{pane_height}').stdout || '').trim().split(/\s+/);
   paneSize = { w: Number(out[0]) || 80, h: Number(out[1]) || rows.length, at: now };
   return paneSize;
 }
 
 function captureFrame() {
-  const r = tmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE);
+  const r = ptmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE);
   if (r.status !== 0) return null;
   return (r.stdout || '').replace(/\n$/, '').split('\n').map(sanitizeFrameRow);
 }
@@ -1345,7 +1447,20 @@ const trusted = (me) => !!(me && me.host && me.loopback);
 // matches, so a resize storm costs one tmux query. `resize-window` pins the window to a
 // manual size (documented ceiling: a later `tmux attach` no longer reshapes it).
 let windowSize = { w: 0, h: 0 };
+let resizeSaid = false;
 function resizeClaudeWindow(w, h) {
+  // v0.33: an ADOPTED pane is somebody's own window, usually with a human looking at it. Reshaping
+  // it to fit a guest's terminal would move THEIR screen around, so jam does not — the mirror
+  // simply shows whatever size that pane is. Documented ceiling: a guest with a much smaller
+  // terminal sees the pane letterboxed rather than reflowed.
+  if (ADOPTED) {
+    if (!resizeSaid) {
+      resizeSaid = true;
+      console.log('[adopted] not resizing the pane: it is not claude-jam\'s window, and somebody is '
+        + 'probably looking at it. The mirror shows it at whatever size it is.');
+    }
+    return;
+  }
   const want = mirrorSize(w, h); // the client sends its terminal size; mirrorSize takes the chrome off
   if (want.w === windowSize.w && want.h === windowSize.h) return;
   windowSize = want;
@@ -1353,7 +1468,7 @@ function resizeClaudeWindow(w, h) {
 }
 
 function applyWindowSize(why) {
-  const r = tmux('resize-window', '-t', CLAUDE_PANE, '-x', String(windowSize.w), '-y', String(windowSize.h));
+  const r = ptmux('resize-window', '-t', CLAUDE_PANE, '-x', String(windowSize.w), '-y', String(windowSize.h));
   if (r.status !== 0) return console.log(`resize-window failed: ${(r.stderr || '').trim()}`);
   console.log(`[${why}] claude window → ${windowSize.w}x${windowSize.h}`);
   lastFrame = null; // the next capture is a different shape; send it even if the text matches
@@ -1399,7 +1514,7 @@ let screenCache = null; // {key, at, rows}
 // jam two minutes old has almost no scrollback, and saying otherwise would be a lie the client
 // then repeats to a guest.
 function paneHistorySize() {
-  const out = (tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{history_size}').stdout || '').trim();
+  const out = (ptmux('display-message', '-p', '-t', CLAUDE_PANE, '#{history_size}').stdout || '').trim();
   const n = Math.floor(Number(out));
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
@@ -1412,7 +1527,7 @@ function onScreenHistory(ws, m) {
     rows = screenCache.rows;
   } else {
     // The same `-e` the live frame uses, so a scrolled-back row carries the colours it had.
-    const r = tmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE,
+    const r = ptmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE,
       '-S', String(range.start), '-E', String(range.end));
     if (r.status !== 0) {
       return sendError(ws, `could not read the pane's history: ${(r.stderr || '').trim() || 'capture-pane failed'}`);
@@ -1487,7 +1602,10 @@ let statusRightShown = null; // the '⚑ N waiting' we last wrote, null = the ho
 let savedStatusRight; // undefined = never read; null = was inherited, so restore with -u
 
 function saveStatusRight() {
-  if (opts.noPopup) return;
+  // v0.33: an adopted jam sets NO tmux option, on either server. Jam's own session here holds
+  // only the daemon's log and nobody attaches to it, so there is no status line worth writing —
+  // and the adopted session's status line is the human's, not jam's.
+  if (opts.noPopup || ADOPTED) return;
   // Without -A this prints nothing unless status-right is set on the SESSION, which is
   // exactly the difference between "put the old value back" and "go back to inheriting".
   const set = tmux('show-options', '-t', opts.tmux, 'status-right');
@@ -1505,7 +1623,7 @@ function restoreStatusRight() {
 }
 
 function refreshStatusRight() {
-  if (opts.noPopup) return;
+  if (opts.noPopup || ADOPTED) return; // v0.33: see saveStatusRight — an adopted jam writes no option
   // v0.20-3: `⚑ N waiting` still wins; otherwise the session says how to get back to the client.
   // Only when F3 is actually bound to detach-client — on the user's own server it is not.
   const want = statusRightText(pending.size, { home: ownSocket() });
@@ -1616,6 +1734,14 @@ function daemon() {
   loadInvites();
   http.listen(opts.port, opts.host, () => {
     console.log(`claude-jam daemon on ${opts.host}:${opts.port}, session ${opts.sessionId}`);
+    if (ADOPTED) {
+      console.log(`ADOPTED pane ${opts.adoptPane} on tmux socket ${opts.adoptSocket}`
+        + ` (session "${adoptedSessionName() || '?'}") — claude-jam did not start it and will not end it.\n`
+        + '  On that server this daemon only reads (capture-pane, display-message) and types into '
+        + 'that one pane. No option is set, no key is bound, no session is created or killed.\n'
+        + '  No Stop/Notification hooks either — a running claude cannot be given them — so '
+        + 'turn-end and permission-wait come from the pane classifier.');
+    }
     writeTokenFile();
     // Printed by the launcher too, but that copy scrolls away under the host's client; this
     // is the one the host can still read in the daemon window. The globs come with it: a
@@ -1696,6 +1822,12 @@ function finishEnd() {
   removeState = true;
   const killed = killOwned(opts.tmux, SOCKET, v);
   console.log(killed.ok ? `[end] killed tmux session ${opts.tmux}` : `[end] ${killed.why}`);
+  // v0.33: said out loud, because the whole promise of an adopted jam is that ending it is not
+  // the end of anything the human was doing. The session above is claude-jam's own daemon holder.
+  if (ADOPTED) {
+    console.log(`[end] adopted pane ${opts.adoptPane} on socket ${opts.adoptSocket} was NOT touched — `
+      + 'the pane, its tmux session and claude are exactly as they were');
+  }
   const gone = removeStateDir(opts.state);
   if (!gone.ok) console.log(`[end] ${gone.why}`);
   process.exit(0);
@@ -1709,6 +1841,13 @@ function finishEnd() {
 function startSessionWatch() {
   const timer = setInterval(() => {
     if (ending) return;
+    // v0.33: the OTHER way an adopted jam runs out of anything to drive — the human closed the
+    // pane, or quit claude. There is nothing to kill (that pane was never jam's), so this is the
+    // ordinary end: tell everyone, stop the children, go. Read-only check, on their server.
+    if (!adoptedPaneAlive()) {
+      console.log(`[watchdog] adopted pane ${opts.adoptPane} is gone — nothing left to drive, exiting`);
+      return endSession('the adopted pane went away');
+    }
     const mine = readSession();
     if (!mine || mine.tmux !== opts.tmux) return; // not a launcher-built jam: nothing to watch
     if (hasSession(opts.tmux, SOCKET)) return;
@@ -1892,7 +2031,12 @@ function admitSocket(ws, name, host, loopback = false, via = 'token') {
       // v0.23: the jam's name goes to EVERYONE, host and guest alike. It is cosmetic — it says
       // which room you walked into — so unlike the join lines it is not the host's secret.
       id: opts.sessionId, cwd: opts.cwd, hostName: opts.name, boot: BOOT, jamName: opts.jamName,
+      // v0.33: everyone is told this jam was ADOPTED — it changes what the client may promise
+      // (no Stop/Notification hooks, so turn-end comes off the pane) and what ending it does.
+      adopted: ADOPTED,
       ...(host ? { ...joinInfo(), tmux: opts.tmux, tmuxSocket: SOCKET } : {}),
+      // The host's F3 goes to the pane jam is actually driving, on the server it lives on.
+      ...(host && ADOPTED ? { tmuxTarget: opts.adoptPane, tmuxSocket: opts.adoptSocket } : {}),
     },
   });
   rosterChanged({ joined: name, via });
@@ -2572,11 +2716,11 @@ async function typeSlash(text) {
     if (/❯|^> ?$/m.test(capture().split('\n').slice(-5).join('\n'))) break;
     await sleep(250);
   }
-  tmux('send-keys', '-t', CLAUDE_PANE, '-l', text);
+  ptmux('send-keys', '-t', CLAUDE_PANE, '-l', text);
   // The command palette filters as you type and Enter picks the highlighted row, so give it
   // a beat to settle on the exact match before submitting.
   await sleep(300);
-  tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+  ptmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
 }
 
 // ------------------------ v0.17 P2 + v0.31: answering what claude is showing ----
@@ -2687,11 +2831,11 @@ function runAnswer(rec, always = false) {
 // picker on its own. The Enter is sent only if numbered options are STILL up afterwards, so a
 // picker that needs it gets it and a prompt that already closed never receives a stray submit.
 async function typePermChoice(n) {
-  for (const args of sendKeyArgs(String(n))) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
+  for (const args of sendKeyArgs(String(n))) ptmux('send-keys', '-t', CLAUDE_PANE, ...args);
   bumpActivity(); // the answer wants its echo on the next 40 ms frame
   await sleep(300);
   if (parsePermOptions(capture()).length) {
-    tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+    ptmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
     console.log(`[answer] typed ${n} and Enter (the options were still up)`);
   } else {
     console.log(`[answer] typed ${n} — the prompt took the digit on its own`);
@@ -2704,12 +2848,12 @@ async function typePermChoice(n) {
 // in as one capped run and Enter submits it. Host-only by construction — onPerm never reaches
 // here for a guest without the host having seen the exact text first.
 async function typeFreeText(n, text) {
-  for (const args of sendKeyArgs(String(n))) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
+  for (const args of sendKeyArgs(String(n))) ptmux('send-keys', '-t', CLAUDE_PANE, ...args);
   bumpActivity();
   await sleep(400);
-  for (const args of sendKeyArgs(String(text).slice(0, ANSWER_TEXT_MAX))) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
+  for (const args of sendKeyArgs(String(text).slice(0, ANSWER_TEXT_MAX))) ptmux('send-keys', '-t', CLAUDE_PANE, ...args);
   await sleep(200);
-  tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+  ptmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
   console.log(`[answer] typed ${n} and ${String(text).length} characters of free text`);
   bumpActivity();
   pumpPrompt();
@@ -2968,7 +3112,7 @@ function typeKeys(b64) {
   if (typeof b64 !== 'string' || !b64 || b64.length > KEY_FRAME_MAX) return;
   let text;
   try { text = Buffer.from(b64, 'base64').toString('utf8'); } catch { return; }
-  for (const args of sendKeyArgs(text)) tmux('send-keys', '-t', CLAUDE_PANE, ...args);
+  for (const args of sendKeyArgs(text)) ptmux('send-keys', '-t', CLAUDE_PANE, ...args);
   bumpActivity(); // a keystroke wants its echo on the next 40 ms frame, not the next 250 ms one
 }
 
@@ -2990,7 +3134,7 @@ function enqueueInject(name, text, ws) {
   });
 }
 
-const capture = () => tmux('capture-pane', '-p', '-t', CLAUDE_PANE).stdout || '';
+const capture = () => ptmux('capture-pane', '-p', '-t', CLAUDE_PANE).stdout || '';
 
 // A fresh cwd makes claude ask "Is this a project you created or one you trust?".
 // Nobody is watching this pane, so answer it — and note the highlighted default is
@@ -3001,7 +3145,11 @@ const capture = () => tmux('capture-pane', '-p', '-t', CLAUDE_PANE).stdout || ''
 // next message's Enter — i.e. "No, exit". So poll until the input prompt is actually up.
 // Once it is, never scan again: capture() is the whole pane, so later on an ordinary
 // message containing "trust this folder" would send stray Downs into a live TUI.
-let ready = false;
+// v0.33: an ADOPTED claude has been running for a while and is long past the trust dialog, so
+// this scan starts satisfied. That matters as safety, not as speed: the loop below presses `Down`
+// and `Enter` when it sees dialog text, and a live session where a human is mid-conversation is
+// the last place to send speculative keys.
+let ready = ADOPTED;
 async function ensureReady() {
   if (ready) return;
   const deadline = Date.now() + 30000;
@@ -3010,10 +3158,10 @@ async function ensureReady() {
     if (lines.some((l) => /trust this folder/i.test(l))) {
       const cursor = lines.find((l) => l.trim().startsWith('❯')) || '';
       if (/trust this folder/i.test(cursor)) {
-        tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+        ptmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
         await sleep(2000); // let the dialog go away before looking again
       } else {
-        tmux('send-keys', '-t', CLAUDE_PANE, 'Down');
+        ptmux('send-keys', '-t', CLAUDE_PANE, 'Down');
         await sleep(300);
       }
       continue;
@@ -3073,8 +3221,8 @@ async function pasteChunk(chunk, probe, lines = null) {
   const file = path.join(opts.state, 'inject.txt');
   try {
     secureWrite(file, chunk); // never argv, never a shell
-    tmux('load-buffer', '-b', buf, file);
-    tmux('paste-buffer', '-b', buf, '-d', '-p', '-t', CLAUDE_PANE);
+    ptmux('load-buffer', '-b', buf, file);
+    ptmux('paste-buffer', '-b', buf, '-d', '-p', '-t', CLAUDE_PANE);
     for (let i = 0; i < PASTE_POLLS; i++) {
       const how = injectLanded({ probe, before, after: capture(), lines });
       if (how) return how;
@@ -3083,7 +3231,7 @@ async function pasteChunk(chunk, probe, lines = null) {
     return null;
   } finally {
     fs.rmSync(file, { force: true });
-    tmux('delete-buffer', '-b', buf);
+    ptmux('delete-buffer', '-b', buf);
   }
 }
 
@@ -3093,7 +3241,7 @@ async function pasteChunk(chunk, probe, lines = null) {
 function clearBox() {
   for (let i = 0; i < CLEAR_TRIES; i++) {
     if (!inputBoxText(capture())) return true;
-    tmux('send-keys', '-t', CLAUDE_PANE, 'C-u');
+    ptmux('send-keys', '-t', CLAUDE_PANE, 'C-u');
   }
   return !inputBoxText(capture());
 }
@@ -3116,7 +3264,7 @@ async function inject(name, text, ws = null, kept = null) {
   // ponytail: probe is the message's own first chars, so two identical consecutive messages can
   // match a stale echo. The placeholder and diff rules have the same ceiling; the outbox is what
   // makes being wrong survivable.
-  const width = Number(tmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width}').stdout) || 80;
+  const width = Number(ptmux('display-message', '-p', '-t', CLAUDE_PANE, '#{pane_width}').stdout) || 80;
   const chunks = chunkPayload(payload);
   let sent = 0;
   for (let c = 0; c < chunks.length; c++) {
@@ -3142,7 +3290,7 @@ async function inject(name, text, ws = null, kept = null) {
     if (chunks.length > 1) console.log(`[inject] chunk ${c + 1}/${chunks.length} landed (${how})`);
   }
   // Enter, once, after the last chunk.
-  tmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
+  ptmux('send-keys', '-t', CLAUDE_PANE, 'C-m');
   // A verified send prunes the outbox — and "verified" means the box emptied, which is what
   // submitting does. If it did not, the payload stays kept and the sender is told.
   for (let i = 0; i < SUBMIT_POLLS; i++) {
@@ -3255,7 +3403,10 @@ function tailJsonl() {
     // On resume the file already has history; start at its current size so old turns
     // are not re-broadcast. ponytail: friends who join after this point still see none
     // of the pre-resume history; add a `--replay N` flag later if that's wanted.
-    if (opts.resume) { try { offset = fs.statSync(jsonlPath).size; } catch { /* file just vanished; keep offset 0 */ } }
+    // v0.33: an ADOPTED session is the same case and then some — its transcript may be hours
+    // long. seedHistory has normally already set the offset; this is the `--replay 0` path,
+    // where it returns before reading anything.
+    if (opts.resume || ADOPTED) { try { offset = fs.statSync(jsonlPath).size; } catch { /* file just vanished; keep offset 0 */ } }
   }
   let size;
   try { size = fs.statSync(jsonlPath).size; } catch { return false; }

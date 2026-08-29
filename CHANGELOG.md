@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+### v0.33 — adopt a running session (share the jam you are already in)
+
+Sharing used to mean `claude-jam host --resume <id>`, which RESTARTS the conversation in a pane of
+claude-jam's own. `claude-jam adopt` shares the claude that is **already running**, in the tmux
+pane it is already in, without restarting it.
+
+It works because claude-jam has only ever driven claude through `capture-pane` out and
+`paste-buffer`/`send-keys` in, against a tmux target — and nothing in that required claude-jam to
+have created the target.
+
+- **`claude-jam adopt`** — run it from inside the session (claude can run it from the Bash tool:
+  it inherits `$TMUX_PANE`), or from another terminal with `--pane %23 [--socket <name>]`. It
+  takes any `claude-jam host` flag as well, so `claude-jam adopt --tunnel --token …` works.
+- **It resolves and SHOWS before it shares**: the pane and the tmux server it is on, what is
+  running in it, the directory, the session id (newest live transcript for that cwd) — and that
+  session's **first message and last answer**, because the failure this guards against is sharing
+  the wrong conversation with the room. `--yes` skips the question for scripting and refuses
+  outright when the transcript it picked is stale.
+- **Adoption works on your OWN default tmux server**, which is the first time claude-jam has
+  pointed tmux at a server it does not own. The rule is narrow and total: on that server the
+  daemon only READS (`capture-pane`, `display-message`, `list-panes`) and TYPES INTO THE ADOPTED
+  PANE. No `new-session`, no `kill-session`, no `set-option`, no `-g` anything, no key binding.
+- **claude-jam never ends a session it did not start.** The daemon still runs in a tmux session of
+  claude-jam's own, so the v0.18 ownership pair is unchanged: `claude-jam end` stops the daemon and
+  its children (ttyd, the relay, the mDNS announcement) and leaves the pane, the tmux session and
+  claude exactly as they were. `claude-jam sessions` marks the row `adopted`; `claude-jam clean`
+  never touches it. The ownership marker is written on the state dir only — never as a tmux option
+  on somebody else's session.
+- **Not inside tmux** — a bare terminal, an IDE terminal, a cmux pane — is a refusal with the
+  whole alternative and the id already in it:
+  `claude-jam host --resume <session-id> --cwd <dir>`.
+- **claude is told it is now shared.** At adoption one message is injected, prefixed
+  `[claude-jam:tool]:` so it is visibly from the tool rather than from a participant: the
+  shared-session protocol, the two standing rules, the condensed digest, who is here, and where
+  `MANUAL.md` is. `--no-brief` skips it (and the client then says claude has not been told). It is
+  re-sent after a `/compact` or `/clear`, and on a meaningful roster change while the session is
+  idle — at most one every ten minutes; `--brief-updates off` disables that.
+- **A `/jam` plugin** (`integrations/claude-plugin/`) maps `/jam`, `/jam invite <Name>` and
+  `/jam end` to the CLI. Installing it is entirely optional — `claude-jam adopt` from the Bash
+  tool works without it.
+
+**Two ceilings, inherent and not worked around.** A running claude cannot be given new hooks
+(`--settings` is read once at startup), so on an adopted session **turn-end and permission-wait
+come from the v0.31 pane classifier**, which is the authoritative source anyway. And the adopted
+pane is **not resized** to fit a guest's terminal — it is somebody's own window with a human
+probably looking at it — so a guest on a much smaller terminal sees it letterboxed.
+
 ## 0.20.0
 
 ### v0.28 — real scrollback ("I can only see very little")

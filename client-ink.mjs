@@ -38,7 +38,8 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   // the offer that follows a kick.
   INVITE_CONNECT_MS, inviteMintedLines, kickOffer,
   // v0.20: jam's tmux lives on its own socket, so F3's attach has to name it.
-  tmuxSocketArgs, TMUX_DEFAULT_SOCKET, tmuxAttachLine,
+  // v0.33: and an adopted jam names a pane id instead of a window of its own.
+  tmuxSocketArgs, TMUX_DEFAULT_SOCKET, tmuxAttachLine, attachTarget,
   // v0.31: the status row and the question block are both drawn from the daemon's classification
   // of the live pane, so a client can never show a prompt that is no longer on screen.
   promptStatusText, questionBlock,
@@ -930,6 +931,9 @@ function sendKeys(text) {
 let f3Hint = false;
 function onF3() {
   if (store.attached) return; // stdin belongs to tmux; this cannot actually fire
+  // v0.33: an ADOPTED jam sends the pane id it is driving, because `<session>:claude` is jam's
+  // own window naming and an adopted pane has whatever name its owner gave it.
+  if (store.session?.tmuxTarget) return attachTmux(store.session.tmuxTarget);
   if (store.session?.tmux) return attachTmux(store.session.tmux);
   if (!IS_HOST) {
     if (f3Hint) return;
@@ -973,7 +977,8 @@ function runAttach(session) {
     // window 0, the daemon's log, which is not what F3 is for.
     // v0.20: `-L <socket>` — jam's own tmux server, named in the welcome. A daemon that predates
     // v0.20 sends none, and then it is the shared server, which is where it used to be.
-    const child = spawn(TMUX, [...tmuxSocketArgs(SOCKET), 'attach', '-t', claudeTarget(session)],
+    // v0.33: an adopted jam already sent a pane id, and a pane id IS the target.
+    const child = spawn(TMUX, [...tmuxSocketArgs(SOCKET), 'attach', '-t', attachTarget(session)],
       { stdio: 'inherit', env });
     let over = false;
     const finish = (problem) => {
@@ -992,8 +997,8 @@ function runAttach(session) {
       if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'mirror', on: store.mirror }));
       done();
     };
-    child.on('error', (e) => finish(`could not run ${tmuxAttachLine(SOCKET, session, claudeTarget(session))}: ${e.message}`));
-    child.on('exit', (code) => finish(code ? `${tmuxAttachLine(SOCKET, session, claudeTarget(session))} exited ${code}` : null));
+    child.on('error', (e) => finish(`could not run ${tmuxAttachLine(SOCKET, session, attachTarget(session))}: ${e.message}`));
+    child.on('exit', (code) => finish(code ? `${tmuxAttachLine(SOCKET, session, attachTarget(session))} exited ${code}` : null));
   });
 }
 

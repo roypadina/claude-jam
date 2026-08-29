@@ -63,6 +63,19 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   by the 0.20.0 release gate (smoke-perm P3), not by any unit test. Prove: a lint or test that
   every client call site resolves (no undefined identifiers) — a `node --check` passes this file,
   so it needs more than syntax. Owed to the campaign.
+- 2026-08-29 · v0.33 adopt batch: `smoke-ink`, `smoke-xfer`, `smoke.mjs`, `smoke-popup`,
+  `smoke-slash`, `smoke-perm`, `smoke-knock`, `smoke-transport`, `smoke-replay`, `smoke-invite`,
+  `smoke-answer`, `smoke-discover`, `smoke-nudge`, `smoke-scroll` not re-run. Every tmux call that
+  targets the claude pane moved from `tmux()` to `ptmux()`, which is the SAME socket for an
+  ordinary jam — so the non-adopted path is unchanged by construction — and `smoke-lifecycle`
+  (which builds real jams and drives the launcher's prompts) plus the new `smoke-adopt` cover the
+  paths that did change. Prove: full sweep at the next release gate.
+- 2026-08-29 · Adoption has never been run against a REAL claude in a REAL pane on the default
+  tmux socket — `smoke-adopt` uses a shell stub for the pane, and the one default-socket case it
+  runs uses a session the smoke created itself. So the injected briefing has never been seen to
+  land in a live conversation, and the pane classifier has never been seen to re-brief after a
+  real `/compact`. Prove: one live adoption in the campaign (Roy's own session, `--no-brief` off),
+  looking at the pane afterwards.
 - 2026-08-29 · `--funnel` carries a known UPSTREAM risk, not merely an unverified path:
   tailscale/tailscale#18827 (filed 2026-02-27, open) reports WebSockets through `tailscale
   serve`'s HTTP reverse proxy — the same layer Funnel rides — closing every 10–40 s with code
