@@ -31,7 +31,7 @@ const flag = (n) => { const i = argv.indexOf(`--${n}`); return i < 0 ? undefined
 // No --token is normal: the host may run knock-only, and then you wait to be accepted.
 if (!url || !flag('name')) {
   console.error('usage: claude-jam join <invite-link>\n'
-    + '       claude-jam join <ws-url> --name <Name> [--token <token>] [--host] [--basic]');
+    + '       claude-jam join <ws-url> --name <Name> [--token <token>] [--host] [--basic] [--no-sound]');
   process.exit(2);
 }
 // No tty on stdin (a pipe, a cron, a heredoc) is exactly the case `--basic` exists for: ink

@@ -983,21 +983,25 @@ export function onboardingLines(name = 'You', host = false) {
       'F3                → attach the real TUI (Ctrl-b d back)',
       // v0.31: `a`/`d` answer a REQUEST; `/answer <n>` answers claude itself.
       'a / d             → answer the ⚑ bar · /answer <n> answers ⚠',
-      '/model /compact…  → run any claude command in the TUI',
+      '/model /compact…  → any claude command in the TUI · /help /menu',
       '/send <path>      → offer a file · /export /files /diff',
       // v0.30-3: recall, and the escape hatch for a message that did not land.
       '↑ / ↓             → recall what you sent · /retry · /outbox',
-      '/help /who /join  → this block · participants · invite line']
+      // v0.26: the one thing you cannot discover by looking at the screen — how to reach a
+      // person who is NOT looking at theirs. It replaces the row that repeated /help, which
+      // the row above already carries: the block is ten rows and stays ten rows.
+      '/ping /who /join  → their attention · who is idle · the invite line']
     : [`plain line        → claude (attributed [${name}])`,
       '/c <text>         → humans only — claude never sees it',
       'F2                → transcript ⇄ live TUI (this screen)',
-      '/who /files /diff → participants · files · git diff',
+      // v0.26: /ping is the one thing a guest cannot discover by looking at the screen.
+      '/ping /who /files → their attention · who is idle · files · /diff',
       '/send <path>      → give claude a file · /paste · /export',
       // v0.17 P2: a guest CAN answer a permission prompt now, so the block that teaches the
       // client has to say so. v0.31: and a QUESTION needs nobody's approval at all.
       '/answer <n>       → a question: straight through · a tool: host',
       '↑ / ↓             → recall what you sent · /retry · /outbox',
-      'Shift+Enter or \\  → multi-line · /tools /help /quit',
+      'Shift+Enter or \\  → multi-line · /tools /menu /help /quit',
       'Lost? just ask claude — it knows this jam\'s whole manual.'];
   return [head, ...rows, '─'.repeat(ONBOARD_W)];
 }

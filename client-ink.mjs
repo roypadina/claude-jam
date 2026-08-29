@@ -47,11 +47,19 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   // v0.24: the live control panel, the relay switch, and the invite block that says which of
   // the lines in the log is the current one.
   menuTree, menuItems, joinBlock, relayPendingLine, REMOTE_MODES, MANUAL_FILE, menuRunsBare,
-  KEY_HELP, WIKI_PAGES } from './lib.mjs';
+  KEY_HELP, WIKI_PAGES,
+  // v0.25: which sound an event is worth, the three tiers, and the once-only knock repeat.
+  notifyPrefs, notifyPlan, KNOCK_REPEAT_MS, knockRepeat,
+  // v0.26: nudges, idle awareness, and the recipient's own phone config.
+  NUDGE_ALL, IDLE_AFTER, AWAY_AFTER, idleBucket, idleText, whoReport,
+  CONFIG_FILE, parseJamConfig, ntfyRequest,
+  // v0.27: the two policies /menu shows and switches.
+  UPLOAD_POLICIES, uploadPolicy } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './xfer.mjs';
 // v0.32 W0: anything that touches this machine's clipboard, desktop or dot-directories goes
 // through the one module that knows what operating system this is.
-import { clipboardImage, notify, copyText, historyFile, secureWrite, secureDir } from './platform.mjs';
+import { clipboardImage, notify, playSound, copyText, configDir, historyFile, secureWrite,
+  secureDir } from './platform.mjs';
 
 const h = React.createElement;
 
@@ -70,7 +78,7 @@ let addr = 0;
 // No --token is normal now: the host may run knock-only, and then you wait to be accepted.
 if (!url || !NAME) {
   console.error('usage: claude-jam join <invite-link>\n'
-    + '       claude-jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host] [--basic]');
+    + '       claude-jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host] [--basic] [--no-sound]');
   process.exit(2);
 }
 
@@ -170,6 +178,13 @@ const store = {
   remoteRows: null, // what the daemon says each relay mode can do here, and why not
   remoteBusy: false, // a switch is in flight: the panel shows a spinner instead of a list
   lastLink: null, // v0.24: the last invite link minted here, so the menu can copy it
+  // v0.25: the three tiers, per client and per session. Absent means ON — the notifications
+  // v0.17 shipped were unconditional, and a new toggle must not silence somebody who never
+  // asked. `--no-sound` at launch, /menu → Notifications, /sound on|off.
+  notify: { sound: !argv.includes('--no-sound'), notification: true, bell: true },
+  // v0.26: name -> seconds since that person last touched a key, as THEY reported it. Coarse
+  // seconds only; there is nothing in here that could carry content even by accident.
+  idle: {},
   listeners: new Set(),
 };
 const touch = () => { for (const l of store.listeners) l(); };
@@ -290,13 +305,98 @@ const err = (text) => emit({ glyph: '!', glyphColor: C.err, text, textColor: C.e
 // a terminal on another desktop is a bell nobody hears. Rate-gated, so a burst is one nudge.
 // Writing the bell straight to the real stdout is safe next to ink: it paints no cell, so it
 // cannot land inside a frame and corrupt it.
+//
+// v0.25/v0.26 turn that into THREE independently switchable tiers plus a sound, because "make a
+// noise" and "put a notification on my desktop" are different amounts of interruption and a
+// person who wants one does not automatically want the other. `event` picks the sound —
+// knock/join/nudge, and nothing for anything else — and lib's notifyPlan() is the single
+// decision, so the toggles cannot be honoured in one code path and forgotten in another.
 let lastBell = 0;
 let lastRtt = ''; // v0.17 P5: the RTT chip as last rendered, so only a CHANGE costs a redraw
-function nudge(title, body) {
-  if (!bellAllowed(lastBell, Date.now())) return;
-  lastBell = Date.now();
-  try { process.stdout.write(BELL); } catch { /* stdout closed: nothing to ring */ }
-  notify(title, body); // macOS only, fire and forget, never throws
+function alert(title, body, { event = '', phone = false, force = false } = {}) {
+  const plan = notifyPlan({ event, prefs: store.notify, phone });
+  // The 3-second gate is about the BELL and the desktop notification (a burst is one nudge). A
+  // sound the human explicitly asked for — a nudge addressed to them — is `force`d past it,
+  // because being told twice is better than a nudge you never heard.
+  const gated = !force && !bellAllowed(lastBell, Date.now());
+  if (!gated) lastBell = Date.now();
+  if (plan.sound) playSound(plan.sound); // through the seam; a missing player is silence
+  if (gated) return;
+  if (plan.bell) { try { process.stdout.write(BELL); } catch { /* stdout closed */ } }
+  if (plan.notification) notify(title, body); // macOS only, fire and forget, never throws
+  if (plan.phone) toPhone(title, body);
+}
+
+// v0.26 tier 3, and the one piece of this feature that carries a secret. The ntfy topic is a
+// bearer credential — anyone holding it can publish to that phone — so it lives ONLY here, in
+// this person's own ~/.config/claude-jam/config.json, it is read by their own client, and it is
+// POSTed by their own machine. It never travels in the protocol, never rides an invite link and
+// never reaches the host or its logs. Read once at startup; failures are silent by design (a
+// phone that did not buzz must never cost the client a frame or an exception).
+const jamConfig = (() => {
+  try { return parseJamConfig(fs.readFileSync(path.join(configDir(), CONFIG_FILE), 'utf8')); }
+  catch { return { ok: true, ntfy: null, why: 'no config file' }; } // ENOENT is the normal case
+})();
+let phoneSaid = false;
+function toPhone(title, message) {
+  const req = ntfyRequest(jamConfig.ntfy, { title, message });
+  if (!req) return;
+  // Fire and forget: no await, no retry, and the catch swallows everything. One dim line, once
+  // per session, if it never works — and the line never quotes the topic.
+  fetch(req.url, { method: 'POST', headers: req.headers, body: req.body }).catch(() => {
+    if (phoneSaid) return;
+    phoneSaid = true;
+    sys('the phone notification did not send (your ntfy server did not answer) — everything else is unaffected');
+  });
+}
+
+// v0.25: a knock is the one arrival that is WAITING for you, so it rings the slow low sound —
+// and it repeats ONCE after 30 s if nobody has answered. Once, never a loop: an alarm that will
+// not stop is an alarm whose whole feature gets muted. The record is keyed by name so a host
+// client reconnecting into a jam with knocks already pending re-renders them without re-ringing.
+const knocks = new Map(); // name -> {at, repeated}
+function armKnock(name) {
+  if (!IS_HOST || !name || knocks.has(name)) return;
+  const rec = { at: Date.now(), repeated: false };
+  knocks.set(name, rec);
+  alert('⚑ claude-jam', `${name} wants to join`, { event: 'knock' });
+  const t = setTimeout(() => {
+    // Still waiting? The `pending` frame is the daemon's own answer to that, and it is replaced
+    // wholesale on every change — so a knock that has been accepted, denied or expired is simply
+    // not in it any more, and this fires at nobody.
+    const answered = !store.pending.some((p) => p.kind === 'knock' && p.name === name);
+    if (!knockRepeat({ at: rec.at, repeated: rec.repeated, answered, now: Date.now() })) {
+      return knocks.delete(name);
+    }
+    rec.repeated = true;
+    alert('⚑ claude-jam', `${name} is still waiting to join`, { event: 'knock', force: true });
+    knocks.delete(name);
+  }, KNOCK_REPEAT_MS);
+  t.unref?.();
+}
+
+// ------------------------------------------------- v0.26: idle awareness ----
+// What is reported is ONE NUMBER: whole seconds since this human last typed or submitted here.
+// No key, no text, no window title — there is nothing in this path that could carry content even
+// by accident, and that is the property the docs promise.
+//
+// It is pushed only when the BUCKET changes (active → idle → away), not on a timer tick, so a
+// quiet jam costs a handful of tiny frames an hour rather than one per person per heartbeat.
+let activeAt = Date.now();
+let idleSaid = null;
+const localActivity = () => { activeAt = Date.now(); reportIdle(); };
+function reportIdle() {
+  const s = Math.round((Date.now() - activeAt) / 1000);
+  const b = idleBucket(s);
+  if (b === idleSaid) return;
+  idleSaid = b;
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'idle', s }));
+}
+{
+  // A quarter of the shortest bucket: coarse enough to be cheap, fine enough that `idle 2m`
+  // appears within half a minute of it being true.
+  const t = setInterval(reportIdle, Math.max(5000, (IDLE_AFTER * 1000) / 4));
+  t.unref?.();
 }
 
 // The host's invite lines, wherever they are shown (welcome, /join, a /token reply).
@@ -352,7 +452,7 @@ function render(ev) {
       // until the claude pane itself shows the line — but it stops saying "sending".
       if (ev.from === NAME && store.echo) store.echo = { ...store.echo, acked: true };
       // v0.17 P3: somebody said your name. Never your own line, whoever the daemon echoed it to.
-      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) nudge(`${ev.from} in the jam`, ev.text);
+      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) alert(`${ev.from} in the jam`, ev.text);
       // Self is always green; everybody else gets a stable color hashed from their name, so
       // it survives reconnects and roster churn instead of depending on join order.
       const c = ev.from === NAME ? C.me : fg256(userColor(ev.from));
@@ -361,7 +461,7 @@ function render(ev) {
     // Human-only: the agent never sees it, so it renders unmissable — label, prefix and text
     // all in the one color nothing else uses.
     case 'chat': {
-      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) nudge(`${ev.from} in the jam`, ev.text);
+      if (ev.from !== NAME && mentionsMe(ev.text, NAME)) alert(`${ev.from} in the jam`, ev.text);
       return emit({ turnKey: blockKey('chat'), label: `[${ev.from}]`, color: C.chat, text: `[humans-only] ${ev.text}`, textColor: C.chat, strip: true });
     }
     case 'agent': {
@@ -378,11 +478,36 @@ function render(ev) {
     case 'roster': {
       store.roster = ev.roster;
       store.labelW = labelWidth(ev.roster); // the column follows the longest name in the room
+      // v0.26: coarse seconds per person, absent on a daemon older than this. `?? store.idle`
+      // rather than `|| {}` — a frame that did not mention idle must not erase what we know.
+      if (ev.idle) store.idle = ev.idle;
       // v0.22B: an invite join has no knock to announce it, so the roster line is the only
       // arrival anybody sees — it says HOW they got in.
-      if (ev.joined) sys(`${ev.joined} joined${ev.via && ev.via !== 'token' ? ` (${ev.via})` : ''}`);
-      if (ev.left) sys(`${ev.left} left`);
+      if (ev.joined) {
+        sys(`${ev.joined} joined${ev.via && ev.via !== 'token' ? ` (${ev.via})` : ''}`);
+        // v0.25: an AUTO-join — a token or an invite link — is somebody who is already in, so it
+        // is one short chime and nothing is owed. `knock` is the other sound and it fires on the
+        // knock itself (below), not here: by the time a knocker reaches the roster the host has
+        // already answered them. The host is the only one who hears arrivals at all.
+        if (IS_HOST && ev.joined !== NAME && (ev.via === 'token' || ev.via === 'invite')) {
+          alert('claude-jam', `${ev.joined} joined`, { event: 'join' });
+        }
+      }
+      if (ev.left) { delete store.idle[ev.left]; sys(`${ev.left} left`); } // no sound: see EVENT_SOUNDS
       return touch();
+    }
+    // v0.26: somebody is asking for YOU, or for the room. One frame reaches everybody — a nudge
+    // is never secret — and this is where the recipient's own machine decides how loud it is:
+    // the addressed client gets the highlighted line, the bell, the sound and (opt-in) the phone;
+    // everybody else gets one dim line saying it happened.
+    case 'nudge': {
+      const mine = ev.to === NAME || (ev.to === NUDGE_ALL && ev.from !== NAME);
+      if (ev.from === NAME) return sys(`you nudged ${ev.to}${ev.again ? ' again' : ''}`);
+      if (!mine) return sys(`${ev.from} nudged ${ev.to}`);
+      emit({ glyph: '👋', glyphColor: C.chat, textColor: C.chat, strip: true,
+        text: `${ev.from} is asking for you${ev.again ? ' (again)' : ''}${ev.text ? `: ${ev.text}` : ''}` });
+      return alert(`👋 ${ev.from}`, ev.text || 'is asking for you',
+        { event: 'nudge', phone: !!jamConfig.ntfy, force: true });
     }
     case 'typing': if (ev.from !== NAME) { store.typing.set(ev.from, Date.now()); touch(); } return;
     case 'status': {
@@ -394,7 +519,7 @@ function render(ev) {
       const p = ev.prompt || { kind: ev.waiting ? 'permission' : 'none' };
       const was = store.status.prompt?.kind || 'none';
       if (p.kind !== was && p.kind !== 'none' && (IS_HOST || p.kind === 'question')) {
-        nudge('claude needs an answer', promptStatusText(p, { host: IS_HOST, answers: ev.answers }));
+        alert('claude needs an answer', promptStatusText(p, { host: IS_HOST, answers: ev.answers }));
       }
       store.status = { busy: ev.busy, waiting: ev.waiting, prompt: p, answers: ev.answers || 'anyone' };
       if (!ev.busy) flushTools(); // the turn is over: collapse what it ran
@@ -424,6 +549,10 @@ function render(ev) {
       // strip:false since v0.16 — the approval bar is the live surface for a request, and
       // repeating it in the 3-row strip only spends a row the mirror could have used. The
       // transcript still keeps the line, with the /accept syntax on it.
+      // v0.25: a knock is the one arrival that WANTS something from you, so it gets the slow
+      // low sound and it repeats once — see armKnock. The re-sends a reconnecting host client
+      // gets for knocks already on screen are deduped by name, or a reconnect would ring twice.
+      armKnock(ev.name);
       return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
     }
     // v0.14: a guest wants to run one of claude's commands. Host clients only — and the
@@ -502,7 +631,7 @@ function render(ev) {
     // so nothing is lost either way.
     case 'relay': {
       emit({ glyph: '⇗', glyphColor: C.accent, text: ev.text, textColor: C.accent, wrap: false, strip: true });
-      nudge('claude-jam', ev.text);
+      alert('claude-jam', ev.text);
       return;
     }
     // v0.24C: the standing `always` grants, which were invisible once given.
@@ -591,6 +720,7 @@ function connect() {
     if (dial) clearTimeout(dial);
     backoff = 1000;
     attempts = 0;
+    idleSaid = null; // v0.26: a daemon that just accepted this socket knows nothing about us yet
     // `mirror` in the hello subscribes from the very first frame — including through a knock,
     // where the welcome only comes when the host accepts. A reconnect repeats it: the daemon
     // knows nothing about the socket that died.
@@ -607,6 +737,7 @@ function connect() {
       store.session = ev.session;
       if (ev.session?.tmuxSocket) SOCKET = ev.session.tmuxSocket;
       store.roster = ev.roster;
+      store.idle = ev.idle || {}; // v0.26: who is here AND how long since each of them typed
       store.labelW = labelWidth(ev.roster); // set before the replay, so history aligns
       toTranscript++; // the whole connect block goes on screen, mirror view or not
       // v0.23: the jam's NAME leads, because that is what a human calls the room they just
@@ -883,6 +1014,7 @@ function sendUpload(ev) {
 // continuation buffer: a trailing `\` collects, the first line without one flushes.
 function submit(raw) {
   rememberInput(raw); // v0.30-3: before anything else — even a line that turns out to be a typo
+  localActivity();    // v0.26: a submit is activity even when the line turns out to be a command
   // v0.18-4: /end asked "really end this jam for everyone?", and this is the answer — taken
   // before anything is parsed, so a bare `y` can never become a message to claude. v0.22C adds
   // the second question of the same shape: revoke the link of the person you just kicked?
@@ -912,7 +1044,10 @@ function submit(raw) {
       store.echo = { text: act.text, at: Date.now(), acked: false };
       break;
     case 'chat': sendMsg({ t: 'chat', text: act.text }); break;
-    case 'who': sys(`here: ${store.roster.join(', ')}`); break;
+    // v0.26: the roster, with how long since each person last touched a key — which is what
+    // makes a nudge purposeful instead of guesswork. The map arrives on the welcome and on
+    // every roster frame; a daemon older than this sends none, and `idle unknown` says so.
+    case 'who': sys(whoReport(store.roster, store.idle, { self: NAME })); break;
     case 'help': logOnboarding(); break;
     case 'mirror': toggleMirror(); break;
     case 'tools':
@@ -1024,6 +1159,22 @@ function submit(raw) {
       else if (act.mode == null) { sendMsg({ t: 'remote' }); sys(`remote: ${store.session?.remote || 'off'} — /remote ${REMOTE_MODES.join(' | ')}`); }
       else { store.remoteBusy = true; sys(`switching remote to ${act.mode}…`); sendMsg({ t: 'remote', mode: act.mode, reissue: act.reissue === true }); }
       break;
+    // v0.26: get somebody to look at their screen. Anyone may send one — the daemon validates
+    // the target, rate-limits it and answers with the refusal if there is one, so there is
+    // nothing to check here that would only be checked twice and drift.
+    case 'ping':
+      sendMsg({ t: 'nudge', to: act.to, text: act.text, escalate: act.escalate });
+      break;
+    // v0.25: the keyboard-only half of /menu → Notifications. Bare `/sound` reports rather than
+    // guessing which way you meant.
+    case 'sound': {
+      if (act.on != null) store.notify = { ...store.notify, sound: act.on };
+      const p = notifyPrefs(store.notify);
+      sys(`sound ${p.sound ? 'on' : 'off'} · notification ${p.notification ? 'on' : 'off'} · `
+        + `bell ${p.bell ? 'on' : 'off'}${jamConfig.ntfy ? ' · phone configured' : ''}`
+        + ' — /menu → Notifications switches each one');
+      break;
+    }
     case 'quit': return leave(0);
     case 'error': err(act.text); break;
     default: break;
@@ -1200,6 +1351,12 @@ function Menu({ s }) {
       // v0.23: the panel names the jam it belongs to, and the announce row shows whether the
       // LAN is actually being told — not merely whether it was asked for.
       jamName: s.session?.jamName, announce: s.session?.announce,
+      // v0.25/v0.26: this client's own tiers, who is idle, and whether a phone is configured.
+      // `ntfy` is a boolean and never the topic — the panel says "configured", never what.
+      notify: s.notify, idle: s.idle, ntfy: !!jamConfig.ntfy,
+      // v0.27: the two policies and what the session has spent, off the token frame.
+      uploads: s.session?.uploads, exportPolicy: s.session?.exportPolicy,
+      uploadQuota: s.session?.uploadQuota, uploadUsed: s.session?.uploadUsed,
     },
   });
   const here = nodeAt(tree, s.menu.path);
@@ -1252,6 +1409,37 @@ function Menu({ s }) {
           : 'asking the daemon to stop announcing this jam on the local network…');
       }
       case 'access.remote': return down('access.remote');
+      // v0.27: three-way toggles, cycled in place. The daemon owns the value and answers on the
+      // token frame, exactly like the view and announce toggles above — the client never holds a
+      // second copy of the truth.
+      case 'access.uploads':
+      case 'access.export': {
+        const kind = item.id === 'access.export' ? 'export' : 'uploads';
+        const now = uploadPolicy(kind === 'export' ? s.session?.exportPolicy : s.session?.uploads);
+        const mode = UPLOAD_POLICIES[(UPLOAD_POLICIES.indexOf(now) + 1) % UPLOAD_POLICIES.length];
+        close();
+        sendMsg({ t: 'policy', kind, mode });
+        return sys(`asking the daemon for ${kind}: ${mode}…`);
+      }
+      case 'access.quota': { close(); sendMsg({ t: 'policy', kind: 'quota-reset' }); return; }
+      // v0.25/v0.26: the three tiers are THIS client's, so they flip here and go nowhere near
+      // the wire. The phone row is read-only on purpose — the topic is a secret, and a panel
+      // that could set it would be a panel that could show it.
+      case 'notify.sound':
+      case 'notify.notification':
+      case 'notify.bell': {
+        const k = item.id.slice('notify.'.length);
+        store.notify = { ...notifyPrefs(store.notify), [k]: !notifyPrefs(store.notify)[k] };
+        touch();
+        return say(`${item.label.toLowerCase()} ${notifyPrefs(store.notify)[k] ? 'on' : 'off'}`);
+      }
+      case 'notify.phone': return say(jamConfig.ntfy
+        ? ['phone: configured — a nudge addressed to you is POSTed by THIS client to YOUR topic.',
+          `  the topic lives only in ${CONFIG_FILE} in your own config dir; it never reaches the host,`,
+          '  an invite link, the protocol or any log — and nothing here will print it.']
+        : ['phone: off. To turn it on, put this in ~/.config/claude-jam/config.json:',
+          '  { "ntfy": { "server": "https://ntfy.sh", "topic": "<a long random word only you know>" } }',
+          `  ${jamConfig.ok ? 'then restart this client.' : `(the file there now is unusable: ${jamConfig.why})`}`]);
       default: return item.run ? runCmd(item.run) : say(item.desc || 'nothing to do here');
     }
   };
@@ -1428,6 +1616,7 @@ function App() {
   const onChange = (v) => {
     setInput(v);
     store.input = v; // the single-key rule needs this outside React (see barKeys)
+    localActivity(); // v0.26: a keystroke is the whole definition of `active` — see reportIdle
     const now = Date.now();
     if (v && now - lastTypingSent > 1500) { lastTypingSent = now; sendMsg({ t: 'typing' }); }
   };
