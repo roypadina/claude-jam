@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added — a lint for call sites that resolve to nothing
+
+`node --check` accepts a file that calls a function nobody defines; that is how v0.25's
+`nudge()` -> `alert()` rename left `client-basic.mjs` calling `nudge()` on the "a mention in `/c`
+chat rings the bell" path, and why it took a release gate rather than a test to find it.
+
+`unresolvedCalls()` scans a module for names used in call position that appear nowhere else in
+it, are not keywords and are not runtime globals. It skips comments, strings and regex literals,
+and scans `${...}` inside template literals as the code it is. It has a canary of its own — a
+lint that has never gone red proves nothing — driving the real bug from both directions plus nine
+shapes that must not fire. The canary paid for itself at once: object-literal shorthand methods
+read as calls to something undefined, so the rule now tells `name(...) {` from `name(...)` by
+matching the parens.
+
+All twelve modules in the repo root are clean, and new ones are picked up automatically.
+
 ### Fixed — a guest could forge a line that reads as the host speaking (security)
 
 `neutralizePrefixes` bends a line a participant starts with `[Name]: ` so it cannot be mistaken

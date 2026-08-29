@@ -71,11 +71,18 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
 - 2026-08-29 · `--funnel` (Tailscale) live path unverified — Funnel is not enabled on this
   tailnet and the installed Tailscale is the sandboxed App Store build. Prove: after Roy enables
   Funnel and installs the standalone build, or record it as unsupported here.
-- 2026-08-29 · A mention in `/c` chat never rang the bell in `--basic` clients: `client-basic.mjs`
+- ~~2026-08-29 · A mention in `/c` chat never rang the bell in `--basic` clients: `client-basic.mjs`
   still called `nudge()` after the v0.25 rename to `alert()` — a ReferenceError at runtime, caught
   by the 0.20.0 release gate (smoke-perm P3), not by any unit test. Prove: a lint or test that
   every client call site resolves (no undefined identifiers) — a `node --check` passes this file,
-  so it needs more than syntax. Owed to the campaign.
+  so it needs more than syntax. Owed to the campaign.~~
+  **DISCHARGED — campaign, 2026-08-30.** `unresolvedCalls()` in `test.mjs` and the lint "every
+  call site in every module resolves to something", over every `.mjs` in the repo root. It has a
+  canary of its own — a lint that has never gone red proves nothing — driving the real bug from
+  both directions (definition renamed, and one call site renamed) plus nine shapes that must NOT
+  fire. The canary immediately earned it: object-literal shorthand methods (`{ run() {…} }`) read
+  as calls to something undefined, so the rule now tells `name(…) {` (a definition) from
+  `name(…)` (a call) by matching the parens. All twelve modules are clean today.
 - 2026-08-29 · v0.33 adopt batch: `smoke-ink`, `smoke-xfer`, `smoke.mjs`, `smoke-popup`,
   `smoke-slash`, `smoke-perm`, `smoke-knock`, `smoke-transport`, `smoke-replay`, `smoke-invite`,
   `smoke-answer`, `smoke-discover`, `smoke-nudge`, `smoke-scroll` not re-run. Every tmux call that
