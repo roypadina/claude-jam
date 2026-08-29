@@ -9,8 +9,12 @@ usage() {
   echo "usage: claude-jam                  (no arguments) the launcher menu: host, join,"
   echo "                                   my jams, end a jam. --no-menu prints this instead."
   echo "usage: claude-jam host [--port N] [--name X] [--cwd DIR] [--tmux NAME] [--token V]"
-  echo "                [--view] [--tunnel] [--config-dir D] [--tmux-socket default]"
+  echo "                [--jam-name X] [--no-announce] [--view] [--tunnel]"
+  echo "                [--config-dir D] [--tmux-socket default]"
   echo "                [--no-system-prompt] [--answers host|anyone] [-- <claude args>]"
+  echo "         --jam-name is what the jam is CALLED (default: this directory's name); it"
+  echo "         shows in the welcome, in claude-jam sessions and to anyone on this network."
+  echo "         --no-announce keeps it off the network — it is announced by default."
   echo "         builds a detached tmux session (daemon + the real claude TUI) on claude-jam's own"
   echo "         tmux server and opens your client here: live TUI by default, F2 transcript,"
   echo "         F3 attaches the real TUI (F3 again, or Ctrl-b d, comes back)."
@@ -23,12 +27,18 @@ usage() {
   echo "       claude-jam join <invite-link>"
   echo "         one command, nothing else: the link carries the address, your name and a"
   echo "         per-invite secret, so there is no approval to wait for."
+  echo "       claude-jam join"
+  echo "         no argument at all: pick from the jams on this network, or paste a link."
   echo "       claude-jam join <ws-url> --name X [--token Y] [--basic]"
   echo "         no token = knock, the host accepts you."
   echo "       claude-jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]"
   echo "         mint a link for one person. claude-jam invites lists them,"
   echo "         claude-jam invite revoke <Name|id> takes one back."
   echo "         A link is a password — send it privately."
+  echo "       claude-jam find [--json] | claude-jam discover"
+  echo "         jams announcing themselves on this network: name, host, how to get in,"
+  echo "         address. Finding one is not being let in — you still knock, or hold a"
+  echo "         token, or hold an invite link."
   echo "       claude-jam sessions [--json] | claude-jam ls"
   echo "         claude-jam's own tmux sessions and state dirs: port, cwd, uptime, who is here."
   echo "       claude-jam end [name] [--all] | claude-jam kill [name]"
@@ -48,10 +58,14 @@ if [ "$#" -eq 0 ]; then exec node "$DIR/menu.mjs"; fi
 cmd="${1:-}"; shift || true
 case "$cmd" in
   host) exec node "$DIR/host.mjs" "$@" ;;
-  join) exec node "$DIR/client.mjs" "$@" ;;
+  # v0.23: `claude-jam join` with nothing after it is a question, not a mistake — the launcher
+  # menu opens on its Join screen, which starts with the jams it can see on this network.
+  join) if [ "$#" -eq 0 ]; then exec node "$DIR/menu.mjs" join; fi; exec node "$DIR/client.mjs" "$@" ;;
   # v0.18: jam owns the tmux sessions it made. `sessions` lists only those, `end` ends one
   # (marker-verified, exact name), `clean` removes orphan state dirs and nothing else.
   sessions|ls) exec node "$DIR/sessions.mjs" list "$@" ;;
+  # v0.23: who else is on this network. Talks to no daemon and holds no credential.
+  find|discover) exec node "$DIR/sessions.mjs" find "$@" ;;
   end|kill) exec node "$DIR/sessions.mjs" end "$@" ;;
   clean) exec node "$DIR/sessions.mjs" clean "$@" ;;
   # v0.22B: invite links, from the command line as well as from `/invite` in the client.

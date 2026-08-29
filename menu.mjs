@@ -16,9 +16,12 @@ import React from 'react';
 import { Box, Text, render as inkRender, useApp, useInput } from 'ink';
 import { Select, TextInput, Spinner, Alert, Badge } from '@inkjs/ui';
 import { hostPlan, buildJoinArgv, remoteRows, ACCESS_MODES, resolveTailscale, funnelPrecheck,
-  sessionsTable, resolveTarget, validName } from './lib.mjs';
+  sessionsTable, resolveTarget, validName,
+  // v0.23: the Join screen starts with what is on this network, and Host names the jam.
+  joinRows, joinPlanFor, JOIN_PASTE_VALUE, parseDnssdZone, discoveredJams,
+  DISCOVERY_TYPE, DISCOVERY_DOMAIN, FIND_MS, validJamName, defaultJamName } from './lib.mjs';
 import { listRows } from './sessions.mjs';
-import { copyText } from './platform.mjs';
+import { copyText, browseText } from './platform.mjs';
 
 const h = React.createElement;
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -27,6 +30,9 @@ const HERE = path.dirname(new URL(import.meta.url).pathname);
 // that name.
 const JAM = path.join(HERE, 'claude-jam');
 const BIN = 'claude-jam';
+// The screen to open on. Only `join` is offered, because `claude-jam join` with no argument is
+// the one subcommand whose no-argument form is a question rather than a usage error.
+const START = process.argv[2] === 'join' ? 'join' : 'main';
 
 const C = { accent: 'yellow', dim: 'gray', dimmer: '#6b6b6b', err: 'red', ok: 'green' };
 
@@ -75,7 +81,7 @@ function Main({ go, exit }) {
     h(Select, {
       options: [
         { label: 'Host a jam            — start Claude Code here and let people in', value: 'host' },
-        { label: 'Join a jam            — an invite link, or a ws:// URL', value: 'join' },
+        { label: 'Join a jam            — pick one off this network, or paste a link', value: 'join' },
         { label: 'My jams               — what is running: attach, end, copy an invite', value: 'jams' },
         { label: 'End a jam             — tell everyone, then take it down', value: 'end' },
         { label: 'Quit', value: 'quit' },
@@ -86,14 +92,17 @@ function Main({ go, exit }) {
 
 // The token row only exists in token mode, so it is only a STOP in token mode — a cursor that
 // lands on a field nobody can see is a key that appears to do nothing.
-const hostFields = (access) => ['cwd', 'name', 'jamName', 'access',
-  ...(access === 'token' ? ['token'] : []), 'remote', 'view', 'extra', 'go'];
+// v0.23: `jamName` is the TMUX session (the identifier) and `display` is what the jam is
+// called. Two rows, because they are two things and the old single "jam name" row meant only
+// the first one.
+const hostFields = (access) => ['cwd', 'name', 'display', 'jamName', 'access',
+  ...(access === 'token' ? ['token'] : []), 'remote', 'view', 'announce', 'extra', 'go'];
 
 function Host({ back }) {
   const [rows, setRows] = React.useState(null);
   const [form, setForm] = React.useState({
-    cwd: process.cwd(), name: process.env.USER || 'Host', jamName: '', access: 'knock',
-    token: '', remote: 'off', view: false, extra: '',
+    cwd: process.cwd(), name: process.env.USER || 'Host', jamName: '', display: '', access: 'knock',
+    token: '', remote: 'off', view: false, announce: true, extra: '',
   });
   const [at, setAt] = React.useState(0);
   const [editing, setEditing] = React.useState(false);
@@ -123,6 +132,7 @@ function Host({ back }) {
         return set('remote', usable[(i + d + usable.length) % usable.length]);
       }
       if (field === 'view') return set('view', !form.view);
+      if (field === 'announce') return set('announce', !form.announce);
       if (field === 'go') { if (plan.ok) runAndExit(plan.argv, { note: plan.command }); return; }
       if (key.return || input === ' ') { setEditing(true); return; }
     }
@@ -134,7 +144,8 @@ function Host({ back }) {
     h(Head, { title: 'Host a jam', hint: '↑↓ move · ←→/space change · Enter edits a text field · Esc back' }),
     h(Field, { label: 'directory', value: form.cwd, current: field === 'cwd', focused: field === 'cwd' && editing, onSubmit: done('cwd') }),
     h(Field, { label: 'your name', value: form.name, current: field === 'name', focused: field === 'name' && editing, onSubmit: done('name') }),
-    h(Field, { label: 'jam name', value: form.jamName, placeholder: 'claude-jam (the tmux session)', current: field === 'jamName', focused: field === 'jamName' && editing, onSubmit: done('jamName') }),
+    h(Field, { label: 'jam name', value: form.display, placeholder: `${defaultJamName(form.cwd)} (this directory's name)`, current: field === 'display', focused: field === 'display' && editing, onSubmit: done('display') }),
+    h(Field, { label: 'tmux session', value: form.jamName, placeholder: 'claude-jam (what `claude-jam end` takes)', current: field === 'jamName', focused: field === 'jamName' && editing, onSubmit: done('jamName') }),
     h(Box, null, h(Box, { width: 16, flexShrink: 0 }, h(Text, { color: field === 'access' ? C.accent : C.dim }, `${field === 'access' ? '❯' : ' '} access`)),
       h(Badge, { color: form.access === 'knock' ? 'blue' : form.access === 'token' ? 'yellow' : 'magenta' }, form.access),
       h(Text, { color: C.dimmer }, form.access === 'knock' ? '  friends knock, you accept them'
@@ -154,6 +165,12 @@ function Host({ back }) {
       h(Box, { width: 16, flexShrink: 0 }), h(Text, { color: C.dimmer }, `${r.value} — unavailable: ${r.reason}`))),
     h(Box, null, h(Box, { width: 16, flexShrink: 0 }, h(Text, { color: field === 'view' ? C.accent : C.dim }, `${field === 'view' ? '❯' : ' '} browser view`)),
       h(Text, { color: C.dimmer }, form.view ? 'on — ttyd serves the real TUI read-only' : 'off')),
+    // v0.23. The row says what it publishes and to whom, because that is the decision being made
+    // here — not "a toggle called announce".
+    h(Box, null, h(Box, { width: 16, flexShrink: 0 }, h(Text, { color: field === 'announce' ? C.accent : C.dim }, `${field === 'announce' ? '❯' : ' '} announce`)),
+      h(Text, { color: C.dimmer }, form.announce
+        ? 'on — people on this LAN can find it by name (they still have to get in)'
+        : 'off — reachable only by an address you hand out')),
     h(Field, { label: 'claude args', value: form.extra, placeholder: 'e.g. --model opus', current: field === 'extra', focused: field === 'extra' && editing, onSubmit: done('extra') }),
     h(Box, { marginTop: 1, flexDirection: 'column' },
       h(Text, { color: C.dim }, 'this runs:'),
@@ -161,6 +178,96 @@ function Host({ back }) {
         : h(Alert, { variant: 'error' }, plan.error)),
     h(Box, { marginTop: 1 }, h(Text, { color: field === 'go' ? C.accent : C.dimmer },
       `${field === 'go' ? '❯' : ' '} ${plan.ok ? 'Enter starts it' : 'fix the error above first'}`)));
+}
+
+// v0.23: the Join screen now opens on what is on this network. The pick comes first because the
+// pick is the common case; "paste a link or URL" is the last row and never disappears, because a
+// link is still how somebody joins a jam that is not on their LAN (or is deliberately silent).
+//
+// DISCOVERY IS NOT A KEY, and this screen is where that has to be visible: picking a jam does
+// not connect you to it, it fills in the address. A knock still waits for the host, a token jam
+// still asks for the token, and an invite-only jam says so and sends you to the paste row.
+function Discover({ back }) {
+  const [state, setState] = React.useState({ loading: true, rows: [], why: '' });
+  const [pick, setPick] = React.useState(null);
+  React.useEffect(() => {
+    let alive = true;
+    browseText({ type: DISCOVERY_TYPE, domain: DISCOVERY_DOMAIN, ms: FIND_MS })
+      .then((got) => alive && setState({ loading: false, why: got.ok ? '' : got.why,
+        rows: got.ok ? discoveredJams(parseDnssdZone(got.text)) : [] }))
+      .catch((e) => alive && setState({ loading: false, rows: [], why: e.message }));
+    return () => { alive = false; };
+  }, []);
+  useInput((i, key) => { if (key.escape && !pick) back(); });
+
+  if (state.loading) {
+    return h(Box, { flexDirection: 'column' }, h(Head, { title: 'Join a jam' }),
+      h(Spinner, { label: 'looking for jams on this network…' }));
+  }
+  if (pick) return h(JoinFound, { row: pick, back: () => setPick(null) });
+
+  const rows = joinRows(state.rows, { bin: BIN });
+  return h(Box, { flexDirection: 'column' },
+    h(Head, { title: 'Join a jam',
+      hint: state.rows.length
+        ? `${state.rows.length} on this network · picking one does not get you in · Esc back`
+        : 'nothing announcing on this network · Esc back' }),
+    // A refusal carries its reason: no mDNS tool is not an empty network, and saying so is the
+    // difference between "nobody is hosting" and "this machine cannot look".
+    state.why ? h(Box, { marginBottom: 1 }, h(Alert, { variant: 'info' }, state.why)) : null,
+    h(Select, {
+      visibleOptionCount: Math.max(4, Math.min(rows.length, (process.stdout.rows || 24) - 8)),
+      options: rows.map((r) => ({ label: r.label, value: r.value })),
+      onChange: (v) => (v === JOIN_PASTE_VALUE ? back(true) : setPick(rows.find((r) => r.value === v).row)),
+    }),
+    state.rows.length
+      ? h(Box, { marginTop: 1 }, h(Text, { color: C.dimmer, wrap: 'truncate' },
+        'a found jam still needs a knock, a token or an invite link'))
+      : null);
+}
+
+// The second half of a pick: the name (always) and the token (only for a token jam). joinPlanFor
+// decides what is still missing and why, so the screen never has to know the rules twice.
+function JoinFound({ row, back }) {
+  const [name, setName] = React.useState(process.env.USER || '');
+  const [token, setToken] = React.useState('');
+  const [at, setAt] = React.useState(0);
+  const [editing, setEditing] = React.useState(false);
+  const plan = joinPlanFor(row, { name, token });
+  const fields = row.access === 'token' ? ['name', 'token', 'go'] : ['name', 'go'];
+  const field = fields[Math.min(at, fields.length - 1)];
+  useInput((i, key) => {
+    if (key.escape) { if (editing) return setEditing(false); return back(); }
+    if (editing) return;
+    if (key.upArrow) return setAt((x) => Math.max(0, x - 1));
+    if (key.downArrow) return setAt((x) => Math.min(fields.length - 1, x + 1));
+    if (key.return) {
+      if (field === 'go') { if (plan.ok) runAndExit(plan.argv, { note: plan.command }); return; }
+      setEditing(true);
+    }
+  });
+  const done = (setter) => (v) => { setter(v); setEditing(false); setAt((x) => Math.min(fields.length - 1, x + 1)); };
+  // What actually happens next, said before it happens — a knock is a wait, and a wait nobody
+  // warned you about reads as a hang.
+  const what = row.access === 'knock' ? `${row.host} is asked to let you in — you wait until they do`
+    : row.access === 'token' ? 'the token gets you straight in, with no approval'
+      : row.access === 'invite' ? 'invite-only: a knock is refused, so you need a link'
+        : 'this jam did not say how it lets people in — a knock is the thing to try';
+  return h(Box, { flexDirection: 'column' },
+    h(Head, { title: row.jam, hint: `${row.host} · ${row.access} · ${row.address} · Esc back` }),
+    h(Box, { marginBottom: 1 }, h(Text, { color: C.dimmer }, what)),
+    h(Field, { label: 'your name', value: name, current: field === 'name', focused: field === 'name' && editing, onSubmit: done(setName) }),
+    row.access === 'token'
+      ? h(Field, { label: 'token', value: token, placeholder: 'the host has it — 8-64 of [A-Za-z0-9_-]',
+        current: field === 'token', focused: field === 'token' && editing, onSubmit: done(setToken) })
+      : null,
+    h(Box, { marginTop: 1, flexDirection: 'column' },
+      plan.ok
+        ? h(React.Fragment, null, h(Text, { color: C.dim }, 'this runs:'),
+          h(Text, { color: C.ok, wrap: 'truncate' }, `  ${plan.command}`))
+        : h(Alert, { variant: plan.needs === 'link' ? 'warning' : 'info' }, plan.error)),
+    h(Box, { marginTop: 1 }, h(Text, { color: field === 'go' ? C.accent : C.dimmer },
+      `${field === 'go' ? '❯' : ' '} ${plan.ok ? 'Enter joins' : 'fill in the above'}`)));
 }
 
 function Join({ back }) {
@@ -283,11 +390,19 @@ function Jams({ back, mode }) {
 
 function App() {
   const { exit } = useApp();
-  const [screen, setScreen] = React.useState('main');
+  // v0.23: `claude-jam join` with no argument opens straight on the Join screen, which is the
+  // discovery list. The launcher decides that; this only honours it.
+  const [screen, setScreen] = React.useState(START);
   const back = () => setScreen('main');
   React.useEffect(() => { if (handoff) exit(); });
   if (screen === 'host') return h(Host, { back });
-  if (screen === 'join') return h(Join, { back });
+  // Join is two screens: the discovered list, and the paste form the last row leads to. Esc from
+  // the paste form goes BACK to the list rather than out, so a mis-pick is one key to undo — and
+  // when the launcher was started as `claude-jam join`, Esc from the list leaves the menu.
+  if (screen === 'join') {
+    return h(Discover, { back: (toPaste) => (toPaste ? setScreen('join-paste') : (START === 'join' ? exit() : back())) });
+  }
+  if (screen === 'join-paste') return h(Join, { back: () => setScreen('join') });
   if (screen === 'jams') return h(Jams, { back, mode: 'jams' });
   if (screen === 'end') return h(Jams, { back, mode: 'end' });
   return h(Main, { go: setScreen, exit });

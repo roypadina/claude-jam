@@ -22,7 +22,8 @@ import path from 'node:path';
 import readline from 'node:readline';
 import net from 'node:net';
 // v0.32 W0: where $TMPDIR is, is a platform question. Everything else here is fs and tmux.
-import { stateDir } from './platform.mjs';
+// v0.23: and browsing for jams is a platform binary too, so it comes through the same door.
+import { stateDir, browseText } from './platform.mjs';
 import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verifyOwned, classifyJam,
   cleanable, resolveTarget, pickNumber, confirmYes, uptimeText, sessionsTable, sessionsJson,
   // v0.22B: the invite CLI is this file too — it needs exactly what `claude-jam end` needs (find the
@@ -30,6 +31,8 @@ import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verify
   parseInviteCommand, invitesReport, inviteMintedLines, inviteRecord,
   // v0.24.1: `claude-jam remote <off|tunnel|funnel>` — the same daemon path /menu drives.
   REMOTE_MODES, remoteMode,
+  // v0.23: `claude-jam find` — browse the LAN, and lay out what came back.
+  DISCOVERY_TYPE, DISCOVERY_DOMAIN, FIND_MS, parseDnssdZone, discoveredJams, findTable, findJson,
   // v0.20: jam's tmux lives on a socket of its own, so every call here is per-socket. A row
   // whose session.json names none is a pre-v0.20 jam on the default server.
   tmuxSocketArgs, TMUX_DEFAULT_SOCKET } from './lib.mjs';
@@ -288,7 +291,8 @@ function usage() {
     + '       claude-jam invites [--json] [--jam NAME]                           list them\n'
     + '       claude-jam invite revoke <Name|id> [--jam NAME]                    take one back\n'
     + '       claude-jam remote <off|tunnel|funnel> [--jam NAME] [--reissue]\n'
-    + '                                         put a running jam on a public relay, or take it off');
+    + '                                         put a running jam on a public relay, or take it off\n'
+    + '       claude-jam find [--json] [--for N]  jams announcing themselves on this network');
   return 2;
 }
 
@@ -465,12 +469,42 @@ async function cmdRemote(argv) {
   return 0;
 }
 
+// v0.23: `claude-jam find` (alias `discover`). Browse the LAN for a few seconds and print what
+// answered. It talks to no daemon and holds no credential — the whole command is a browse and a
+// parse — and the table it prints says on every listing that finding a jam is not being let into
+// one. `--for N` is for a flaky network, not for patience: mDNS answers in well under a second.
+export async function cmdFind(argv) {
+  const json = argv.includes('--json');
+  const forAt = argv.indexOf('--for');
+  const secs = forAt >= 0 ? Number(argv[forAt + 1]) : null;
+  if (forAt >= 0 && (!Number.isFinite(secs) || secs <= 0 || secs > 60)) {
+    console.error('--for takes seconds, 1-60');
+    return 2;
+  }
+  const ms = secs ? secs * 1000 : FIND_MS;
+  if (!json) console.log(`looking for jams on this network for ${Math.round(ms / 1000)}s…`);
+  const got = await browseText({ type: DISCOVERY_TYPE, domain: DISCOVERY_DOMAIN, ms });
+  if (!got.ok) {
+    // No mDNS tool is not a crash and not an empty list — those would both be lies. It is a
+    // refusal with the reason and the fix.
+    if (json) { console.log(JSON.stringify({ ok: false, error: got.why, jams: [] }, null, 2)); return 1; }
+    console.error(got.why);
+    return 1;
+  }
+  const rows = discoveredJams(parseDnssdZone(got.text));
+  if (json) console.log(JSON.stringify(findJson(rows), null, 2));
+  else console.log(findTable(rows));
+  return 0;
+}
+
 // Only when this file IS the command being run — host.mjs imports it as a module.
 if (path.resolve(process.argv[1] || '') === path.resolve(new URL(import.meta.url).pathname)) {
   const [cmd, ...rest] = process.argv.slice(2);
   const run = {
     list: cmdSessions, sessions: cmdSessions, end: cmdEnd, clean: cmdClean,
     invite: (a) => cmdInvite(a), invites: (a) => cmdInvite(a, 'list'), remote: cmdRemote,
+    // v0.23: two spellings of one command, because both are the word people reach for.
+    find: cmdFind, discover: cmdFind,
   }[cmd];
   process.exit(run ? await run(rest) : usage());
 }

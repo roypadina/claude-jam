@@ -2842,7 +2842,8 @@ export function hostCommandLine(argv = [], bin = 'claude-jam') {
 export function hostPlan(form = {}) {
   const cwd = String(form.cwd ?? '').trim();
   const name = String(form.name ?? '').trim();
-  const jamName = String(form.jamName ?? '').trim();
+  const jamName = String(form.jamName ?? '').trim();   // the TMUX session name
+  const display = String(form.display ?? '').trim();   // v0.23: what the jam is CALLED
   const access = accessMode(form.access);
   const token = String(form.token ?? '').trim();
   const remote = remoteMode(form.remote);
@@ -2854,17 +2855,26 @@ export function hostPlan(form = {}) {
     return { ok: false, error: 'a token is 8-64 chars of [A-Za-z0-9_-] — or pick knock / invite-only' };
   }
   if (jamName && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/.test(jamName)) {
-    return { ok: false, error: 'the jam name is a tmux session name: letters, digits, _ . -' };
+    return { ok: false, error: 'the tmux session name is letters, digits, _ . -' };
+  }
+  // v0.23: the display name is far freer — it is a label, not an identifier — but it still has
+  // to fit one mDNS label, because that is where it ends up.
+  if (display && !validJamName(display)) {
+    return { ok: false, error: `the jam name is one line, no control characters, at most ${JAM_NAME_MAX} bytes` };
   }
   const argv = ['host'];
   if (cwd) argv.push('--cwd', cwd);
   if (name) argv.push('--name', name);
   if (jamName) argv.push('--tmux', jamName);
+  if (display) argv.push('--jam-name', display);
   if (access === 'token') argv.push('--token', token);
   if (access === 'invite') argv.push('--invite-only');
   if (remote === 'tunnel') argv.push('--tunnel');
   if (remote === 'funnel') argv.push('--funnel');
   if (form.view) argv.push('--view');
+  // Announcing is the default, so only turning it OFF is worth a flag — the printed command
+  // stays the shortest one that does what the screen says.
+  if (form.announce === false) argv.push('--no-announce');
   // Everything after `--` is claude's, verbatim, exactly as it would be typed.
   if (extra) argv.push('--', ...extra.split(/\s+/));
   return { ok: true, argv, command: hostCommandLine(argv) };
