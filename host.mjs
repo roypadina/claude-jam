@@ -11,7 +11,10 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand,
   // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
-  respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS } from './lib.mjs';
+  respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
+  // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
+  backfillHistory, REPLAY_DEFAULT, REPLAY_MAX, noteFilePath, filesNewestFirst, filesReport,
+  validDiffPath, gitDiffArgs, capOutput, maskSecrets } from './lib.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -64,6 +67,14 @@ if (opts.resume) {
   opts.sessionId = opts.resume;
 }
 opts.sessionId ||= randomUUID();
+// v0.17 H1: how many events of the transcript already on disk a joining guest is shown. The
+// whole point is `--resume`, where the daemon starts reading at EOF on purpose — without this a
+// guest joining a two-hour-old conversation gets a blank room. 0 turns it off entirely.
+opts.replay = opts.replay == null ? REPLAY_DEFAULT : Number(opts.replay);
+if (!Number.isInteger(opts.replay) || opts.replay < 0 || opts.replay > REPLAY_MAX) {
+  console.error(`bad --replay: expected 0-${REPLAY_MAX} events, got "${opts.replay}"`);
+  process.exit(2);
+}
 opts.claude ||= resolveClaude(process.env, fs.existsSync); // --claude wins, then JAM_CLAUDE
 // The join command every invite line hands out. Computed once, here, and threaded through to
 // the re-exec'd daemon as --client-cmd (below): tmux new-session does not reliably forward a
@@ -148,6 +159,7 @@ function launch() {
     ...(opts.funnel ? ['--funnel'] : []),
     ...(opts.funnelCli ? ['--funnel-cli', opts.funnelCli] : []),
     ...(opts.heartbeat ? ['--heartbeat', String(opts.heartbeat)] : []),
+    '--replay', String(opts.replay), // v0.17 H1: the daemon is the process that seeds history
     ...(opts.configDir ? ['--config-dir', opts.configDir] : []), // daemon globs that profile's transcripts too
     ...(opts.resume ? ['--resume', opts.resume] : [])]; // daemon needs this to skip pre-existing JSONL history
 
@@ -284,6 +296,13 @@ const pending = new Map(); // ws -> {name, ip, timer} — knockers waiting for t
 const KNOCK_TTL = 120000;
 const MAX_PENDING = 10;
 const history = [];
+// v0.17 H1: the ring buffer was a flat 300. A bigger --replay would have been seeded and then
+// immediately trimmed back to 300, which is not what the flag says it does.
+const HISTORY_MAX = Math.max(300, opts.replay);
+// v0.17 F2: every path this session has read, written or edited — path -> touch count, most
+// recently touched last (noteFilePath keeps that true). Seeded from the backfill, then fed by
+// the live tail; `/files` is the only reader.
+const touched = new Map();
 let nextId = 1;
 const status = { busy: false, waiting: false };
 let busyGen = 0; // bumped when a turn starts, so a slow Stop drain cannot clear a newer turn
@@ -307,7 +326,7 @@ function newToken() { return randomBytes(12).toString('base64url').slice(0, 16);
 
 function broadcast(ev) {
   const full = { ...ev, id: nextId++, ts: Date.now() };
-  if (ev.t !== 'typing') { history.push(full); if (history.length > 300) history.shift(); }
+  if (ev.t !== 'typing') { history.push(full); if (history.length > HISTORY_MAX) history.shift(); }
   for (const ws of clients.keys()) send(ws, full);
   if (ev.t !== 'typing') console.log(`[${ev.t}]`, ev.from || ev.kind || '', (ev.text || '').slice(0, 120));
   bumpActivity(); // v0.15: anything worth telling everybody is worth a fast mirror
@@ -736,6 +755,9 @@ function daemon() {
   // capped, gated and counted in onUploadChunk, not here.
   const wss = new WebSocketServer({ server: http, maxPayload: XFER_FRAME_MAX });
   wss.on('connection', onSocket);
+  // v0.17 H1: before listen(), on purpose — the ring buffer is full before the first socket can
+  // ask for it, so a guest who connects in the same millisecond still gets the backlog.
+  seedHistory();
   http.listen(opts.port, opts.host, () => {
     console.log(`claude-jam daemon on ${opts.host}:${opts.port}, session ${opts.sessionId}`);
     writeTokenFile();
@@ -1037,6 +1059,14 @@ function onSocket(ws, req) {
       onOffer(ws, me, m);
     } else if (m.t === 'get') {
       onGet(ws, me, m);
+      // v0.17 F2/F3: what this session has touched, and what git says about it. Both are
+      // read-only and everybody may ask — the mirror already shows the same work happening.
+      // `/files` answers the asker alone (it is orientation, not news); `/diff` is broadcast,
+      // because it is a fact about the shared working tree everybody is looking at.
+    } else if (m.t === 'files') {
+      send(ws, { t: 'sys', id: nextId++, ts: Date.now(), text: filesReport(filesNewestFirst(touched), opts.cwd) });
+    } else if (m.t === 'diff') {
+      onDiff(ws, me, m);
     } else if (m.t === 'key') {
       // F3 passthrough: the host's keyboard, straight into the TUI. This is the one path
       // where bytes are NOT sanitized — driving a permission prompt or the /model picker is
@@ -1389,6 +1419,34 @@ function onGet(ws, me, m) {
   streamXfer(ws, { t: 'xfer', xfer, kind: 'file', name: asked, size: data.length }, data);
 }
 
+// ------------------------------------------------------------ v0.17 F3: /diff ----
+// Ground truth from git, which is the point: `/files` only knows what an Edit/Write/Read tool
+// call mentioned, while a `sed -i` inside a Bash call changed files nothing announced. Never a
+// shell and never an interpolated string — spawnSync with argv, a pathspec after `--`, and a
+// path validated before any of that (a leading `-` would be a git option, not a file).
+// Output is capped and masked: a diff is file contents, which is exactly what F4 is for.
+const GIT_MAX_BUFFER = 8 * 1024 * 1024;
+function onDiff(ws, me, m) {
+  const v = validDiffPath(m.path);
+  if (!v.ok) return sendError(ws, v.error);
+  const inside = spawnSync('git', ['-C', opts.cwd, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' });
+  if (inside.error) return sendError(ws, `/diff needs git and could not run it: ${inside.error.message}`);
+  if (inside.status !== 0 || !/true/.test(inside.stdout || '')) {
+    return sendError(ws, `${opts.cwd} is not inside a git repository, so there is no /diff to show`);
+  }
+  const r = spawnSync('git', gitDiffArgs(opts.cwd, v.path), { encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER });
+  if (r.error) return sendError(ws, `git diff failed: ${r.error.message}`);
+  const out = (r.stdout || '').trim();
+  if (!out) {
+    const why = (r.stderr || '').trim();
+    if (r.status !== 0 && why) return sendError(ws, `git diff: ${why.split('\n')[0].slice(0, 200)}`);
+    return sendError(ws, v.path ? `no unstaged changes in ${v.path}` : 'no unstaged changes in the working tree');
+  }
+  const what = v.path ? `/diff ${v.path}` : '/diff';
+  console.log(`[diff] ${me.name} ran ${what} in ${opts.cwd}`);
+  broadcast({ t: 'sys', text: `${me.name} ran ${what}:\n${maskSecrets(capOutput(out))}` });
+}
+
 // ------------------------------------------------------- raw key passthrough ----
 // v0.14 F3: base64 (so a frame carries an escape sequence intact) → tmux send-keys runs.
 // Bad base64, an oversized frame or a decode that yields nothing is dropped silently: this
@@ -1508,6 +1566,46 @@ function findJsonl() {
   return null;
 }
 
+// v0.17 H1: seed `history` from the transcript that is already on disk, once, at boot, BEFORE
+// the WS server accepts anybody — so nothing here can fire a live side effect (no busy/waiting
+// toggle, no tool-collapse counter, no injection, no broadcast): the events are pushed straight
+// into the ring buffer, which is what `welcome.history` replays to a joiner.
+// It also sets `jsonlPath`/`offset` past what it read, so the tail continues from exactly there
+// and nothing seeded is broadcast a second time. That covers `--resume` (the case this exists
+// for) and the fresh-daemon-on-an-existing-file case (`jam host --session-id` twice) alike.
+// Only the tail of a very long transcript is read: --replay caps the events anyway, and a
+// 200 MB JSONL must not become 200 MB of string at boot.
+const REPLAY_BYTES = 8 * 1024 * 1024;
+function seedHistory() {
+  if (!opts.replay) return;
+  const file = findJsonl();
+  if (!file) return; // a brand-new session id: claude has not written a line yet
+  let size;
+  let text;
+  try {
+    size = fs.statSync(file).size;
+    const start = Math.max(0, size - REPLAY_BYTES);
+    const fd = fs.openSync(file, 'r');
+    let buf = Buffer.alloc(size - start);
+    try { fs.readSync(fd, buf, 0, buf.length, start); } finally { fs.closeSync(fd); }
+    // Reading from the middle of the file lands mid-line; that fragment is not parseable JSON.
+    if (start > 0) { const nl = buf.indexOf(0x0a); buf = nl >= 0 ? buf.subarray(nl + 1) : Buffer.alloc(0); }
+    text = buf.toString('utf8');
+  } catch (e) { return console.log(`[replay] could not read ${file}: ${e.message}`); }
+  // A file that does not end in a newline has a half-written last line: leave it to the tail,
+  // which will read it again once claude finishes writing it.
+  const cut = text.lastIndexOf('\n');
+  const whole = cut >= 0 ? text.slice(0, cut + 1) : '';
+  const { events, files, total } = backfillHistory(whole, { hostName: opts.name, cap: opts.replay });
+  const ts = Date.now();
+  for (const ev of events) history.push({ ...ev, id: nextId++, ts });
+  for (const [p, n] of files) for (let i = 0; i < n; i++) noteFilePath(touched, p);
+  jsonlPath = file;
+  offset = size - Buffer.byteLength(text.slice(cut + 1), 'utf8');
+  console.log(`[replay] ${events.length} of ${total} event(s) seeded from ${file} `
+    + `(--replay ${opts.replay}), ${touched.size} file(s) touched, tailing from byte ${offset}`);
+}
+
 // Returns true when it consumed new bytes — drainTail uses that to know it is behind.
 function tailJsonl() {
   if (!jsonlPath) {
@@ -1551,6 +1649,8 @@ function onTranscript(e) {
   // in a user record but is pure plumbing, and it must not touch busy, waiting or
   // attribution — only produce a `⎿` line.
   if ((e.kind === 'text' || e.kind === 'tool') && status.waiting) { status.waiting = false; pushStatus(); }
+  // v0.17 F2: the live half of the file set — the backfill seeded the rest at boot.
+  noteFilePath(touched, e.file);
   // Agent text lands in everyone's terminal, so strip escapes here too.
   const text = stripControl(e.text);
   if (e.kind === 'user') {
