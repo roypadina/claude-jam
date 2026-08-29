@@ -956,6 +956,121 @@ export function stripTokenBlock(text, token = null) {
   return out;
 }
 
+// ------------------------------- v0.17 T1: relay respawn backoff ----
+// A relay child (cloudflared, or `tailscale funnel` in the foreground) that dies takes the
+// public URL with it, and v0.11-v0.16 left it dead — documented as a ceiling, and per
+// RESEARCH.md §1 the single biggest lever on the "survive two hours" goal, because the
+// confirmed failure mode is our own process exiting with nothing bringing it back.
+// 1s doubling to a 30s ceiling, unlimited attempts. `attempt` is 1-based (the first respawn
+// after a death is attempt 1) and the caller resets it the moment a URL resolves again, so a
+// relay that ran for an hour before dying waits 1s, not 30.
+export const RESPAWN_MIN_MS = 1000;
+export const RESPAWN_MAX_MS = 30000;
+export function respawnDelay(attempt, min = RESPAWN_MIN_MS, max = RESPAWN_MAX_MS) {
+  const n = Math.floor(Number(attempt));
+  if (!Number.isFinite(n) || n < 1) return min;
+  // 2**n overflows to Infinity long before it matters; Math.min still picks max.
+  return Math.min(min * 2 ** (n - 1), max);
+}
+
+// ------------------------------- v0.17 T2: heartbeat liveness ----
+// The `ws` README's own "how to detect and close broken connections" pattern, as a decision
+// instead of a loop body: every tick, a socket that answered the previous tick's ping is
+// pinged again, and one that did not is terminated. 30s is comfortably under Cloudflare's
+// documented 100s WebSocket idle cap (RESEARCH.md §1) — which matters precisely because the
+// mirror's own change-detection guard can legitimately send zero bytes for minutes.
+// `peers` is any iterable of [key, {alive}] — sockets, admitted or still knocking.
+export const HEARTBEAT_MS = 30000;
+export function heartbeatSweep(peers = []) {
+  const ping = [];
+  const terminate = [];
+  for (const [key, rec] of peers) (rec && rec.alive ? ping : terminate).push(key);
+  return { ping, terminate };
+}
+
+// ------------------------------- v0.17 T3: reconnect UX tiering ----
+// The first few failures are a blip and say so in one short line. Once RECONNECT_TIER of them
+// have failed in a row (~31s of 1-2-4-8-16 backoff) the real hypothesis is that the host's
+// relay handed out a new URL — a cloudflared quick tunnel gets a fresh random hostname every
+// respawn — so name it and say how to get the new one instead of repeating "retrying" forever.
+export const RECONNECT_TIER = 5;
+export function reconnectMessage(attempts, nextMs, tier = RECONNECT_TIER) {
+  const inS = `${Number(nextMs) / 1000}s`;
+  if (!(Number(attempts) >= tier)) return `disconnected, retrying in ${inS}`;
+  return `still retrying (${attempts} failed) in ${inS} — if the host's tunnel restarted the `
+    + 'join URL changed: ask them to run /join and send the new line';
+}
+
+// ------------------------------- v0.17 T4: Tailscale Funnel ----
+// Why a second relay at all: a cloudflared quick tunnel's hostname is random and dies with the
+// process, so T1's respawn hands every guest a NEW URL. Funnel's public hostname is the node's
+// own MagicDNS name, so it is the same across a respawn, a daemon restart and a reboot — and
+// the guest still installs nothing (Funnel terminates TLS at Tailscale's edge for the public
+// internet, unlike jam's base LAN mode which needs the guest on the tailnet).
+// Funnel only opens three public ports (443, 8443, 10000). 443 for the client, so the join
+// line carries no port at all like the cloudflared one; 8443 for the browser view. Two ports
+// rather than one port plus --set-path: a path mount would also have to agree with the daemon's
+// own /health, /admit and /hook routes, and two funnel targets need no such agreement.
+export const FUNNEL_PORTS = { ws: 443, view: 8443 };
+
+// macOS ships the CLI inside the app bundle and puts nothing on PATH, so a bare `tailscale`
+// spawn fails on the very machine most likely to have Tailscale running. Same override shape
+// as resolveTtyd: the flag wins, then the env var, then the known locations, then PATH.
+export const TAILSCALE_PATHS = ['/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+  '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale', '/usr/bin/tailscale'];
+export function resolveTailscale(override, env = {}, exists = () => false) {
+  if (override) return override;
+  if (env.JAM_TAILSCALE) return env.JAM_TAILSCALE;
+  return TAILSCALE_PATHS.find(exists) || 'tailscale';
+}
+
+// A MagicDNS name (`tailscale status --json` gives it with a trailing dot) plus the public
+// funnel port becomes the host half of every URL. 443 is implicit in https/wss, so it is left
+// off — which is what makes the funnel join line the same shape as the cloudflared one and lets
+// buildTunnelJoinLine/buildTunnelViewUrl serve both relays unchanged.
+export function funnelHost(dnsName, port = FUNNEL_PORTS.ws) {
+  const host = String(dnsName ?? '').trim().replace(/\.$/, '');
+  if (!host) return null;
+  return Number(port) === 443 ? host : `${host}:${Number(port)}`;
+}
+
+// `tailscale funnel --https=<p> <target>` in the FOREGROUND prints an "Available on the
+// internet" banner and holds the funnel open until it exits — the same tracked-pid lifecycle
+// cloudflared already has. Only the hostname (with its port, when there is one) matters, so
+// match just that, exactly like parseTunnelUrl does for the cloudflared banner.
+export const FUNNEL_URL_RE = /https:\/\/([a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.ts\.net(?::\d{1,5})?)/i;
+export function parseFunnelUrl(text) {
+  const m = FUNNEL_URL_RE.exec(String(text ?? ''));
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Startup gate, from `tailscale status --json`. Three failures are worth telling apart because
+// the fix differs every time: the CLI is not there, the node is not up, or Funnel is not
+// enabled for the tailnet (a node attribute an admin grants — the CLI itself will not do it).
+// Pure: the caller does the spawn and hands the raw stdout in.
+export const FUNNEL_CAP = 'https://tailscale.com/cap/funnel';
+export function funnelPrecheck(statusJson) {
+  let s;
+  try { s = JSON.parse(String(statusJson)); } catch {
+    return { ok: false, error: 'tailscale status --json said nothing I could parse — is the Tailscale app running?' };
+  }
+  if (s?.BackendState && s.BackendState !== 'Running') {
+    return { ok: false, error: `tailscale is ${s.BackendState}, not Running — connect it first, then retry --funnel` };
+  }
+  const dns = funnelHost(s?.Self?.DNSName, 443);
+  if (!dns) return { ok: false, error: 'tailscale status --json has no MagicDNS name for this node — enable MagicDNS for the tailnet' };
+  if (!(FUNNEL_CAP in (s?.Self?.CapMap || {}))) {
+    return {
+      ok: false, dns,
+      error: `Funnel is not enabled for this tailnet (${dns} has no ${FUNNEL_CAP} node attribute).\n`
+        + '  Enable it once, as a tailnet admin: https://login.tailscale.com/admin/acls — add\n'
+        + '    "nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]\n'
+        + '  then re-run with --funnel. Use --tunnel (cloudflared) meanwhile.',
+    };
+  }
+  return { ok: true, dns };
+}
+
 export function buildSettings(hooksPath) {
   const cmd = (arg) => ({ hooks: [{ type: 'command', command: `${hooksPath} ${arg}` }] });
   return {
