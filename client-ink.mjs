@@ -20,6 +20,7 @@
 // continuation to the text column by itself and lib.mjs's wrapText is not needed here.
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
@@ -60,7 +61,14 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   // v0.28: the mirror scrolls back through the host's real pane history, and the transcript
   // goes further back than the replay on demand.
   MIRROR_CHROME, SCREEN_HISTORY_MAX, SCREEN_PAGE_MAX, WHEEL_LINES, scrollStep, scrollStatusText,
-  historyEdgeLine, historyPageDivider } from './lib.mjs';
+  historyEdgeLine, historyPageDivider,
+  // v0.29: a task somebody wants to run on THIS machine — the consent block, the keys that
+  // answer it, the second gate on anything that writes or executes, and where it would run.
+  PEER_TOOLS_DEFAULT, peerTaskBlock, peerKeyAction, peerAcceptDecision, peerScratchDir,
+  peerWhyText, peerQuote, peerTag, countdownText } from './lib.mjs';
+// v0.29: and the spawn itself, which is the same module both clients use — one place where a
+// peer task is built, capped and killed, so the two surfaces cannot drift apart.
+import { runPeerTask } from './peer.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './xfer.mjs';
 // v0.32 W0: anything that touches this machine's clipboard, desktop or dot-directories goes
 // through the one module that knows what operating system this is.
@@ -294,7 +302,10 @@ inkStdin.unref = () => inkStdin;
     // machinery can put them in the text field. Everything else falls through untouched.
     // v0.28: `G`/`g`/Esc return the mirror to live, ahead of the bar's own single keys and only
     // while something is scrolled and the input line is empty.
-    const rest = barKeys(scrollKeys(r.text));
+    // v0.29: and a task somebody wants to run on THIS machine comes out ahead of both. It is the
+    // most consequential thing this client ever puts on screen, and Esc has to reach a running
+    // one without competing with the mirror's "back to live".
+    const rest = barKeys(peerKeys(scrollKeys(r.text)));
     if (rest) inkStdin.write(rest);
   });
   process.stdin.resume();
@@ -657,6 +668,34 @@ function render(ev) {
         text: `${ev.name} wants to answer the prompt with ${ev.choice}. ${ev.option} `
           + `— /allow-perm ${ev.name} · /allow-perm ${ev.name} always · /deny-perm ${ev.name}`,
       });
+    // v0.29: somebody wants to run a task on THIS machine, in THIS person's Claude Code, on
+    // THEIR quota. The whole prompt goes on screen — forced into the transcript, because a
+    // consent block hidden behind the live TUI is not consent — and nothing happens until they
+    // answer. A second task while one is already up is refused rather than silently replacing it.
+    case 'peertask': {
+      const t = { id: String(ev.task || ''), from: ev.from, prompt: String(ev.prompt || ''),
+        tools: Array.isArray(ev.allowedTools) ? ev.allowedTools : PEER_TOOLS_DEFAULT,
+        maxTurns: Number(ev.maxTurns) || 0, deadlineMs: Number(ev.deadlineMs) || 0,
+        schema: ev.schema ?? null, expires: Number(ev.deadline) || 0 };
+      if (store.task || store.running) {
+        return sendMsg({ t: 'peertask-decline', task: t.id, why: 'declined', detail: 'already busy with a task' });
+      }
+      // The client refuses on the human's behalf ONLY where they have already said no — an
+      // opt-out or a "never" is an answer they gave, not a question to ask them twice.
+      if (!store.peerMe || store.peerNever) {
+        return sendMsg({ t: 'peertask-decline', task: t.id, why: 'declined',
+          detail: store.peerNever ? 'never this session' : 'not opted in' });
+      }
+      store.task = t;
+      store.armed = true;
+      toTranscript++;
+      for (const line of peerTaskBlock(t, { scratch: peerScratchDir(os.tmpdir(), t.id) })) {
+        emit({ glyph: '⇄', glyphColor: C.accent, text: line, wrap: false, bare: !line.startsWith(t.from) });
+      }
+      toTranscript--;
+      alert('claude-jam', `${t.from} wants to run a task on your machine`, { event: 'knock', force: true });
+      return touch();
+    }
     // v0.13: a guest wants to send a file in. Host clients only.
     case 'filereq':
       return emit({
@@ -1290,6 +1329,81 @@ function sendUpload(ev) {
 
 // One submitted input row. Identical dispatch to the readline client, including the
 // continuation buffer: a trailing `\` collects, the first line without one flushes.
+// ------------------------------------------------ v0.29: the task in front of you ----
+// A task arrives, the WHOLE prompt goes on screen with the tools, the caps and the directory, and
+// nothing at all happens until this human answers. There is no `always`, no standing grant and no
+// host-side override: the same person is asked again, every single time.
+
+// A stdin chunk while a task is on screen (or running). Same shape as barKeys.
+function peerKeys(text) {
+  if (!store.task && !store.running) return text;
+  const { act, text: rest } = peerKeyAction(text, {
+    armed: store.armed && store.input === '', input: store.input, running: !!store.running });
+  switch (act) {
+    case 'accept': answerTask('accept'); break;
+    case 'decline': answerTask('decline'); break;
+    case 'never': answerTask('never'); break;
+    case 'cancel': answerTask('cancel'); break;
+    case 'rearm': store.armed = true; touch(); break;
+    case 'ignore': break;
+    case 'disarm': if (store.armed) { store.armed = false; touch(); } break;
+    default: break;
+  }
+  return rest;
+}
+
+// Every answer to a task goes through here, from a key or from a typed command, so there is one
+// path and no second mechanism to keep in step.
+function answerTask(op) {
+  if (op === 'cancel') {
+    if (!store.running) return err('nothing is running on this machine right now');
+    sys('cancelling the task — stopping the process this client started');
+    store.running.cancel();
+    return touch();
+  }
+  const t = store.task;
+  if (!t) return err('no task is waiting for your answer');
+  if (op === 'decline' || op === 'never') {
+    store.task = null;
+    if (op === 'never') peerCommand('never');
+    sendMsg({ t: 'peertask-decline', task: t.id, why: 'declined' });
+    sys(`declined ${t.from}'s task — nothing ran, and nothing was written anywhere`);
+    return touch();
+  }
+  // accept / accept tools. `a` grants exactly the read-only set; anything that writes or executes
+  // needs the typed form, for THIS task, every time.
+  const d = peerAcceptDecision(t.tools, { typedTools: op === 'accept tools' });
+  if (!d.ok) return err(d.error);
+  store.task = null;
+  startTask(t, d.tools);
+  return touch();
+}
+
+// Yes was said. From here it is this machine's own claude, in a directory made for the task.
+function startTask(t, tools) {
+  sendMsg({ t: 'peertask-ack', task: t.id, allowedTools: tools });
+  const handle = runPeerTask({ ...t, prompt: t.prompt, maxTurns: t.maxTurns, deadlineMs: t.deadlineMs },
+    {
+      tools,
+      onProgress: (line) => { sendMsg({ t: 'peertask-progress', task: t.id, text: line }); },
+      onDone: (o) => {
+        store.running = null;
+        store.armed = true;
+        sendMsg({ t: 'peertask-result', task: t.id, ok: o.ok, why: o.why, text: o.text, detail: o.detail });
+        sys(o.ok ? `the task finished on this machine (${o.text.length} characters went back to ${t.from})`
+          : `the task did not finish: ${peerWhyText({ ...o, deadlineMs: t.deadlineMs, maxTurns: t.maxTurns })}`);
+        touch();
+      },
+    });
+  store.running = handle;
+  toTranscript++;
+  emit({ glyph: '⇄', glyphColor: C.accent, wrap: false,
+    text: `running ${t.from}'s task in ${handle.scratch || '(nowhere — it failed to start)'}`
+      + ' — Esc cancels it, and the directory goes when it ends' });
+  toTranscript--;
+  touch();
+}
+
 // v0.29: `/peer …`. Everything here is a decision about THIS computer, so the client is where it
 // is made and the daemon is only told afterwards. `never` is a one-way door for the life of this
 // client process — the flag lives here, not on the host, so no host can clear it.
@@ -1315,8 +1429,7 @@ function peerCommand(op) {
   }
   if (op === 'reset') { sendMsg({ t: 'peer', op: 'reset' }); return touch(); }
   if (op === 'status') { sendMsg({ t: 'peer', op: 'status' }); return touch(); }
-  // accept / accept tools / decline / cancel — answered in v0.29's guest half.
-  return err('nothing is waiting for you to answer');
+  return answerTask(op);
 }
 
 function submit(raw) {
@@ -1575,6 +1688,22 @@ function ApprovalBar({ items, armed, now }) {
   const bar = approvalBar(items, now, armed);
   if (!bar) return null;
   return h(Box, null, h(Text, { color: C.accent, wrap: 'truncate' }, bar.text));
+}
+
+// v0.29: the same row for the one thing that is about YOUR machine rather than the host's. The
+// full prompt is already in the transcript above (see the `peertask` case); this is the reminder
+// that it is still waiting, and the countdown to it expiring by itself.
+function PeerBar({ task, running, armed, now }) {
+  if (running) {
+    return h(Box, null, h(Text, { color: C.accent, wrap: 'truncate' },
+      `⇄ a task is running on THIS machine, in your Claude Code  ·  Esc cancels it`));
+  }
+  if (!task) return null;
+  const escalating = (task.tools || []).some((t) => ['Bash', 'Write', 'Edit'].includes(t));
+  return h(Box, null, h(Text, { color: C.accent, wrap: 'truncate' },
+    `⇄ ${task.from} wants to run a task on YOUR machine  ·  `
+    + (armed ? `${escalating ? '[a] is refused — /peer accept tools' : '[a]ccept'}  [d]ecline  [n]ever` : 'keys off while you type — Esc re-arms')
+    + `  ·  ${countdownText((task.expires || 0) - now)}`));
 }
 
 // v0.31-2: the question itself, not just the fact that one exists — and in every client, in both
@@ -2057,6 +2186,10 @@ function App() {
     IS_HOST && !s.passthrough
       ? h(ApprovalBar, { items: barHidden() ? [] : s.pending, armed: barArmed(), now: Date.now() })
       : null,
+    // v0.29: one row while a task is waiting on your answer or running on your machine. It stays
+    // put in the mirror view too — a process somebody else asked for, running on your computer,
+    // is not something to discover by scrolling back.
+    h(PeerBar, { task: s.task, running: s.running, armed: s.armed && s.input === '', now: Date.now() }),
     qText ? h(QuestionBlock, { text: qText }) : null,
     h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough, net: s.net, scroll: s.scroll }),
     s.cont.length && !s.passthrough

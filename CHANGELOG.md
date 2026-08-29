@@ -31,6 +31,38 @@ yet — this is the switch, the opt-in, the roster fields and the four frames.
   anything, every time, with no reason. Whether a coordinated multi-account fan-out counts as
   ordinary individual usage is an **open question** — see the `Peer-Tasks` wiki page.
 
+### v0.29 — peer tasks: the guest side (step 2 of 5)
+
+The half that actually runs. A task arrives, the WHOLE prompt goes on screen with the tools, the
+caps and the directory it would run in, and nothing happens until that human answers.
+
+- **`[a]ccept · [d]ecline · [n]ever this session`** in the ink client, and
+  `/peer accept | decline | never | cancel` in both. `Esc` cancels a task that is already running.
+  There is no `always` on this ladder — unlike every other approval in this program.
+- **One key never grants `Bash`, `Write` or `Edit`.** A task that asks for any of them says so
+  loudly and refuses the single key: `/peer accept tools` is the second gate, per task, every
+  time.
+- **Where it runs**: `$TMPDIR/claude-jam-peer-<id>`, created 0700 for that task and removed when
+  it ends — every way it can end. Never the guest's repository, never their home.
+- **What it can do**: `--restricted` (which also makes claude ignore the guest's own user,
+  project and local settings — a machine whose default is `bypassPermissions` does not hand that
+  to work somebody else asked for), `--strict-mcp-config` with no MCP config at all,
+  `--tools`/`--allowedTools` set to the approved whitelist, and `--permission-mode plan` (or
+  `acceptEdits` when something that writes was granted). **Never `bypassPermissions`, never
+  `--dangerously-skip-permissions`** — asserted in a unit test and again in the smoke, against
+  the argv that is actually used.
+- **The prompt goes in on stdin**, never an argv: it is text that arrived over a network, and an
+  argv is visible in `ps` to every user on that machine.
+- **Two caps, both enforced by killing the child by pid**: a wall clock (3 min by default, 10 max)
+  and a turn count (12 by default, 40 max). `claude` 2.1.251 has no `--max-turns`, so jam counts
+  the stream itself. **A turn cap is a proxy for spend, not a spend cap** — it bounds how many
+  times the model is asked, not what each of those costs.
+- **Decline, timeout, cap, crash and cancel are five distinct answers** the host's agent can tell
+  apart, and partial output is preserved on every one of them.
+- New: `peer.mjs` (one place a task is built, capped and stopped, shared by both clients) and
+  `scripts/smoke-peer.mjs`, the eighteenth smoke — the trust boundary proved positively, against
+  a fake executor that spends nothing.
+
 ### v0.33 — adopt a running session (share the jam you are already in)
 
 Sharing used to mean `claude-jam host --resume <id>`, which RESTARTS the conversation in a pane of

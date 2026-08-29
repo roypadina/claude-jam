@@ -91,6 +91,32 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   end-to-end run: proving it needs a fake clock, because the 10-minute rate limit is armed by the
   adoption briefing seconds earlier. Prove: either a `--brief-min-gap` test hook, or a campaign
   run long enough to cross the gap with somebody joining.
+- 2026-08-29 · v0.29 peer tasks, guest half: the other seventeen smokes were not re-run. Nothing
+  that existed before this batch changed behaviour — the daemon gained new frame types and a new
+  loopback endpoint, the clients gained new commands and a new frame case, and `peer.mjs` is new —
+  so no existing path was edited. `smoke-peer` covers everything that is new. Prove: full sweep at
+  the next release gate.
+- 2026-08-29 · The peer executor has NEVER been a real `claude`. `smoke-peer` drives
+  `scripts/fake-claude.mjs`, so five flags on the spawn argv are unverified against the real
+  binary even though they are documented in its `--help` on 2.1.251: `--restricted`,
+  `--strict-mcp-config`, `--tools`, `--json-schema` and `--no-session-persistence`. In particular
+  nobody has SEEN `--restricted` refuse a read outside the scratch directory. Prove: one live run
+  with `--model claude-haiku-4-5-20251001` and a prompt that tries to read `~/.ssh` — it must come
+  back refused, not empty.
+- 2026-08-29 · The turn cap counts `{"type":"assistant"}` events in the stream. That one such
+  event is one turn is taken from the documented event shape, not measured against a real stream
+  — a build that emitted two per turn would halve every cap. Prove: the same live haiku run, with
+  the count compared against the `result` frame's own `num_turns`.
+- 2026-08-29 · `--max-turns` DOES NOT EXIST on claude 2.1.251 (checked in `--help` 2026-08-29),
+  so the spec's `--max-turns <n>` could not be passed and jam enforces the turn cap itself by
+  counting the stream and killing the child by pid. `--max-budget-usd` exists and is a real spend
+  cap, but it was NOT adopted: it is untestable without spending, and an inert or refusing flag
+  would break every task. Prove: decide in the campaign whether to add it, after one live run.
+- 2026-08-29 · The ink client's peer surface — the consent block in the transcript, the `PeerBar`
+  row, the `a`/`d`/`n` keys and Esc-to-cancel — has no pty evidence. `smoke-peer` drives the
+  `--basic` client (the half that spawns), and the key decisions are unit-tested through
+  `peerKeyAction`, but nobody has LOOKED at the ink rendering. Prove: a pty run in the campaign,
+  in the style of `smoke-scroll`'s real ink guest.
 - 2026-08-29 · `--funnel` carries a known UPSTREAM risk, not merely an unverified path:
   tailscale/tailscale#18827 (filed 2026-02-27, open) reports WebSockets through `tailscale
   serve`'s HTTP reverse proxy — the same layer Funnel rides — closing every 10–40 s with code

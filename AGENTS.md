@@ -49,7 +49,8 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `platform.mjs` | the platform seam. The **only** module allowed to spawn a platform binary (`osascript`, `pngpaste`, `afplay`, `pbcopy`, `open`, …) or to decide where `$TMPDIR`/`~/.config` are. |
 | `popup.mjs` | the one-key `tmux display-popup` approval. |
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
-| `test.mjs` | the unit suite. `scripts/` holds the seventeen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
+| `peer.mjs` | v0.29: running ONE peer task on this machine — the scratch dir, the generated settings, the spawn, the caps and the killing. Imported by both clients so there is one place a peer task is built and stopped. |
+| `test.mjs` | the unit suite. `scripts/` holds the eighteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
 | `integrations/claude-plugin/` | the OPTIONAL `/jam` Claude Code plugin: a command, a skill, a manifest. **No code** — everything it does, it does by running the `claude-jam` on `PATH`. `.claude-plugin/marketplace.json` at the repo root points at it; a test asserts the two manifests agree. |
 
 **tmux, claude, git, curl, cloudflared, tailscale and ttyd are not platform binaries** — they are
@@ -80,7 +81,7 @@ binaries** and stay where they are used — see §1.
 
 If you add a module to the repo root, both lints pick it up automatically. That is deliberate.
 
-### The seventeen smokes, and the order
+### The eighteen smokes, and the order
 
 They are end-to-end and they are the only thing that proves the tmux/injection/WS half works.
 The full recipe — driver session, ports, arguments — is in `SPEC.md` under **"Running the
@@ -159,7 +160,20 @@ Then, in any order, the ones that bring their own everything:
     report the resolved path — a fixture under the unresolved one slugs to a directory adoption
     can never find. The first run of this smoke failed exactly that way.
 
-Prefer 8–17 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
+18. `smoke-peer.mjs` — no arguments, no real claude AND no real peer executor. Own `$TMPDIR`,
+    a second `$TMPDIR`+`$HOME` for the guest, ports 7941/7943, sessions `jampeer` and
+    `jampeeroff`. ~40 s, costs nothing. It is the trust-boundary smoke: the executor is
+    `scripts/fake-claude.mjs`, which emits the same `stream-json` shapes and writes down the
+    argv, the cwd, the stdin and its own pid — so "no `bypassPermissions` in the argv", "the
+    prompt never reached an argv", "the cwd was a fresh scratch dir and it is gone" and "the wall
+    clock killed that pid" are facts on disk rather than claims. It runs a REAL `--basic` client
+    as the guest, because the guest half is the half that spawns.
+
+    Note: it asserts the scratch directory by BASENAME. On macOS `$TMPDIR` is a symlink, so the
+    argv carries `/var/folders/…` and the child's own `process.cwd()` reports
+    `/private/var/folders/…` — the same trap `smoke-adopt`'s fixtures hit.
+
+Prefer 8–18 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
 real tokens, so run them once, at the end, and use `--model haiku`.
 
 ---
