@@ -25,9 +25,14 @@ if (!url || !token || !session) {
   process.exit(2);
 }
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
+// v0.20: jam's tmux lives on a socket of its own, named per port. `JAM_SOCKET` overrides it for
+// a host started with `--tmux-socket <name>`.
+const SOCKET = process.env.JAM_SOCKET || `claude-jam-${new URL(url).port || 7777}`;
+const TMUX_ARGS = ['-L', SOCKET];
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sha = (b) => createHash('sha256').update(b).digest('hex');
-const pane = () => (spawnSync(TMUX, ['capture-pane', '-p', '-S', '-400', '-t', `${session}:claude`], { encoding: 'utf8' }).stdout || '');
+const pane = () => (spawnSync(TMUX, [...TMUX_ARGS, 'capture-pane', '-p', '-S', '-400', '-t', `${session}:claude`], { encoding: 'utf8' }).stdout || '');
 // Where a receiving client would write: its own cwd. A temp dir of ours, so ./jam-downloads/
 // is created and asserted exactly where a guest would find it.
 const GUEST_CWD = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-xfer-smoke-'));

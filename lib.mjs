@@ -499,6 +499,51 @@ export function statusRightWaiting(pendingCount) {
   return pendingCount > 0 ? `⚑ ${pendingCount} waiting` : null;
 }
 
+// ------------------------------- v0.20: jam's own tmux server, and symmetric F3 ----
+// tmux key tables are SERVER-global, so binding F3 on the default server would change every
+// other tmux session on the machine. jam therefore runs its own server on a socket of its own,
+// which also makes v0.18's ownership rule structural: `list-sessions` on this socket can only
+// ever answer with jam's sessions, because nothing else has a reason to be there.
+export const TMUX_SOCKET_PREFIX = 'claude-jam-';
+export const TMUX_DEFAULT_SOCKET = 'default'; // tmux's own name for the shared server
+export function tmuxSocketFor(port, override = null) {
+  const o = typeof override === 'string' ? override.trim() : '';
+  // A socket name becomes a filename under tmux's own directory, so keep it to a boring charset
+  // rather than letting a flag invent a path — and never a leading `-`, which tmux would read as
+  // an option rather than a name.
+  if (o && /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/.test(o)) return o;
+  return `${TMUX_SOCKET_PREFIX}${Number(port) || 0}`;
+}
+
+// Every tmux invocation jam makes goes through this. `-L default` IS the shared server (verified
+// on tmux 3.7c: the same `/tmp/tmux-<uid>/default` socket path), so the escape hatch needs no
+// special case here — only the F3 binding is skipped, because that one would be global.
+export function tmuxSocketArgs(socket) {
+  return ['-L', String(socket || TMUX_DEFAULT_SOCKET)];
+}
+
+// The socket means `tmux attach` alone no longer finds the session, so every line that tells
+// somebody how to attach has to carry it. On the default server it is left off: that is the
+// line people already know.
+export function tmuxAttachLine(socket, session = 'jam', target = null) {
+  const s = String(socket || TMUX_DEFAULT_SOCKET);
+  const t = target || session;
+  return s === TMUX_DEFAULT_SOCKET ? `tmux attach -t ${t}` : `tmux -L ${s} attach -t ${t}`;
+}
+
+// v0.20-2: F3 attaches from the client, so F3 has to detach back — otherwise it reads as broken.
+// `-T root` is what makes it a bare key rather than a prefixed one, and it is safe here only
+// BECAUSE the server is jam's own.
+export const F3_BIND_ARGS = ['bind-key', '-T', 'root', 'F3', 'detach-client'];
+
+// v0.20-3: the way home, on the session's own status line. The `⚑ N waiting` badge still wins —
+// a pending request is the more urgent thing to say — and `home:false` (an unbound F3, i.e.
+// `--tmux-socket default`) goes back to leaving the status line alone.
+export const STATUS_RIGHT_HOME = 'F3 or Ctrl-b d → back to jam';
+export function statusRightText(pendingCount, { home = true } = {}) {
+  return statusRightWaiting(pendingCount) || (home ? STATUS_RIGHT_HOME : null);
+}
+
 // What one keypress in the popup means. Only `a` and `d` answer; `i`, Esc, Ctrl-C, a stray
 // arrow key — anything else leaves the knock pending for `/accept` in a client.
 export function popupKey(ch) {
@@ -1582,11 +1627,16 @@ export function portFromStateDir(name) {
 // the dir somebody copied it into. `secret` is the daemon's hook secret, which is how `jam end`
 // authenticates its POST /end — the same loopback+secret gate the knock popup already uses; it
 // lives in a 0700 dir beside token.json, which already holds the join token.
-export function sessionInfo({ tmux, port, viewPort, cwd, sessionId, createdAt, pid, state, secret = null }) {
+export function sessionInfo({ tmux, port, viewPort, cwd, sessionId, createdAt, pid, state,
+  secret = null, socket = TMUX_DEFAULT_SOCKET }) {
   return {
     jam: SESSION_TAG,
     v: SESSION_V,
     tmux: String(tmux ?? ''),
+    // v0.20: which tmux server this session lives on. `jam sessions|end|clean` enumerate
+    // per-socket, so a row that does not name its socket is read as the default one — which is
+    // exactly what a session.json written before v0.20 means.
+    socket: String(socket || TMUX_DEFAULT_SOCKET),
     port: Number(port),
     viewPort: Number(viewPort),
     cwd: String(cwd ?? ''),
@@ -1608,6 +1658,10 @@ export function parseSessionJson(text) {
   if (typeof o.tmux !== 'string' || !o.tmux) return null;
   if (typeof o.state !== 'string' || !o.state) return null;
   if (!Number.isInteger(o.port) || o.port <= 0 || o.port > 65535) return null;
+  // v0.20: a pre-v0.20 file names no socket, and it meant the default server. Anything that is
+  // not a plain socket name is refused rather than turned into a path.
+  o.socket = typeof o.socket === 'string' && /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/.test(o.socket)
+    ? o.socket : TMUX_DEFAULT_SOCKET;
   return o;
 }
 
@@ -1724,11 +1778,13 @@ export function exitPromptText(guests = 0) {
 
 // The way back in, printed whenever a client leaves a jam running (`k`, `--keep-on-exit`, a
 // non-interactive exit) — one wording, so the launcher and `jam sessions` agree.
-export function reattachLines({ tmux = 'jam', port = 7777, clientCmd = 'node client.mjs', name = 'Host', token = null } = {}) {
+export function reattachLines({ tmux = 'jam', port = 7777, clientCmd = 'node client.mjs', name = 'Host',
+  token = null, socket = TMUX_DEFAULT_SOCKET } = {}) {
   return [
     `client:  jam host --attach${tmux === 'jam' ? '' : ` --tmux ${tmux}`}`,
     `  or:    ${clientCmd} ws://127.0.0.1:${port} --name ${name}${token ? ` --token ${token}` : ''} --host`,
-    `raw TUI: tmux attach -t ${tmux}`,
+    // v0.20: jam's tmux lives on a socket of its own, so a bare `tmux attach` no longer finds it.
+    `raw TUI: ${tmuxAttachLine(socket, tmux, claudeTarget(tmux))}`,
     `list:    jam sessions`,
     `stop:    jam end ${tmux}`,
   ];
@@ -1812,6 +1868,10 @@ export function sessionsTable(rows = [], now = 0) {
   const w = SESSIONS_COLS.map((_, c) => Math.max(...cells.map((row) => String(row[c] ?? '').length)));
   const out = cells.map((row) => row.map((v, c) => String(v ?? '').padEnd(c === row.length - 1 ? 0 : w[c])).join(' ').trimEnd());
   const notes = [];
+  // v0.20: a bare `tmux attach` no longer finds a jam, so the exact line is printed per live jam.
+  for (const r of rows) {
+    if (r.name && r.state !== 'foreign') notes.push(`  raw TUI: ${tmuxAttachLine(r.socket, r.name, claudeTarget(r.name))}`);
+  }
   if (rows.some((r) => r.state === 'orphan')) notes.push('! orphan = the tmux session is gone; `jam clean` removes those state dirs');
   if (rows.some((r) => r.state === 'no-daemon')) notes.push('! no-daemon = the session is up but nothing answers on its port; `jam end <name>` clears it');
   if (rows.some((r) => r.state === 'no-session')) notes.push('! no-session = no tmux session, but something still holds that port — jam leaves it alone');
@@ -1833,6 +1893,7 @@ export function sessionsJson(rows = [], now = 0) {
     participants: r.participants || [],
     view: !!r.view,
     tunnel: !!r.tunnel,
+    socket: r.socket ?? TMUX_DEFAULT_SOCKET, // v0.20: which tmux server it lives on
     state_dir: r.dir ?? null,
     cleanable: cleanable(r),
   }));

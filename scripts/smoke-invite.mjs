@@ -40,9 +40,10 @@ const S = { jam: 'jaminvite' };
 for (const [k, v] of Object.entries(S)) if (typeof v !== 'string' || !v.startsWith('jaminvite')) throw new Error(`S.${k} is ${v}`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// The socket jam's own tmux calls use. Before v0.20 that is the default server, so this smoke
-// talks to the same one the launcher does — one constant, so it moves with the launcher.
-const SOCKET_ARGS = [];
+// v0.20: jam's own tmux server, named per port — so this smoke's session lives on a socket only
+// this smoke's jam has a reason to be on, and the default server never hears about it.
+const SOCKET = `claude-jam-${PORT}`;
+const SOCKET_ARGS = ['-L', SOCKET];
 const tmux = (...a) => spawnSync(TMUX, [...SOCKET_ARGS, ...a], { encoding: 'utf8' });
 const alive = (name) => tmux('has-session', '-t', `=${name}`).status === 0;
 // Only ever a session name this script made up itself, one exact name per call.

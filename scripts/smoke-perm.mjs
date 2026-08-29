@@ -33,12 +33,15 @@ const CLIENT_MJS = path.join(ROOT, 'client.mjs');
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 const TOKEN = 'permsmoketoken';
 const PORT = 7831; // clear of jam's 7777, the shared smokes' 7799/7801, transport's 7811+, replay's 7823+
+// v0.20: jam names its tmux socket after its port, so the launcher below and every call here land
+// on the same server — including the driver session, which is this smoke's own.
+const SOCKET = `claude-jam-${PORT}`;
 const DRIVE = 'jampermdrive'; // holds the launcher, exactly as the documented recipe does
 const SESSION = 'jampermtest'; // the jam session the launcher builds (windows: daemon, claude)
 const TARGET = path.join(os.tmpdir(), `jam-perm-smoke-${process.pid}.txt`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const tmux = (...a) => spawnSync(TMUX, a, { encoding: 'utf8' });
+const tmux = (...a) => spawnSync(TMUX, ['-L', SOCKET, ...a], { encoding: 'utf8' });
 const pane = (t) => (tmux('capture-pane', '-p', '-t', t).stdout || '').replace(/\n+$/, '');
 const log = (t) => (tmux('capture-pane', '-p', '-S', '-600', '-t', t).stdout || '');
 
