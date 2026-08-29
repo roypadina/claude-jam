@@ -757,3 +757,108 @@ node scripts/smoke-knock.mjs ws://127.0.0.1:7799
 tmux kill-session -t jamtest; tmux kill-session -t jamdrive
 rm -rf "$TMPDIR/claude-jam-7799"
 ```
+
+## v0.15 — native-speed host TUI control + faster frames (Roy: F3 typing feels remote)
+
+Root cause: F3 passthrough routes each keystroke client → WS → daemon → `tmux send-keys`, and
+feedback arrives only on the next 250 ms `capture-pane` poll. Locally that is ~300-500 ms per
+key — unusable for real typing.
+
+1. **Host F3 = real attach, not proxy.** In the HOST client (host + loopback), F3 suspends the
+   ink app (unmount/stdin release), spawns `tmux attach -t <jam>` with the terminal inherited
+   (stdio: 'inherit'), and re-renders the client when tmux detaches. Native latency, full
+   fidelity (pickers, permission dialogs, mouse, colors). Status line hint becomes
+   "F3 → attach to the real TUI (Ctrl-b d to come back)". While attached, the daemon pauses the
+   host client's frame subscription; on return it resizes the claude window back to the host's
+   terminal (existing resize logic) and resumes frames. The old proxy path stays for GUESTS
+   only (they cannot attach), gated server-side as today.
+2. **Frames get faster and cheaper.** Replace fixed 250 ms polling with adaptive cadence:
+   40 ms while any client is in mirror view AND activity was seen in the last 2 s (typing,
+   busy, new frame), 250 ms when idle, plus the existing change-detection so unchanged screens
+   send nothing. Cap 25 frames/s per client. Where available prefer `tmux pipe-pane -o` to a
+   local socket/fifo as the change signal (poll capture-pane only when the signal fires) — if
+   pipe-pane proves fiddly, keep the adaptive poll (document which shipped).
+3. **Guest key latency honesty:** guests keep proxied input; the client shows a one-time hint
+   that raw TUI control is host-only, and echoes their submitted line locally so typing feels
+   instant even when the frame lags.
+
+## v0.16 — one-key approval inside the client (Roy: bring back the a/d popup feel)
+
+Since v0.14 the host's tmux session is detached, so `tmux display-popup` has no client to draw
+on and knocks only appear as a text line. Restore the one-keypress feel natively in the client:
+
+- Any pending request (knock, command, export, file) raises an **approval bar** just above the
+  status row, styled like the old popup: `⚑ Dana wants to join (100.x.y.z)  [a]ccept  [d]eny
+  [i]gnore  ·  2:00`, with a live countdown to the request's expiry. Multiple pending requests:
+  the bar shows the first and `+N more`.
+- While the bar is up AND the input line is empty, single keys act: `a` accept, `d` deny,
+  `i`/Esc dismiss the bar (request stays pending; `/accept` etc still work). Any other
+  printable key goes to the input as usual and hides the single-key hint (so typing never
+  accidentally approves) — pressing Esc brings it back.
+- Kinds keep their glyphs: `⚑` join, `⌘` command, `⇩` export, `⇪` file; approving runs exactly
+  the same ladder path as the slash commands, no second mechanism.
+- Guests never see the bar (server already sends host-only frames).
+- The tmux popup path stays for anyone attached to the session; when both exist, whichever
+  answers first wins and the other closes (ladder already handles late answers with 404).
+
+## v0.17 — accepted feature program (judged 2026-08-29 from RESEARCH.md)
+
+Source: ~/ClaudWork/2026-08-29-jam-feature-research/RESEARCH.md. Judged keepers only; the 8
+anti-features there are rejected, and D4 (host delegation), A3, B2, B4, E2 are deferred.
+Ship in the batches below; each item keeps its RESEARCH.md id for traceability.
+
+### Batch T — transport survives 2 hours
+- **T1 (A1)** auto-restart the `cloudflared` child with backoff (1s→30s, unlimited), reusing
+  `joinInfo()`/`writeTokenFile()`/`sendHosts()` so the new URL propagates; log every respawn.
+- **T2 (A2)** server-side ping/pong: 30 s interval, `isAlive` flag, `terminate()` on a missed
+  round, roster cleanup — the `ws` README pattern. Keeps us under Cloudflare's 100 s idle cap
+  even when the mirror is legitimately silent.
+- **T3 (A4)** reconnect UX tiering: after 5 failed attempts the client says the tunnel URL may
+  have changed and how to get the new one.
+- **T4 (new, replaces A5)** `--funnel`: use **Tailscale Funnel** instead of cloudflared —
+  `tailscale funnel --bg <port>` (or `tailscale serve` semantics per the installed version;
+  read `tailscale funnel --help` and verify locally). Wins over named tunnels: STABLE public
+  hostname (`<machine>.<tailnet>.ts.net`) across restarts, real TLS cert, no domain, no
+  Cloudflare account, guest installs nothing. Two ports (client + view) via path or two funnel
+  targets — pick what the CLI actually supports and document it. Same lifecycle discipline as
+  cloudflared (tracked PID, killed on exit, restart on death). Startup validates
+  `tailscale status` and prints a clear hint if Funnel is not enabled for the tailnet.
+  Flags: `--tunnel` (cloudflared, ephemeral URL) and `--funnel` (Tailscale, stable URL);
+  mutually exclusive, both optional.
+
+### Batch H — history and orientation
+- **H1 (B1)** seed the `history` ring buffer at daemon boot by parsing the existing session
+  JSONL with `parseJsonlLine`, bypassing live side effects (no busy/waiting/tool-collapse
+  churn), capped by a new `--replay N` (default 300 events). Fixes the blank-room problem for
+  guests joining a `--resume`d or long-running session.
+- **H2 (B3)** a `── history above · live from here ──` divider at the end of a join's replay.
+
+### Batch F — guests see the work
+- **F1 (C1)** stop truncating `Edit`/`MultiEdit`/`Write` tool calls: render file path + real
+  `-`/`+` lines from `old_string`/`new_string` (no diff library — the args ARE the diff),
+  capped like `TOOL_RESULT_MAX`, collapsible with the existing `/tools` machinery.
+- **F2 (C2)** `/files` — the set of paths this session touched (from Edit/Write/Read inputs),
+  newest first, with a per-path change count.
+- **F3 (C3)** `/diff [path]` — `git -C <cwd> diff --stat` by default, full diff for one path;
+  degrades cleanly outside a repo; capped output.
+- **F4 (C4)** best-effort secret masking (deny-list: AWS keys, `-----BEGIN … PRIVATE KEY`,
+  `sk-`/bearer tokens, `.env`-style `KEY=value`) applied to tool-call rendering AND
+  `sanitizeFrameRow` mirror rows. Documented as best-effort, never presented as a guarantee.
+  This is a trust-boundary feature: ship it in the same batch as F1, not later.
+
+### Batch P — guest parity and polish
+- **P1 (D2)** read-only guest command allowlist (`/cost`, `/status`, `/context`) resolving to
+  `run` with no host round-trip; hard list and ask-path unchanged.
+- **P2 (D1)** structured permission relay: 4th ladder kind `permission`. When `waiting` is
+  true a guest may request to answer; daemon extracts the visible options via `capture()`,
+  shows them, and on host approval types ONLY a validated digit + Enter through
+  `sendKeyArgs`. Never raw bytes, never without host approval.
+- **P3 (D3)** bell on `waiting` transition (host) and on your own name appearing in a
+  say/chat (everyone).
+- **P4 (E4)** macOS `display notification` alongside the bell, same osascript precedent as
+  `/paste`.
+- **P5 (E1)** connection-quality indicator in the status bar from T2's ping data
+  (`~120ms` / `⚠ stale 12s`).
+- **P6 (E3)** slash-command autocomplete: dim filtered list of jam's own commands while the
+  input starts with `/`.
+- **P7 (E5)** contrast/color-blind pass over `COLOR_PALETTE`.
