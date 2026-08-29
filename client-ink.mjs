@@ -1006,8 +1006,11 @@ function ApprovalBar({ items, armed, now }) {
 // views. A guest in the transcript view could see `⚠` and nothing else; now they see what is being
 // asked, the numbered options, and the command that answers it. Drawn from the daemon's
 // classification of the live pane, so it disappears the moment the picker does.
-function QuestionBlock({ status }) {
-  const text = questionBlock(status.prompt, { answers: status.answers, host: IS_HOST });
+// The rows it will take, so the mirror can give them up rather than push the input row off the
+// bottom of the screen. Same shape as the `hints` row's own reserve.
+const questionText = (status) => questionBlock(status.prompt, { answers: status.answers, host: IS_HOST });
+
+function QuestionBlock({ text }) {
   if (!text) return null;
   return h(Box, { flexDirection: 'column' },
     text.split('\n').map((line, i) => h(Text, {
@@ -1153,9 +1156,14 @@ function App() {
   // mirror one frame row rather than pushing the input line off the screen, and it changes no
   // arming rule: an input starting with `/` is already non-empty, so the v0.16 single keys are off.
   const hints = s.passthrough ? [] : commandMatches(input);
+  // v0.31: the question block sits above the status row in BOTH views, and the mirror gives up
+  // exactly as many rows as it takes — a picker pushing the input line off the screen would be a
+  // poor way to ask somebody a question.
+  const qText = s.passthrough ? '' : questionText(s.status);
+  const qRows = qText ? qText.split('\n').length : 0;
   return h(Box, { flexDirection: 'column' },
     h(Static, { items: s.entries }, (e) => h(Entry, { key: e.key, e })),
-    s.mirror ? h(Mirror, { frame: s.frame, reserve: hints.length ? 1 : 0 }) : null,
+    s.mirror ? h(Mirror, { frame: s.frame, reserve: (hints.length ? 1 : 0) + qRows }) : null,
     liveTools.length
       // Index keys on purpose: this region is redrawn every render (never <Static>), and two
       // identical tool lines in one turn are perfectly normal.
@@ -1189,7 +1197,7 @@ function App() {
     IS_HOST && !s.passthrough
       ? h(ApprovalBar, { items: barHidden() ? [] : s.pending, armed: barArmed(), now: Date.now() })
       : null,
-    !s.passthrough ? h(QuestionBlock, { status: s.status }) : null,
+    qText ? h(QuestionBlock, { text: qText }) : null,
     h(StatusBar, { status: s.status, typing: s.typing, spin, mirror: s.mirror, passthrough: s.passthrough, net: s.net }),
     s.cont.length && !s.passthrough
       ? h(Box, { flexDirection: 'column' },
