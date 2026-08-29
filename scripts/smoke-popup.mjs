@@ -174,19 +174,21 @@ await step('a stale popup (knock already answered) gets a 404 and exits', async 
 });
 
 // v0.14: the same popup answers a guest's claude command.
+// v0.17 P1: NOT with /cost any more — that one is on the read-only allowlist and never becomes a
+// request at all, so there would be nothing for a popup to answer.
 await step("popup.mjs kind=cmd allows a guest's /command through the real daemon", async () => {
   const cmdy = peer({ name: 'Cmdy' });
   await cmdy.want('knock pending', (f) => f.t === 'knock' && f.state === 'pending');
   eq((await admit({ name: 'Cmdy', ok: true })).status, 200, 'admit status');
   await cmdy.want('welcome', (f) => f.t === 'welcome');
-  cmdy.send({ t: 'slash', text: '/cost' });
-  await until('the request in the daemon log', () => /\[cmd\] Cmdy wants \/cost/.test(daemonLog()));
-  const p = runPopup('Cmdy', '120', 'cmd', '/cost');
+  cmdy.send({ t: 'slash', text: '/release-notes' });
+  await until('the request in the daemon log', () => /\[cmd\] Cmdy wants \/release-notes/.test(daemonLog()));
+  const p = runPopup('Cmdy', '120', 'cmd', '/release-notes');
   p.key('a'); // one raw key, no Enter — and a popup grants one command, never `always`
-  const ran = await cmdy.want('the approval line', (f) => f.t === 'sys' && /Cmdy ran \/cost in the TUI \(approved by/.test(f.text));
+  const ran = await cmdy.want('the approval line', (f) => f.t === 'sys' && /Cmdy ran \/release-notes in the TUI \(approved by/.test(f.text));
   eq(await p.exit(), 0, 'exit code');
   const out = p.out().replace(/\x1b\[[0-9;]*m/g, '').trim();
-  if (!/⌘ Cmdy wants to run \/cost/.test(out)) throw new Error(`popup printed: ${JSON.stringify(out)}`);
+  if (!/⌘ Cmdy wants to run \/release-notes/.test(out)) throw new Error(`popup printed: ${JSON.stringify(out)}`);
   if (!/\[a\]llow/.test(out)) throw new Error(`popup does not offer allow: ${JSON.stringify(out)}`);
   console.log(`      popup rendered: ${JSON.stringify(out)}`);
   console.log(`      ${JSON.stringify(ran.text)}`);

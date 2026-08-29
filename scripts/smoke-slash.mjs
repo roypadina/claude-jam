@@ -5,6 +5,8 @@
 //   host+loopback → typed straight in · guest → request, default deny
 //   deny · allow once · /allow-cmd always · the hard list refused even with `always`
 //   a guest's {t:'key'} and {t:'resize'} refused · knock + accept still works
+// v0.17 P1: and the read-only allowlist — /cost runs for a guest with NO host round trip, which
+// is also why the ladder steps below use /release-notes: an allowlisted command never asks.
 // usage: node scripts/smoke-slash.mjs <ws-url> <token> <tmux-session>
 import { spawnSync } from 'node:child_process';
 
@@ -70,6 +72,23 @@ await step('a loopback host and a token guest are both in', async () => {
   await guest.want('welcome', (f) => f.t === 'welcome');
 });
 
+// Smokes hand off to each other with commands still in flight: runSlash broadcasts its `sys` line
+// BEFORE the daemon types anything, so the previous smoke can exit seconds before its own last
+// /command actually opens one of claude's MODAL panels (/cost's is one, /release-notes' is another,
+// and a modal swallows everything typed after it). So settle the pane first: wait out anything
+// queued, then Esc — through the host's own {t:'key'}, which is host+loopback by definition —
+// until claude's input row is back.
+await step('the pane starts from claude\'s own input row, whatever an earlier smoke left up', async () => {
+  const inputRow = () => /❯/.test(pane().split('\n').slice(-6).join('\n'));
+  await sleep(4000); // a queued slash command from the previous smoke needs ~3s to land
+  for (let i = 0; i < 6 && !inputRow(); i++) {
+    host.send({ t: 'key', b64: Buffer.from('\x1b', 'utf8').toString('base64') });
+    await sleep(700);
+  }
+  if (!inputRow()) throw new Error(`no input row on the pane:\n${pane().split('\n').slice(-6).join('\n')}`);
+  console.log('      claude\'s input row is on screen — nothing modal is up');
+});
+
 await step('host slash: /cost is typed into the real TUI, everybody is told', async () => {
   host.send({ t: 'slash', text: '/cost' });
   const line = await guest.want('the sys line', (f) => f.t === 'sys' && /ran \/cost in the TUI/.test(f.text));
@@ -105,12 +124,35 @@ await step('the hard list is refused outright: no request, no popup, nothing typ
   if (/❯ \/clear/.test(pane())) throw new Error('/clear reached the pane');
 });
 
+await step('P1 a guest\'s /cost runs with no host round trip at all', async () => {
+  const before = host.frames.filter((f) => f.t === 'cmdreq').length;
+  guest.send({ t: 'slash', text: '/cost' });
+  const ran = await guest.want('the read-only line',
+    (f) => f.t === 'sys' && /Guest ran \/cost in the TUI \(read-only/.test(f.text));
+  console.log(`      ${JSON.stringify(ran.text)}`);
+  // The host was never asked, and never had to be: nothing about /cost can change the session.
+  await host.never('a /cost request reached the host', (f) => f.t === 'cmdreq');
+  eq(host.frames.filter((f) => f.t === 'cmdreq').length, before, 'cmdreq count after an allowlisted command');
+  const hit = await until('/cost, or the panel it opens, on the claude pane',
+    () => /\/cost/.exec(pane())?.[0] || /Total cost:|Current session/.exec(pane())?.[0]);
+  console.log(`      pane shows ${JSON.stringify(hit)}`);
+});
+
+await step('P1 an argument takes it back off the allowlist — that is a request again', async () => {
+  guest.send({ t: 'slash', text: '/cost --json' });
+  const req = await host.want('cmdreq', (f) => f.t === 'cmdreq' && f.cmd === '/cost --json');
+  eq(req.name, 'Guest', 'cmdreq.name');
+  host.send({ t: 'cmd', op: 'deny', name: 'Guest' });
+  await guest.want('the denial', (f) => f.t === 'error' && /denied by/.test(f.text));
+});
+
 await step('a guest\'s /compact becomes a request the host can deny', async () => {
   guest.send({ t: 'slash', text: '/compact' });
   const req = await host.want('cmdreq', (f) => f.t === 'cmdreq' && f.cmd === '/compact');
   eq(req.name, 'Guest', 'cmdreq.name');
-  // A second request while one is pending is refused rather than queued.
-  guest.send({ t: 'slash', text: '/cost' });
+  // A second request while one is pending is refused rather than queued. (Not /cost: v0.17 P1
+  // runs that one outright, so it would never queue behind anything.)
+  guest.send({ t: 'slash', text: '/release-notes' });
   await guest.want('the one-at-a-time refusal', (f) => f.t === 'error' && /still waiting for the host/.test(f.text));
   host.send({ t: 'cmd', op: 'deny', name: 'Guest' });
   const denied = await guest.want('the denial', (f) => f.t === 'error' && /\/compact was denied by/.test(f.text));
@@ -119,14 +161,15 @@ await step('a guest\'s /compact becomes a request the host can deny', async () =
 });
 
 await step('/allow-cmd runs it once — and only once', async () => {
-  guest.send({ t: 'slash', text: '/cost' });
-  await host.want('cmdreq', (f) => f.t === 'cmdreq' && f.cmd === '/cost');
+  // Not /cost: since v0.17 P1 that one is allowlisted and never reaches the ladder at all.
+  guest.send({ t: 'slash', text: '/release-notes' });
+  await host.want('cmdreq', (f) => f.t === 'cmdreq' && f.cmd === '/release-notes');
   host.send({ t: 'cmd', op: 'allow', name: 'Guest' });
-  const ran = await guest.want('the approval line', (f) => f.t === 'sys' && /Guest ran \/cost in the TUI \(approved by/.test(f.text));
+  const ran = await guest.want('the approval line', (f) => f.t === 'sys' && /Guest ran \/release-notes in the TUI \(approved by/.test(f.text));
   console.log(`      ${JSON.stringify(ran.text)}`);
   // The next one asks again: a one-time approval grants nothing standing.
   const before = host.frames.filter((f) => f.t === 'cmdreq').length;
-  guest.send({ t: 'slash', text: '/cost' });
+  guest.send({ t: 'slash', text: '/release-notes' });
   await until('a second cmdreq', () => host.frames.filter((f) => f.t === 'cmdreq').length > before);
 });
 
@@ -136,7 +179,7 @@ await step('/allow-cmd always gives that guest standing approval for this jam', 
   console.log(`      ${JSON.stringify(ran.text)}`);
   // From now on the host is not asked at all.
   const before = host.frames.filter((f) => f.t === 'cmdreq').length;
-  guest.send({ t: 'slash', text: '/cost' });
+  guest.send({ t: 'slash', text: '/release-notes' });
   const auto = await guest.want('the auto-run line',
     (f) => f.t === 'sys' && /approved Guest's commands for this jam/.test(f.text));
   console.log(`      ${JSON.stringify(auto.text)}`);
