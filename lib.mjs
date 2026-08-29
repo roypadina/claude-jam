@@ -4404,8 +4404,10 @@ export function buildBriefing({ hostName = 'the host', manual = 'MANUAL.md', par
     adoption: 'claude-jam is now bridging this session. It was ADOPTED where it stands — nothing '
       + 'was restarted, everything above this line is still yours — and other humans can now read '
       + 'this screen and type into it.',
-    compaction: 'Re-stating this because the context it was in has just been compacted or '
-      + 'cleared: this session is SHARED, and it is still shared.',
+    // Deliberately says none of the words contextLostSignal looks for: this line is echoed into
+    // the pane, and a re-brief that reads as a compaction re-triggers itself forever.
+    compaction: 'Re-stating this because the context it was in has just been summarised away or '
+      + 'wiped: this session is SHARED, and it is still shared.',
     roster: 'Re-stating this because who is in the room has changed. This session is SHARED.',
   }[reason] || 'This session is SHARED, and claude-jam is bridging it.';
   return [
@@ -4454,7 +4456,17 @@ export function briefUpdates(v) {
 // an agent that has quietly forgotten the two standing rules while people are still talking to
 // it — so if the wording moves, this fails in the direction that matters, and the roster re-brief
 // is the backstop that eventually catches it.
-const COMPACTED_RE = /(?:^|[\s⏺●*])Compacted\b|conversation (?:has been )?compacted|compacting conversation/i;
+// CASE-SENSITIVE on the first alternative, and that is not a detail: claude writes `Compacted`
+// with a capital C as its own chrome, and claude-jam's re-brief has to be able to TALK about a
+// compaction without being read as one. Found by smoke-adopt: an earlier `/i` version matched the
+// re-brief's own opening line once it was echoed into the pane, which re-triggered the watcher —
+// an injection loop, on somebody's live session, costing a turn each time round. The briefing's
+// wording avoids these phrases too (there is a test), because one guard is not a guard.
+// Two patterns, and the split is the fix rather than a tidy-up. `Compacted` on its own is a bare
+// word that ordinary prose reaches for, so it is matched CASE-SENSITIVELY, as claude's own chrome
+// writes it. The sentence forms below are unambiguous enough to stay case-insensitive.
+const COMPACTED_RE = /(?:^|[\s⏺●*])Compacted\b/;
+const COMPACTING_RE = /conversation (?:has been )?compacted|compacting conversation/i;
 // The welcome block claude redraws after `/clear` — the glyph half AND the version half, because
 // the glyphs alone are also what a session that started thirty seconds ago is still showing.
 const BANNER_GLYPH_RE = /[▐▛▜▝█]{2,}/;
@@ -4465,7 +4477,7 @@ const CLEARED_MAX_ROWS = 14; // a just-cleared screen is nearly empty; a working
 export function contextLostSignal(screen) {
   const lines = (Array.isArray(screen) ? screen : String(screen ?? '').split('\n'))
     .map((r) => String(r).replace(/\s+$/, ''));
-  const hit = lines.slice(-CONTEXT_ROWS).find((l) => COMPACTED_RE.test(l));
+  const hit = lines.slice(-CONTEXT_ROWS).find((l) => COMPACTED_RE.test(l) || COMPACTING_RE.test(l));
   if (hit) return { kind: 'compacted', sig: `compacted:${hit.trim().slice(0, 80)}` };
   const filled = lines.filter((l) => l.trim()).length;
   if (filled <= CLEARED_MAX_ROWS

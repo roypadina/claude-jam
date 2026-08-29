@@ -35,6 +35,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectSlug, BRIEF_NAME, validName } from '../lib.mjs';
+import { daemonHealth } from '../sessions.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -194,6 +195,14 @@ console.log(`TMPDIR ${TMP}\nHOME   ${HOME}\ncwd    ${WORK}\nsocket ${SOCKET}\nde
 const started = Date.now();
 let adopted = null;
 let guest = null; // S7 leaves it connected: the pane is classified only while somebody is in
+// The daemon's own log, which lives in a window of claude-jam's OWN tmux session on its OWN
+// socket. Read-only, and the only way to wait for a decision the daemon makes rather than for a
+// guess at how long making it takes.
+let ownJam = null;
+const daemonLog = () => (ownJam
+  ? (spawnSync(TMUX, ['-L', ownJam.socket, 'capture-pane', '-p', '-S', '-400',
+    '-t', `${ownJam.tmux}:daemon`], { encoding: 'utf8' }).stdout || '')
+  : '');
 
 try {
   // =============================================================== the refusals ====
@@ -264,6 +273,7 @@ try {
     ok(r.code === 0, `adopt exited ${r.code}:\n${r.out}`);
     ok(/ADOPTED pane/.test(r.out), r.out);
     const info = JSON.parse(fs.readFileSync(path.join(stateDir(P.own), 'session.json'), 'utf8'));
+    ownJam = info; // S7b reads the daemon's own log out of this session
     ok(info.adopt?.pane === p.id, `session.json does not name the pane: ${JSON.stringify(info.adopt)}`);
     ok(info.adopt.socket === SOCKET, JSON.stringify(info.adopt));
     ok(info.tmux !== S.pane, 'jam claimed the adopted session as its own tmux session');
@@ -347,17 +357,44 @@ try {
     // one — so a compaction is only ever visible on the screen.
     const before = submitted().filter((s) => s.startsWith(`[${BRIEF_NAME}]: `)).length;
     ok(before === 1, `expected exactly one briefing so far, got ${before}`);
-    setMode('compacted');           // fake-tui paints the smoke's own fixture
-    await sleep(1500);              // long enough for two classifier ticks
-    setMode('box');                 // …and back, so the re-brief has an input box to land in
-    const again = await until('a second briefing in the adopted pane', () => {
-      const all = submitted().filter((s) => s.startsWith(`[${BRIEF_NAME}]: `));
-      return all.length > before ? all[all.length - 1] : null;
-    }, 40000);
-    ok(/compacted or cleared/.test(again), `the re-brief did not say why:\n${again.slice(0, 200)}`);
+    let again;
+    try {
+      setMode('compacted');         // fake-tui paints the smoke's own fixture
+      // Wait for the DAEMON to say it noticed, rather than for a guess at how long that takes: a
+      // fixed sleep raced the paste against the redraw and failed half the time. (The product
+      // side of that race is real too, and is why a failed re-brief now re-arms once.)
+      await until('the daemon to notice the compaction',
+        () => /\[brief\] compacted:/.test(daemonLog()), 20000);
+      setMode('box');               // …and back, so the re-brief has an input box to land in
+      again = await until('a second briefing in the adopted pane', () => {
+        const all = submitted().filter((s) => s.startsWith(`[${BRIEF_NAME}]: `));
+        return all.length > before ? all[all.length - 1] : null;
+      }, 40000);
+    } catch (e) {
+      // A smoke whose failure names nothing is a smoke nobody can debug, and this step is a race
+      // between three processes. Say what each of them was doing.
+      console.log(`      pane was:\n${paneOf(adopted.id).split('\n').filter(Boolean).slice(-6).map((l) => `        ${l}`).join('\n')}`);
+      console.log(`      ctl file: ${JSON.stringify(fs.readFileSync(CTL, 'utf8'))}`);
+      // The daemon's OWN capture command, run from here: if this fails or comes back empty, the
+      // daemon was reading nothing and every "the screen did not change" follows from that.
+      const cap = spawnSync(TMUX, ['-L', SOCKET, 'capture-pane', '-p', '-t', adopted.id], { encoding: 'utf8' });
+      console.log(`      daemon-style capture: status ${cap.status}, ${(cap.stdout || '').length} bytes`
+        + `${(cap.stderr || '').trim() ? `, stderr ${JSON.stringify(cap.stderr.trim())}` : ''}`);
+      console.log(`      health: ${JSON.stringify(await daemonHealth(P.own))}`);
+      console.log(`      tui log tail:\n${tuiLog().split('\n').filter(Boolean).slice(-6).map((l) => `        ${l.slice(0, 100)}`).join('\n')}`);
+      console.log(`      daemon log tail:\n${daemonLog().split('\n').filter(Boolean).slice(-12).map((l) => `        ${l}`).join('\n')}`);
+      throw e;
+    } finally {
+      setMode('box'); // whatever happened, the next step gets a pane that draws
+    }
+    ok(/summarised away or wiped/.test(again), `the re-brief did not say why:\n${again.slice(0, 200)}`);
+    // …and its own wording must never read as a compaction, or it would re-trigger the watcher
+    // and inject itself forever. Belt (this) and braces (a unit test over every window of it).
+    ok(!/Compacted/.test(again), 'the re-brief reads as a compaction — that is an injection loop');
     ok(/NEVER reveal the join token/.test(again), 'the re-brief lost the standing rules');
     ok(/In the room: /.test(again), 'the re-brief lost the roster');
-    console.log('      re-briefed after the compaction marker appeared and went');
+    console.log(`      what the daemon decided:\n${daemonLog().split('\n')
+      .filter((l) => /\[brief\]|\[prompt\]/.test(l)).slice(-4).map((l) => `        ${l.trim()}`).join('\n')}`);
     guest.ws.close();
     guest = null;
   });

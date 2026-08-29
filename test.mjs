@@ -5113,7 +5113,9 @@ test('v0.33 the briefing IS the system prompt, plus who is here — never a seco
 });
 
 test('v0.33 a re-brief says WHY it is being re-sent', () => {
-  assert.match(buildBriefing({ reason: 'compaction' }), /compacted or cleared/);
+  // "summarised away or wiped", not "compacted or cleared": the re-brief's own line is echoed
+  // into the pane, and a wording the watcher matches re-triggers it forever. See the test below.
+  assert.match(buildBriefing({ reason: 'compaction' }), /summarised away or wiped/);
   assert.match(buildBriefing({ reason: 'roster' }), /who is in the room has changed/);
   assert.match(buildBriefing({ reason: 'adoption' }), /ADOPTED where it stands/);
   // An unknown reason still produces the contract, never an empty or broken opening.
@@ -5235,4 +5237,30 @@ test('v0.33 the /jam plugin is a real plugin, and the marketplace points at it',
   assert.match(skill, /Never claim to have seen `\/c` chat/);
   // Installing it is optional, and that has to be said where somebody deciding would read it.
   assert.match(read('integrations/claude-plugin/README.md'), /entirely optional/);
+});
+
+test('v0.33 no briefing, at any scroll position, can read as a compaction', () => {
+  // The bug this exists for: with a case-insensitive pattern, the re-brief's own opening line
+  // ("…has just been compacted or cleared") matched the watcher once it was echoed into the pane,
+  // which re-triggered it — an injection loop on a live session, one turn per cycle. Found by
+  // smoke-adopt. The wording is one guard and the case-sensitivity is the other; this is the test
+  // that keeps them both, because the next person to reword the briefing will not know.
+  for (const reason of ['adoption', 'compaction', 'roster', 'nonsense']) {
+    const lines = buildBriefing({ hostName: 'Roy', participants: ['Roy', 'Dana'],
+      jamName: 'friday', reason }).split('\n');
+    // Every window a pane could be showing while the briefing scrolls past it.
+    for (let i = 0; i < lines.length; i++) {
+      const win = lines.slice(Math.max(0, i - 29), i + 1);
+      assert.equal(contextLostSignal(win), null,
+        `${reason}: line ${i} reads as a compaction — ${JSON.stringify(lines[i].slice(0, 70))}`);
+    }
+  }
+  // The case-sensitivity itself, stated: claude writes its own chrome with a capital C, and
+  // prose about compaction is not a compaction.
+  assert.equal(contextLostSignal('⏺ Compacted (ctrl+o to see full summary)')?.kind, 'compacted');
+  assert.equal(contextLostSignal('this was compacted a while ago'), null);
+  assert.equal(contextLostSignal('the context it was in has just been compacted or cleared'), null);
+  // …but claude's own sentence forms stay matched, whatever their case.
+  assert.equal(contextLostSignal('Compacting conversation…')?.kind, 'compacted');
+  assert.equal(contextLostSignal('this conversation has been compacted')?.kind, 'compacted');
 });
