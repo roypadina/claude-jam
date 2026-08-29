@@ -313,6 +313,12 @@ export function parseClientLine(line) {
   if (t === '/mirror') return { kind: 'mirror' };
   // v0.10c: reprint the onboarding block.
   if (t === '/help') return { kind: 'help' };
+  // v0.28: re-print further back than the replay you were given. Read-only and everybody's —
+  // it is the same transcript the mirror is a live view of.
+  if (t === '/history' || t.startsWith('/history ')) {
+    const v = parseHistoryCommand(t.slice(8));
+    return v.ok ? { kind: 'history', n: v.n, all: v.all } : { kind: 'error', text: v.error };
+  }
   // v0.10: `/tools` reprints the last completed turn's tool log; `on|off` switches
   // always-expanded mode (off = collapse to one summary line, the default).
   if (t === '/tools' || t.startsWith('/tools ')) {
@@ -422,6 +428,8 @@ export const JAM_COMMANDS = ['/c', '/who', '/help', '/quit', '/exit', '/mirror',
   '/answer', '/allow-perm', '/deny-perm',
   // v0.30: what the daemon kept when it could not confirm a message landed, and sending it again.
   '/outbox', '/retry',
+  // v0.28: further back than the replay you were given, on demand.
+  '/history',
   // v0.18-4: the host ends the jam for everybody.
   '/end',
   // v0.22B/C: invite links, and removing somebody who is already in.
@@ -875,6 +883,99 @@ export function fitFrame(frame, cols, terminalRows) {
   };
 }
 
+// --------------------------------------------- v0.28: the mirror can scroll back ----
+// Roy: "I can only see very little." Until now the mirror showed the CURRENT screen and
+// nothing else — a guest could not scroll back through the real TUI at all, because the host's
+// pane scrollback was never on the wire. These are the decisions; host.mjs runs the capture and
+// the client draws it.
+//
+// The ceilings are deliberate and both are said out loud in the client (see historyEdgeLine):
+// 2000 lines back, because that is tmux's own default `history-limit` and asking for more is
+// asking for something that is not there; 200 rows in one answer, which is taller than any
+// terminal, so one PgUp is one capture rather than a stream of them.
+export const SCREEN_HISTORY_MAX = 2000;
+export const SCREEN_PAGE_MAX = 200;
+export const SCREEN_CACHE_MS = 2000;
+
+// `before` is how far back the mirror is scrolled, in rows above the live top of the pane.
+// capture-pane numbers the VISIBLE pane 0..h-1 and the history negatively, so the window of
+// `rows` rows whose top sits `before` above the pane top is exactly [-before, rows-1-before]:
+// one range, and no special case for a window that straddles the join between history and
+// screen. `historySize` is what tmux says the pane actually kept (`#{history_size}`), so
+// "as far back as it goes" is a measured number rather than a guess.
+export function historyPageRange({ before = 0, rows = 40, historySize = 0,
+  cap = SCREEN_HISTORY_MAX, pageMax = SCREEN_PAGE_MAX } = {}) {
+  const want = Math.max(1, Math.min(Math.floor(Number(rows)) || 1, Math.max(1, Math.floor(Number(pageMax)) || 1)));
+  const depth = Math.max(0, Math.min(Math.floor(Number(historySize)) || 0, Math.max(0, Math.floor(Number(cap)) || 0)));
+  const asked = Math.max(0, Math.floor(Number(before)) || 0);
+  const off = Math.min(asked, depth);
+  return {
+    before: off,
+    rows: want,
+    start: -off,
+    end: want - 1 - off,
+    maxBefore: depth,
+    // At the top means the row above the window is one the pane no longer has. A pane with no
+    // history at all is at the top the moment it is asked, which is the honest answer.
+    atTop: off >= depth,
+    clamped: off !== asked,
+  };
+}
+
+// One capture, cached by the exact range it covers. PgUp held down asks for the same page many
+// times over while the answer is still on its way, and a 2 s window turns that into one
+// `capture-pane`. A DIFFERENT range is never served from the cache, whatever its age.
+export const historyCacheKey = ({ start = 0, end = 0 } = {}) => `${start}:${end}`;
+export function historyCacheDecision({ key, entry = null, now = 0, ttl = SCREEN_CACHE_MS } = {}) {
+  if (!entry || entry.key !== key) return 'capture';
+  return now - Number(entry.at || 0) < ttl ? 'use' : 'capture';
+}
+
+// Where a keypress moves the scroll. `before === 0` IS live: there is no separate flag, so the
+// state cannot say "scrolled" and "at the bottom" at the same time. Everything is clamped to
+// what the pane actually kept, so PgUp at the top is a no-op rather than a growing number the
+// daemon then has to refuse.
+export const SCROLL_KEYS = ['pageup', 'pagedown', 'lineup', 'linedown', 'top', 'live'];
+export function scrollStep({ key, before = 0, page = 20, maxBefore = SCREEN_HISTORY_MAX } = {}) {
+  const max = Math.max(0, Math.floor(Number(maxBefore)) || 0);
+  const clamp = (n) => Math.max(0, Math.min(n, max));
+  const at = clamp(Math.floor(Number(before)) || 0);
+  const step = Math.max(1, Math.floor(Number(page)) || 1);
+  switch (key) {
+    case 'pageup': return clamp(at + step);
+    case 'pagedown': return clamp(at - step);
+    case 'lineup': return clamp(at + 1);
+    case 'linedown': return clamp(at - 1);
+    case 'top': return max;
+    case 'live': return 0;
+    default: return at;
+  }
+}
+
+// The status row while scrolled. Live frames PAUSE rather than repaint under the reader — and
+// the row says how many arrived, because a frame silently dropped is exactly the kind of
+// "I can only see very little" this version exists to end.
+export function scrollStatusText({ before = 0, paused = 0 } = {}) {
+  const n = Math.max(0, Math.floor(Number(before)) || 0);
+  if (!n) return '';
+  const held = Math.max(0, Math.floor(Number(paused)) || 0);
+  return `⧉ mirror · scrolled back ${n} line${n === 1 ? '' : 's'}`
+    + (held ? ` · ${held} live frame${held === 1 ? '' : 's'} waiting` : '')
+    + ' — End/G returns to live';
+}
+
+// Said ONCE, on the first scroll to the very top: what this jam kept, and where the complete
+// record is. `shown` is the client's own "already said it" flag, and the rule that it is said
+// once lives here rather than in the client so it is a test rather than a code reading.
+export function historyEdgeLine({ atTop = false, shown = false, events = 0,
+  paneLines = SCREEN_HISTORY_MAX } = {}) {
+  if (!atTop || shown) return null;
+  const n = Math.max(0, Math.floor(Number(events)) || 0);
+  const lines = Math.max(0, Math.floor(Number(paneLines)) || 0);
+  return `— that is as far back as this jam kept (${n} event${n === 1 ? '' : 's'} · host pane ${lines} lines)`
+    + ' · /export for the full transcript';
+}
+
 // ------------------------------------------------------- v0.10: tool collapse ----
 
 // `Bash: {"command":…}` → `Bash`. The daemon builds that string in parseJsonlLine, so the
@@ -920,7 +1021,38 @@ export const KEY_SEQS = [
   // not in PASSTHROUGH_SEQS, so they still go straight to claude's own TUI.
   ['\x1b[A', 'histprev'], ['\x1bOA', 'histprev'],
   ['\x1b[B', 'histnext'], ['\x1bOB', 'histnext'],
+  // v0.28: scrolling the mirror back through the host's REAL pane history. PgUp/PgDn page,
+  // Shift+↑/↓ walk a line at a time (the plain arrows are already input recall), Home goes to
+  // the oldest line the pane still has and End comes back to live. Every spelling a terminal
+  // in either cursor mode can send, because a key that works in iTerm and not in Terminal.app
+  // is a key that does not work.
+  ['\x1b[5~', 'pageup'], ['\x1b[6~', 'pagedown'],
+  ['\x1b[1;2A', 'lineup'], ['\x1b[1;2B', 'linedown'],
+  ['\x1b[1;5A', 'lineup'], ['\x1b[1;5B', 'linedown'], // Ctrl+↑/↓, the other common spelling
+  ['\x1b[H', 'scrolltop'], ['\x1bOH', 'scrolltop'], ['\x1b[1~', 'scrolltop'],
+  ['\x1b[F', 'scrolllive'], ['\x1bOF', 'scrolllive'], ['\x1b[4~', 'scrolllive'],
+  // The wheel, IF the terminal sends it. claude-jam never turns mouse reporting on — doing so
+  // would take text selection away from the human, which is a worse trade than a missing wheel —
+  // so these only ever arrive from a terminal that already had it on. SGR (1006) first, then
+  // the X10 form; button 64/96 is a wheel up, 65/97 a wheel down. The third element is what a
+  // HALF-arrived sequence looks like, so a chunk split mid-report is held rather than typed.
+  [/^\x1b\[<6[45];\d{1,5};\d{1,5}[Mm]/, wheelKey, /^\x1b(\[(<\d{0,3}(;\d{0,5}){0,2})?)?$/],
+  // The X10 partial is deliberately narrow: `\x1b[` + anything would hold every arrow key ever
+  // pressed (measured — it broke `\x1b[C` on the first run), so it only holds a tail that has
+  // already committed to the `M`.
+  [/^\x1b\[M[\x60\x61][\s\S]{2}/, wheelKey, /^\x1b(\[(M[\s\S]{0,2})?)?$/],
 ];
+// One regex per wheel ENCODING, not per direction — two near-identical regexes that differ by
+// a single digit are two regexes that drift. The direction comes out of the bytes that matched:
+// SGR button 64 / X10 button 0x60 is a wheel up, 65 / 0x61 a wheel down. A notch moves
+// WHEEL_LINES rows, which is what every other terminal program does with one.
+export const WHEEL_LINES = 3;
+export function wheelKey(seq) {
+  const s = String(seq ?? '');
+  const sgr = /^\x1b\[<(6[45]);/.exec(s);
+  const up = sgr ? sgr[1] === '64' : s.charCodeAt(3) === 0x60;
+  return up ? 'wheelup' : 'wheeldown';
+}
 
 // v0.14: while passthrough is on, every byte belongs to the claude TUI — the only key the
 // client still keeps for itself is the F3 that turns it back off.
@@ -951,15 +1083,26 @@ export function sendKeyArgs(text) {
 // lone ESC, which is passed straight through so pressing Escape is never swallowed.
 // ponytail: that means a chunk split exactly after the ESC of a real sequence leaks its
 // bytes as text. Terminals write a sequence in one go, so it stays theoretical.
+// v0.28: an entry's first element may also be an ANCHORED RegExp, for the one key whose bytes
+// are not a fixed string — a mouse wheel report carries its own coordinates. Such an entry
+// brings its own "could still grow into me" pattern as a third element, so a chunk split
+// mid-report is held exactly as a half-arrived F2 is. Its NAME may be a function of the matched
+// text, which is how one wheel regex serves both directions.
+const seqName = (name, matched) => (typeof name === 'function' ? name(matched) : name);
 export function extractKeys(chunk, seqs = KEY_SEQS) {
   let s = String(chunk ?? '');
   let text = '';
   const keys = [];
   scan: while (s) {
     for (const [seq, name] of seqs) {
-      if (s.startsWith(seq)) { keys.push(name); s = s.slice(seq.length); continue scan; }
+      if (seq instanceof RegExp) {
+        const m = seq.exec(s);
+        if (m) { keys.push(seqName(name, m[0])); s = s.slice(m[0].length); continue scan; }
+      } else if (s.startsWith(seq)) { keys.push(seqName(name, seq)); s = s.slice(seq.length); continue scan; }
     }
-    if (s.length > 1 && seqs.some(([seq]) => seq.startsWith(s))) return { keys, text, hold: s };
+    if (s.length > 1 && seqs.some(([seq, , partial]) => (seq instanceof RegExp
+      ? partial instanceof RegExp && partial.test(s)
+      : seq.startsWith(s)))) return { keys, text, hold: s };
     text += s[0];
     s = s.slice(1);
   }
@@ -1449,7 +1592,48 @@ export function capOutput(text, maxLines = OUT_MAX_LINES, maxChars = OUT_MAX_CHA
 // The event shapes are onTranscript's, deliberately duplicated — the live path owns turn and
 // status side effects this one must not have, and a test pins the two together.
 export const REPLAY_DEFAULT = 300;
-export const REPLAY_MAX = 5000;
+// v0.28: the ring buffer is no longer a flat 300 and `--replay` is no longer capped below what
+// the ring can hold — "as far back as this jam kept" has to be a number a person can actually
+// ask for. One cap for both flags, so `--replay all` and `--history <cap>` mean the same depth.
+export const HISTORY_DEFAULT = 2000;
+export const HISTORY_CAP = 20000;
+export const REPLAY_MAX = HISTORY_CAP;
+
+// `--history N`: how many events the daemon's ring keeps. 0 is legal and means "keep nothing",
+// which is what somebody hosting a conversation they do not want replayed asks for. Over the cap
+// is a refusal with the cap in it, never a silent clamp — a host who typed 100000 has a belief
+// about what their jam is keeping, and it would be wrong.
+export function historyLimit(v, { def = HISTORY_DEFAULT, cap = HISTORY_CAP } = {}) {
+  if (v == null || v === '') return { ok: true, n: def };
+  const n = Math.floor(Number(v));
+  if (!Number.isFinite(n) || n < 0) {
+    return { ok: false, error: `bad --history: expected 0-${cap} events, got ${JSON.stringify(String(v))}` };
+  }
+  if (n > cap) return { ok: false, error: `bad --history: ${n} events is over the ${cap} cap` };
+  return { ok: true, n };
+}
+
+// `--replay N | all`. `all` is not infinity — it is exactly what the ring can hold, because that
+// is the honest most a joiner could ever be given. Same refusals as --history.
+export function parseReplay(v, { def = REPLAY_DEFAULT, cap = REPLAY_MAX } = {}) {
+  if (v == null || v === '') return { ok: true, n: def, all: false };
+  if (String(v).trim().toLowerCase() === 'all') return { ok: true, n: cap, all: true };
+  const n = Math.floor(Number(v));
+  if (!Number.isFinite(n) || n < 0) {
+    return { ok: false, error: `bad --replay: expected 0-${cap} events or "all", got ${JSON.stringify(String(v))}` };
+  }
+  if (n > cap) return { ok: false, error: `bad --replay: ${n} events is over the ${cap} cap` };
+  return { ok: true, n, all: false };
+}
+
+// What a joining client is actually handed: min(--replay, what the ring is holding). Both halves
+// matter — a big --replay cannot conjure events the ring never kept, and a big ring is not
+// replayed in full to somebody who asked for less.
+export function replayCount(replay = REPLAY_DEFAULT, held = 0) {
+  const want = Math.max(0, Math.floor(Number(replay)) || 0);
+  const have = Math.max(0, Math.floor(Number(held)) || 0);
+  return Math.min(want, have);
+}
 
 export function backfillHistory(text, { hostName = 'Host', cap = REPLAY_DEFAULT } = {}) {
   const events = [];
@@ -1489,6 +1673,32 @@ export function historyDivider(count = 0, width = ONBOARD_W) {
   const n = Math.floor(Number(count));
   if (!(n > 0)) return null;
   const label = ` history above (${n} replayed) · live from here `;
+  const pad = Math.max(2, Math.floor((width - label.length) / 2));
+  return `${'─'.repeat(pad)}${label}${'─'.repeat(pad)}`;
+}
+
+// ------------------------------- v0.28: /history [n|all], further back on demand ----
+// The replay a joiner gets is a slice; this asks for more of it. `null` is "one page more",
+// which is what somebody typing a bare `/history` means. The number is capped at the ring's own
+// cap rather than refused: `/history 999999` is a person saying "everything", and that is what
+// `all` means anyway.
+export const HISTORY_PAGE = 100;
+export function parseHistoryCommand(rest, { page = HISTORY_PAGE, cap = HISTORY_CAP } = {}) {
+  const t = String(rest ?? '').trim();
+  if (!t) return { ok: true, n: page, all: false };
+  if (t.toLowerCase() === 'all') return { ok: true, n: cap, all: true };
+  const n = Math.floor(Number(t));
+  if (!Number.isFinite(n) || n <= 0) return { ok: false, error: 'usage: /history [n|all]' };
+  return { ok: true, n: Math.min(n, cap), all: false };
+}
+
+// The dim rule a re-printed page sits under. It says what this page is AND what is still behind
+// it, so a reader can tell "there is more" from "that is everything" without guessing.
+export function historyPageDivider({ shown = 0, older = 0, width = ONBOARD_W } = {}) {
+  const n = Math.max(0, Math.floor(Number(shown)) || 0);
+  if (!n) return null;
+  const rest = Math.max(0, Math.floor(Number(older)) || 0);
+  const label = ` ${n} earlier event${n === 1 ? '' : 's'} · ${rest ? `${rest} older still kept` : 'that is everything kept'} `;
   const pad = Math.max(2, Math.floor((width - label.length) / 2));
   return `${'─'.repeat(pad)}${label}${'─'.repeat(pad)}`;
 }
@@ -3034,6 +3244,7 @@ export const COMMAND_HELP = {
   '/answer': 'answer what claude is asking · /answer <n> | <q> <n> | other <text>',
   '/allow-perm': "type a guest's answer into a permission prompt · `always` makes it standing",
   '/deny-perm': "refuse a guest's answer to a permission prompt",
+  '/history': 're-print further back than the replay you were given (/history [n|all])',
   '/outbox': 'messages the daemon kept when it could not confirm they landed',
   '/retry': 'send the newest kept message again',
   '/end': 'end the jam for everybody — the daemon, the TUI, the tmux session',
@@ -3081,7 +3292,8 @@ export const HOST_FLAGS = [
   { flag: '--uploads', arg: 'ask|auto|off', desc: 'ask about every file a guest sends (default), let anyone already admitted send with no prompt, or refuse all uploads' },
   { flag: '--upload-quota', arg: 'N[MB|files]', desc: 'how much an `auto` session may take before it falls back to asking (default 40 files / 200 MB)' },
   { flag: '--export', arg: 'ask|auto|off', desc: 'the transcript is the whole conversation, so it has its own toggle and stays `ask` by default' },
-  { flag: '--replay', arg: 'N', desc: 'how much of the transcript on disk a joining guest is shown' },
+  { flag: '--replay', arg: 'N|all', desc: 'how much of the transcript on disk a joining guest is shown; `all` is everything the ring kept' },
+  { flag: '--history', arg: 'N', desc: `events the jam keeps for replay and /history (default ${HISTORY_DEFAULT}, cap ${HISTORY_CAP})` },
   { flag: '--attach', arg: '', desc: 'reopen your client on a jam that is already running' },
   { flag: '--no-prompt', arg: '', desc: 'do not ask on exit whether to keep the jam running' },
   { flag: '--end-on-exit', arg: '', desc: 'end the jam when your client exits' },
@@ -3095,6 +3307,9 @@ export const KEY_HELP = [
   { key: 'F3', desc: 'host: attach the real TUI · F3 again (or Ctrl-b d) comes back' },
   { key: 'Shift+Enter', desc: 'a newline instead of a send (Alt+Enter and a trailing \\ do the same)' },
   { key: '↑ / ↓', desc: 'recall what you sent' },
+  { key: 'PgUp / PgDn', desc: 'live TUI: scroll back through the host\'s real pane history' },
+  { key: 'Shift+↑ / ↓', desc: 'live TUI: the same, one line at a time (the wheel too, if your terminal sends it)' },
+  { key: 'End / G', desc: 'live TUI: back to the live screen — Esc does it too' },
   { key: 'a / d', desc: 'host: answer the ⚑ approval bar without typing a command' },
   { key: 'Esc', desc: 'dismiss the approval bar · Esc again re-arms the single keys' },
   { key: 'Ctrl-C', desc: 'leave the client (the jam keeps running)' },
@@ -3218,9 +3433,18 @@ export function menuTree({ host = true, state = {} } = {}) {
       { id: 'session.mirror', label: 'Live TUI ⇄ transcript', desc: COMMAND_HELP['/mirror'], covers: ['/mirror'], run: '/mirror' },
       { id: 'session.outbox', label: 'Kept messages', desc: COMMAND_HELP['/outbox'], covers: ['/outbox'], run: '/outbox' },
       { id: 'session.retry', label: 'Send a kept message again', desc: COMMAND_HELP['/retry'], covers: ['/retry'], run: '/retry' },
-      { id: 'session.replay', label: 'Replay depth', covers: [],
-        desc: 'how much of the transcript a joining guest is shown (--replay)',
+      { id: 'session.history', label: 'Earlier history', desc: COMMAND_HELP['/history'], covers: ['/history'], run: '/history' },
+      { id: 'session.replay', label: 'Replay depth', covers: [], coversFlag: '--replay',
+        desc: 'how much of the transcript a joining guest is shown (--replay N or --replay all)',
         value: val(s.replay) },
+      // v0.28: the ring the replay is cut from. Two rows, because "what a joiner is shown" and
+      // "what the jam still has" are different numbers and a host needs to see both.
+      { id: 'session.depth', label: 'History kept', covers: [], coversFlag: '--history',
+        desc: `events this jam keeps to replay and to re-print with /history (default ${HISTORY_DEFAULT}, cap ${HISTORY_CAP})`,
+        value: val(s.history) },
+      { id: 'session.scroll', label: 'Scroll the live TUI', covers: [],
+        desc: 'PgUp/PgDn (Shift+↑/↓, and the wheel if your terminal sends it) scroll the mirror '
+          + `back through the host's real pane history — End, G or Esc returns to live` },
       { id: 'session.attach', label: 'Attach the real TUI', covers: [],
         desc: host ? 'F3 hands your keyboard to claude — F3 again comes back' : 'host only: F3 attaches the real TUI' },
       ...(host ? [{ id: 'session.end', label: 'End the jam', desc: COMMAND_HELP['/end'], covers: ['/end'], run: '/end' }] : []),
