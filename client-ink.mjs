@@ -27,7 +27,10 @@ import { Box, Text, Static, render as inkRender } from 'ink';
 import TextInput from 'ink-text-input';
 import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage, historyDivider, toolLiveLine,
   // v0.17 Batch P: the bell and its gate, @mentions, the RTT chip, jam's own autocomplete.
-  BELL, bellAllowed, mentionsMe, rttText, commandMatches, COMMAND_HINTS_MAX } from './lib.mjs';
+  BELL, bellAllowed, mentionsMe, rttText, commandMatches, COMMAND_HINTS_MAX,
+  // v0.18: the host ended the jam — one line, exit 0, and no reconnect at a daemon that is
+  // deliberately gone. /end is the other half, and it asks before it sends.
+  endingNotice, confirmYes } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const h = React.createElement;
@@ -96,6 +99,9 @@ const store = {
   armed: true,
   hiddenKey: null,
   input: '', // what is in the input line, mirrored out of React for the single-key rule
+  // v0.18-4: `/end` asked "really end this jam for everyone?" and the next submitted line
+  // is the answer. Null the rest of the time.
+  confirm: null,
   // v0.17 P5: the last heartbeat round trip the daemon measured for THIS socket, plus when it
   // arrived (this client's own clock, so a skewed daemon clock cannot make the link look stale).
   net: null,
@@ -119,6 +125,7 @@ let toTranscript = 0; // >0: emit() writes to the transcript even in mirror view
 let block = null; // current open message block (nextBlock in lib.mjs)
 let lastTurn = null; // turnKey of the last emitted block, so blocks get a blank line between
 let app = null; // ink instance, once mounted
+let ending = false; // v0.18: the jam is over on purpose, so the close below must not retry
 
 // Leaving is unmount-then-print: ink clears its own two rows on unmount, so anything written
 // afterwards is guaranteed to survive on screen instead of being erased by the next redraw.
@@ -396,6 +403,12 @@ function render(ev) {
       if (!store.pending.length) { store.armed = true; store.hiddenKey = null; }
       return touch();
     }
+    // v0.18-7: the host ended the jam. One line, exit 0, and no reconnect — there is nothing
+    // left to reconnect to, and an orderly end is not a failure.
+    case 'ending': {
+      ending = true;
+      return leave(endingNotice(ev).code, `· ${endingNotice(ev).text}`);
+    }
     // v0.14: something happened to the session everybody should know about — a slash command
     // was run in the TUI, a guest's request was approved.
     case 'sys': return sys(ev.text);
@@ -455,6 +468,8 @@ function connect() {
     // `leave` is deferred a tick, so this must return: otherwise the retry below is scheduled
     // and a "disconnected, retrying" line lands on top of the rejection first.
     if (e.code >= 4400 && e.code <= 4429) return leave(1, `! rejected: ${e.reason || 'auth'}`);
+    // The jam ended on purpose: this close is the expected end of it, not a fault.
+    if (ending) return;
     store.status = { busy: false, waiting: false }; // nothing is known while the socket is down
     sys(reconnectMessage(++attempts, backoff));
     setTimeout(connect, backoff);
@@ -683,6 +698,14 @@ function sendUpload(ev) {
 // One submitted input row. Identical dispatch to the readline client, including the
 // continuation buffer: a trailing `\` collects, the first line without one flushes.
 function submit(raw) {
+  // v0.18-4: /end asked "really end this jam for everyone?", and this is the answer — taken
+  // before anything is parsed, so a bare `y` can never become a message to claude.
+  if (store.confirm === 'end') {
+    store.confirm = null;
+    if (confirmYes(raw)) { sendMsg({ t: 'end' }); sys('ending the jam for everyone…'); }
+    else sys('nothing ended — the jam is still running');
+    return touch();
+  }
   const a = parseClientLine(raw);
   if (a.kind === 'continue') { store.cont.push(a.text); return touch(); }
   const act = store.cont.length ? parseClientLine([...store.cont, raw].join('\n')) : a;
@@ -764,6 +787,12 @@ function submit(raw) {
     case 'slash':
       sendMsg({ t: 'slash', text: act.text });
       if (!IS_HOST) sys(`${act.text} — sent to the host for approval`);
+      break;
+    // v0.18-4: end the whole jam. Host-only here and in the daemon, and it asks first —
+    // this is the one jam command that takes the session away from everybody.
+    case 'end':
+      if (!IS_HOST) err('host only');
+      else { store.confirm = 'end'; sys('really end this jam for everyone? [y/N]'); }
       break;
     case 'quit': return leave(0);
     case 'error': err(act.text); break;
