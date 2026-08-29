@@ -35,6 +35,15 @@ usage() {
   echo "         ([--no-prompt] [--end-on-exit] [--keep-on-exit] decide it up front)."
   echo "       claude-jam host --attach [--tmux NAME]"
   echo "         reopen your client on a jam that is already running."
+  echo "       claude-jam adopt [--pane %23] [--socket NAME] [--yes] [--no-brief]"
+  echo "                        [--brief-updates on|off] [<any claude-jam host flag>]"
+  echo "         share the claude you are ALREADY in, without restarting it. Run it from"
+  echo "         inside that session (claude can run it for you) or point --pane at one."
+  echo "         It shows what it resolved — pane, socket, directory, session id, and that"
+  echo "         session's first and last line — and asks before sharing anything; --yes"
+  echo "         skips the question. claude-jam never ends a session it did not start:"
+  echo "         claude-jam end stops the daemon and leaves the pane and claude alone."
+  echo "         At adoption claude is TOLD it is now shared (--no-brief skips that)."
   echo "       claude-jam join <invite-link>"
   echo "         one command, nothing else: the link carries the address, your name and a"
   echo "         per-invite secret, so there is no approval to wait for."
@@ -69,6 +78,9 @@ if [ "$#" -eq 0 ]; then exec node "$DIR/menu.mjs"; fi
 cmd="${1:-}"; shift || true
 case "$cmd" in
   host) exec node "$DIR/host.mjs" "$@" ;;
+  # v0.33: share the session already running in a tmux pane. It resolves and CONFIRMS before it
+  # touches anything, then hands host.mjs a plan — so there is still exactly one daemon launcher.
+  adopt) exec node "$DIR/sessions.mjs" adopt "$@" ;;
   # v0.23: `claude-jam join` with nothing after it is a question, not a mistake — the launcher
   # menu opens on its Join screen, which starts with the jams it can see on this network.
   join) if [ "$#" -eq 0 ]; then exec node "$DIR/menu.mjs" join; fi; exec node "$DIR/client.mjs" "$@" ;;

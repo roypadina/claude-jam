@@ -761,6 +761,13 @@ export function claudeTarget(session) {
   return `${session}:claude`;
 }
 
+// v0.33: what F3 actually attaches to. An ordinary jam names its own `claude` window; an ADOPTED
+// jam sends the pane id it is driving, and a pane id is already a complete tmux target — the
+// adopted pane may be window 3 of somebody's session and called anything at all.
+export function attachTarget(nameOrPane) {
+  return validPaneId(nameOrPane) ? nameOrPane : claudeTarget(nameOrPane);
+}
+
 // ------------------------------------- v0.5.1: rendering feedback round -----------
 
 // Stable per-participant color: hash the name into a curated palette, not join order, so
@@ -1901,11 +1908,21 @@ export function portFromStateDir(name) {
 // authenticates its POST /end — the same loopback+secret gate the knock popup already uses; it
 // lives in a 0700 dir beside token.json, which already holds the join token.
 export function sessionInfo({ tmux, port, viewPort, cwd, sessionId, createdAt, pid, state,
-  secret = null, socket = TMUX_DEFAULT_SOCKET, jamName = '' }) {
+  secret = null, socket = TMUX_DEFAULT_SOCKET, jamName = '', adopt = null }) {
   return {
     jam: SESSION_TAG,
     v: SESSION_V,
     tmux: String(tmux ?? ''),
+    // v0.33: the pane this jam ADOPTED, on the tmux server that pane lives on — null for an
+    // ordinary jam, which is nearly all of them. `tmux`/`socket` above still name jam's OWN
+    // session (the one holding the daemon, the one `claude-jam end` may kill); this names
+    // somebody else's pane, which jam may only read and type into. Written here so
+    // `claude-jam sessions` can say `adopted` without asking a daemon, and so that a second
+    // `claude-jam adopt` on the same pane can be refused instead of doubling up on it.
+    adopt: adopt && validPaneId(adopt.pane)
+      ? { pane: String(adopt.pane), socket: String(adopt.socket || TMUX_DEFAULT_SOCKET),
+        session: String(adopt.session ?? '') }
+      : null,
     // v0.23: the jam's DISPLAY name (`--jam-name`, defaulting to the cwd's basename). Cosmetic
     // and separate from `tmux` on purpose — `tmux` is the identifier `claude-jam end` takes and
     // the thing that must stay a tmux-legal word, this is what a human calls the room. It is
@@ -2057,14 +2074,20 @@ export function exitPromptText(guests = 0) {
 // The way back in, printed whenever a client leaves a jam running (`k`, `--keep-on-exit`, a
 // non-interactive exit) — one wording, so the launcher and `claude-jam sessions` agree.
 export function reattachLines({ tmux = DEFAULT_TMUX, port = 7777, clientCmd = 'node client.mjs', name = 'Host',
-  token = null, socket = TMUX_DEFAULT_SOCKET } = {}) {
+  token = null, socket = TMUX_DEFAULT_SOCKET, adopt = null } = {}) {
   return [
     `client:  claude-jam host --attach${tmux === DEFAULT_TMUX ? '' : ` --tmux ${tmux}`}`,
     `  or:    ${clientCmd} ws://127.0.0.1:${port} --name ${name}${token ? ` --token ${token}` : ''} --host`,
     // v0.20: jam's tmux lives on a socket of its own, so a bare `tmux attach` no longer finds it.
-    `raw TUI: ${tmuxAttachLine(socket, tmux, claudeTarget(tmux))}`,
+    // v0.33: unless the jam was ADOPTED, and then the raw TUI is the pane it is driving, on
+    // whatever server that pane lives on — jam's own session holds only the daemon's log.
+    adopt?.pane
+      ? `raw TUI: ${tmuxAttachLine(adopt.socket, adopt.pane, adopt.pane)}   (the session you adopted)`
+      : `raw TUI: ${tmuxAttachLine(socket, tmux, claudeTarget(tmux))}`,
     `list:    claude-jam sessions`,
-    `stop:    claude-jam end ${tmux}`,
+    adopt?.pane
+      ? `stop:    claude-jam end ${tmux}   (stops the daemon; the pane and claude stay exactly as they are)`
+      : `stop:    claude-jam end ${tmux}`,
   ];
 }
 
@@ -3490,6 +3513,15 @@ export function menuTree({ host = true, state = {} } = {}) {
       { id: 'help.commands', label: 'Every command', covers: [],
         desc: 'the whole list, with one line each and one key to run it',
         items: (host ? JAM_COMMANDS : guestOnly).map(cmdItem) },
+      // v0.33. Not a client command and not a `host` flag — it is how a jam STARTS when the
+      // session already exists — but `/menu → Help & guides` is meant to be a true index of the
+      // tool, and "you can share the session you are already in" is the part nobody guesses.
+      { id: 'help.adopt', label: 'Adopt a running session', covers: [],
+        desc: '`claude-jam adopt` shares the claude you are ALREADY in, in the tmux pane it is '
+          + 'already running in — no restart, no lost context. Run it from inside that session '
+          + '(claude can run it for you), or point `--pane %23 [--socket NAME]` at one. It shows '
+          + 'what it resolved and asks first. Ending an adopted jam stops claude-jam and leaves '
+          + 'the pane, the tmux session and claude exactly as they were.' },
       ...(host ? [{ id: 'help.flags', label: 'Host launch flags', covers: [],
         desc: 'what `claude-jam host` takes, and what each flag does',
         items: HOST_FLAGS.map((f) => ({ id: `flag${f.flag}`, label: `${f.flag}${f.arg ? ` ${f.arg}` : ''}`,
@@ -4091,3 +4123,244 @@ export function exportDecision({ policy = 'ask', trusted = false, standing = fal
 // answer is success. `claude-jam join` with no argument is a MISSING ARGUMENT: interactively the
 // Join screen asks for it, and where nothing can ask, it is a usage error and exits 2.
 export function menuNonTtyExit(start) { return String(start ?? '') === 'join' ? 2 : 0; }
+
+// ================= v0.33: adopt a session claude-jam did not start ====
+// Everything jam does to a claude is `capture-pane` out and `paste-buffer`/`send-keys` in,
+// against a tmux TARGET — and nothing in that requires jam to have created the target. So a
+// session already running in the user's OWN tmux can be jammed where it stands, without
+// restarting it, which is the one thing `--resume` could never do.
+//
+// The whole risk of the feature is that jam now points tmux at a server it does not own, so the
+// rule this section encodes is narrow and total: on a foreign socket jam READS
+// (`capture-pane`, `display-message`, `list-panes`) and TYPES INTO THE ADOPTED PANE, and does
+// nothing else. No `new-session`, no `kill-session`, no `set-option`, no `-g` anything, no key
+// binding — a key table is server-global, and that server is somebody's own.
+//
+// The daemon still runs in a tmux session of jam's OWN, on jam's own socket. That is what keeps
+// v0.18 intact: `claude-jam end` has something of jam's own to end, the ownership marker goes on
+// jam's session and never on the adopted one, and ending an adopted jam takes the daemon and its
+// children down and leaves the adopted pane, session and claude exactly as they were found.
+
+// `$TMUX` is `<socket-path>,<server-pid>,<session-index>` — tmux has written it that way since
+// 1.8 (re-read on 3.7c). The socket NAME is that path's basename, which is what `-L` takes.
+// ponytail: a server started with `tmux -S /some/other/path` therefore only resolves if that
+// basename also exists under tmux's own directory. `-S <path>` would cover it, but it would also
+// put a PATH into session.json's `socket` field, which every other caller in this project reads
+// as a name — so that case is a refusal carrying its reason rather than a second shape everywhere.
+export function parseTmuxEnv(value) {
+  const v = String(value ?? '');
+  if (!v) return null;
+  const [socketPath = '', pid = '', index = ''] = v.split(',');
+  if (!socketPath) return null;
+  return { socketPath, socket: path.basename(socketPath), pid: Number(pid) || 0, index: Number(index) || 0 };
+}
+
+// A socket name becomes a filename under tmux's directory, so it keeps the same boring charset
+// tmuxSocketFor's override does — and a pane id is `%23`, never a free-form string, because that
+// value becomes the `-t` of every send-keys and paste-buffer the daemon will ever run.
+export const SOCKET_NAME_RE = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/;
+export const PANE_ID_RE = /^%\d{1,9}$/;
+export function validPaneId(v) { return typeof v === 'string' && PANE_ID_RE.test(v); }
+
+// What `claude-jam adopt` is pointed at, and where that answer came from. The flags win; then the
+// environment jam inherited from the pane it was run inside (claude runs `claude-jam adopt` as a
+// Bash call, so it has `$TMUX`/`$TMUX_PANE`); and with neither there is no tmux here at all,
+// which is spec item 6 rather than an error — the caller prints the `--resume` alternative.
+export function resolveAdoptTarget({ pane = null, socket = null, env = {} } = {}) {
+  const asked = String(pane ?? '').trim();
+  const wantPane = asked || String(env.TMUX_PANE ?? '').trim();
+  if (!wantPane) {
+    return { ok: false, noTmux: true,
+      error: 'not inside a tmux pane ($TMUX_PANE is not set, and no --pane was given)' };
+  }
+  if (!PANE_ID_RE.test(wantPane)) {
+    return { ok: false, error: `"${wantPane}" is not a tmux pane id — they look like %23 `
+      + '(run `tmux display-message -p "#{pane_id}"` in the pane you mean)' };
+  }
+  const fromEnv = parseTmuxEnv(env.TMUX);
+  const askedSocket = String(socket ?? '').trim();
+  const wantSocket = askedSocket || fromEnv?.socket || TMUX_DEFAULT_SOCKET;
+  if (!SOCKET_NAME_RE.test(wantSocket)) {
+    return { ok: false, error: `"${wantSocket}" is not a usable tmux socket name — `
+      + 'pass --socket <name> (tmux keeps them in $TMUX_TMPDIR/tmux-<uid>/)' };
+  }
+  return { ok: true, pane: wantPane, socket: wantSocket,
+    paneFrom: asked ? 'flag' : 'environment',
+    socketFrom: askedSocket ? 'flag' : fromEnv?.socket ? 'environment' : 'default' };
+}
+
+// One read-only `display-message` answers everything jam needs to SHOW before it adopts. The
+// fields are separated by U+0001 rather than a tab, because a tmux window name may contain a tab
+// and a path may contain almost anything else.
+export const PANE_FIELDS = ['pane_id', 'pane_pid', 'pane_current_command', 'pane_current_path',
+  'session_name', 'window_index', 'pane_index', 'window_name'];
+export const PANE_SEP = '\u0001';
+export const PANE_FORMAT = PANE_FIELDS.map((f) => `#{${f}}`).join(PANE_SEP);
+export function parsePaneInfo(text) {
+  const parts = String(text ?? '').replace(/\n+$/, '').split(PANE_SEP);
+  if (parts.length < PANE_FIELDS.length) return null;
+  const o = Object.fromEntries(PANE_FIELDS.map((f, i) => [f, parts[i]]));
+  if (!PANE_ID_RE.test(o.pane_id)) return null;
+  return {
+    paneId: o.pane_id,
+    pid: Number(o.pane_pid) || 0,
+    command: o.pane_current_command || '',
+    cwd: o.pane_current_path || '',
+    session: o.session_name || '',
+    windowIndex: o.window_index || '',
+    paneIndex: o.pane_index || '',
+    windowName: o.window_name || '',
+  };
+}
+
+// Which foreground commands read as "a claude is running in there". Informational, never a gate:
+// a wrapper script or a shim can be called anything, and the session-id confirmation is the real
+// check. A plain shell IS worth saying out loud, because it usually means the pane is at a prompt.
+const CLAUDE_COMMANDS = ['claude', 'node', 'bun', 'deno'];
+const SHELL_COMMANDS = ['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'pwsh', 'nu'];
+export function paneCommandNote(command) {
+  const c = String(command ?? '').trim();
+  if (!c) return 'tmux did not report what is running in that pane';
+  if (CLAUDE_COMMANDS.includes(c)) return null;
+  if (SHELL_COMMANDS.includes(c)) {
+    return `that pane's foreground command is \`${c}\` — a shell prompt, not a running claude. `
+      + 'Adopting it would share a pane with nothing in it.';
+  }
+  return `that pane is running \`${c}\`, which is not how claude usually shows up (claude, node) — `
+    + 'check you named the right pane';
+}
+
+// Where that directory's transcripts are: the default profile always, plus the selected one when
+// it is somewhere else. The same pair jsonlGlobs builds, keyed by cwd instead of by session id —
+// because adoption is the one case where the id is what we are trying to find out. The slug is
+// projectSlug's, which v0.12 already had to work out to print a `claude --resume` recipe;
+// re-verified 2026-08-29 against all 400+ directories in ~/.claude/projects on this machine —
+// every one matched the `cwd` its own records carry.
+export function claudeProjectGlobs(cwd, home = os.homedir(), configDir = null) {
+  const slug = projectSlug(cwd);
+  const globs = [path.join(home, '.claude', 'projects', slug, '*.jsonl')];
+  const extra = configDir ? path.join(configDir, 'projects', slug, '*.jsonl') : null;
+  if (extra && extra !== globs[0]) globs.push(extra);
+  return globs;
+}
+
+// How recently a transcript must have been written to be the one on that screen. Generous on
+// purpose — somebody who walked away for an hour is still in that session — and an older file is
+// not refused, it is FLAGGED: the confirmation says how old it is, and `--yes` (which skips the
+// confirmation) refuses it rather than adopting a stale guess nobody looked at.
+export const ADOPT_LIVE_MS = 12 * 60 * 60 * 1000;
+
+export function pickAdoptSession(files = [], now = 0, liveMs = ADOPT_LIVE_MS) {
+  const list = (Array.isArray(files) ? files : [])
+    .map((f) => ({ file: String(f?.file ?? ''), mtime: Number(f?.mtime) || 0 }))
+    .filter((f) => f.file && isUuid(path.basename(f.file, '.jsonl')))
+    .sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? -1 : 1));
+  if (!list.length) {
+    return { ok: false, error: 'no claude transcript for that directory — either claude has not '
+      + 'written a line yet, or it is running under a different profile (--config-dir)' };
+  }
+  const top = list[0];
+  const age = Math.max(0, Number(now) - top.mtime);
+  return {
+    ok: true, sessionId: path.basename(top.file, '.jsonl'), file: top.file, mtime: top.mtime,
+    age, stale: age > liveMs, others: list.length - 1,
+  };
+}
+
+// The two lines that make the confirmation a real check rather than a formality: the FIRST thing
+// the human said in this session and the LAST thing claude answered. Adopting the wrong id shares
+// the wrong conversation with everybody in the room, so this is what a human reads before saying
+// yes. `head`/`tail` are byte windows of the transcript, so both ends stay cheap on a file that
+// may be hundreds of megabytes; a window that lands mid-line simply parses to nothing.
+export function sessionPreview({ head = '', tail = '', max = 160 } = {}) {
+  const one = (s) => stripControl(String(s)).split('\n').map((l) => l.trim())
+    .filter(Boolean).join(' ').slice(0, max);
+  let first = '';
+  for (const line of String(head).split('\n')) {
+    const hit = parseJsonlLine(line).find((e) => e.kind === 'user' && String(e.text ?? '').trim());
+    if (hit) { first = one(hit.text); break; }
+  }
+  let last = '';
+  const lines = String(tail).split('\n');
+  for (let i = lines.length - 1; i >= 0 && !last; i--) {
+    const hit = [...parseJsonlLine(lines[i])].reverse()
+      .find((e) => e.kind === 'text' && String(e.text ?? '').trim());
+    if (hit) last = one(hit.text);
+  }
+  return { first, last };
+}
+
+// What `claude-jam adopt` prints before it does anything at all: every fact it resolved, named,
+// with the two transcript lines under it — because adopting is irreversible in the one way that
+// matters, which is that a wrong session id shares somebody else's conversation with the room.
+export function adoptConfirmText(a = {}) {
+  const where = a.windowName ? `  (${a.session}:${a.windowIndex}.${a.paneIndex} "${a.windowName}")` : '';
+  const rows = [
+    ['pane', `${a.pane}${where}`],
+    ['tmux socket', `${a.socket}${a.socket === TMUX_DEFAULT_SOCKET ? '  (your own tmux server)' : ''}`],
+    ['running', `${a.command || '?'}${a.pid ? `  (pane pid ${a.pid})` : ''}`],
+    ['directory', a.cwd || '?'],
+    ['session', `${a.sessionId}${a.age != null ? `  (last written ${uptimeText(a.age)} ago)` : ''}`],
+    ['transcript', a.file || '?'],
+  ];
+  const w = Math.max(...rows.map(([k]) => k.length));
+  const out = ['claude-jam adopt — this is what it resolved:',
+    ...rows.map(([k, v]) => `  ${k.padEnd(w)}  ${v}`)];
+  if (a.others) {
+    out.push(`  ${'other'.padEnd(w)}  ${a.others} more transcript(s) in that directory — this is the newest`);
+  }
+  out.push('', 'the session it is about to share:',
+    `  first message   ${a.first || '(none found)'}`,
+    `  last answer     ${a.last || '(none found)'}`);
+  if (a.note) out.push('', `! ${a.note}`);
+  if (a.stale) {
+    out.push('', `! that transcript has not been written to for ${uptimeText(a.age)} — it is probably `
+      + 'NOT the session on that screen');
+  }
+  return out.join('\n');
+}
+
+// Spec item 6, with the id already filled in: when there is no tmux, adoption is impossible and
+// the honest answer is the other command, complete, rather than "cannot".
+export function adoptNoTmuxText({ sessionId = null, cwd = null, why = '' } = {}) {
+  const id = sessionId || '<session-id>';
+  const dir = cwd || '<dir>';
+  return ['claude-jam adopt needs this claude to be running in a tmux pane, and it is not.',
+    `  ${why || 'no $TMUX_PANE, and no --pane was given'}`,
+    '  A bare terminal, an IDE terminal or a cmux pane has no pane for claude-jam to capture or',
+    '  type into, so there is nothing to adopt in place.',
+    '',
+    '  Share the same conversation by restarting it inside a jam instead:',
+    `    claude-jam host --resume ${id} --cwd ${dir}`,
+    '',
+    '  Exit this session first — `--resume` opens it in a pane of claude-jam\'s own, and the',
+    '  history already on disk comes with it.'].join('\n');
+}
+
+// The refusals that are about WHICH pane rather than about tmux. Both are read-only findings: a
+// session jam already owns is not adopted a second time, and a pane another jam is already
+// driving is somebody's live room.
+export function adoptAlreadyJamText(session, name) {
+  return `tmux session "${session}" is already a jam of claude-jam's own — there is nothing to adopt.\n`
+    + `  reopen your client:  claude-jam host --attach${name && name !== DEFAULT_TMUX ? ` --tmux ${name}` : ''}\n`
+    + '  see it listed:       claude-jam sessions';
+}
+export function adoptAlreadyAdoptedText(pane, row = {}) {
+  return `pane ${pane} is already being shared by a jam on :${row.port}.\n`
+    + `  reopen your client:  claude-jam host --attach --tmux ${row.name}\n`
+    + `  stop sharing it:     claude-jam end ${row.name}  (the pane and claude are left alone)`;
+}
+
+// `claude-jam adopt` hands off to the daemon launcher, so the argv it builds is the whole
+// contract between the two halves. Everything the resolution learned is passed explicitly —
+// recomputing the cwd or the session id in the second process is exactly how two halves of one
+// command come to disagree about what they are sharing.
+export function adoptPlan({ pane, socket, cwd, sessionId, extra = [] } = {}) {
+  if (!validPaneId(pane)) return { ok: false, error: `bad pane: ${pane}` };
+  if (!SOCKET_NAME_RE.test(String(socket ?? ''))) return { ok: false, error: `bad socket: ${socket}` };
+  if (!isUuid(sessionId)) return { ok: false, error: `bad session id: ${sessionId}` };
+  const argv = ['--adopt-pane', pane, '--adopt-socket', String(socket),
+    '--cwd', String(cwd ?? ''), '--session-id', String(sessionId),
+    ...(Array.isArray(extra) ? extra.map(String) : [])];
+  return { ok: true, argv };
+}

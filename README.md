@@ -127,6 +127,55 @@ own, separate toggle), `--no-sound` (start your client silent),
 `-- <extra claude args>`. `claude-jam` with no arguments prints the usage line; `MANUAL.md` explains
 the ones you will actually reach for.
 
+## Adopt the session you are already in
+
+`claude-jam host --resume <id>` restarts a conversation in a pane of claude-jam's own. `claude-jam
+adopt` does not restart anything — it shares the claude that is **already running**, in the tmux
+pane it is already in:
+
+```sh
+# from inside that session — claude can run this for you from the Bash tool
+claude-jam adopt
+
+# from another terminal
+claude-jam adopt --pane %23 --socket default --token ourshared1
+```
+
+It works because claude-jam has only ever driven claude through `capture-pane` out and
+`paste-buffer`/`send-keys` in, against a tmux target — and nothing in that required claude-jam to
+have created the target.
+
+**It shows what it resolved before it shares anything**: the pane, the tmux server, what is
+running in it, the directory, the session id it worked out, and that session's first message and
+last answer. Then it asks. `--yes` skips the question for scripting and refuses outright if the
+transcript it picked is stale, because the failure this guards against is sharing the *wrong*
+conversation with the room.
+
+**Not inside tmux** (a bare terminal, an IDE terminal, a cmux pane)? There is no pane to read or
+type into, so adoption is impossible — and it says so with the whole alternative, id already
+filled in: `claude-jam host --resume <session-id> --cwd <dir>`.
+
+**claude-jam did not create this session, so it will never end it.** On the adopted server it only
+ever reads (`capture-pane`, `display-message`) and types into that one pane. It sets no tmux
+option there — not the ownership marker, not the status line, not the fill character — and binds
+no key, because a tmux key table is server-global and that server is yours. `claude-jam end` stops
+the daemon and its children and leaves the pane, the tmux session and claude exactly as they were;
+`claude-jam sessions` marks the row `adopted`; `claude-jam clean` never touches it.
+
+At adoption claude is **told** it is now in a shared session — one injected message carrying the
+protocol, the two standing rules, the digest and who is here — and told again after a `/compact`,
+because that is when injected context disappears. `--no-brief` skips it; `--brief-updates off`
+stops the later ones.
+
+Two ceilings are inherent and are not worked around:
+
+- **No Stop/Notification hooks.** A running claude cannot be given new hooks — `--settings` is
+  read once, at startup. Turn-end and permission-wait therefore come from the **pane classifier**
+  (v0.31), which reads the screen 2.5 times a second and is the authoritative source anyway.
+- **The pane is not resized.** It is your window, usually with you looking at it, so claude-jam
+  leaves its size alone; a guest on a much smaller terminal sees it letterboxed rather than
+  reflowed.
+
 ## Guest quickstart
 
 ```sh

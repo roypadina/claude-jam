@@ -80,6 +80,11 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   // v0.27: the upload policy, its quota, and the export toggle that is deliberately separate.
   UPLOAD_POLICIES, uploadPolicy, UPLOAD_QUOTA, QUOTA_LINE, parseUploadQuota, quotaLeft,
   quotaReached, quotaText, uploadDecision, exportDecision,
+  // v0.33: adopting a pane claude-jam did not create — what it resolves, and what it refuses.
+  parseTmuxEnv, SOCKET_NAME_RE, PANE_ID_RE, validPaneId, resolveAdoptTarget, PANE_FIELDS,
+  PANE_SEP, PANE_FORMAT, parsePaneInfo, paneCommandNote, claudeProjectGlobs, ADOPT_LIVE_MS,
+  pickAdoptSession, sessionPreview, adoptConfirmText, adoptNoTmuxText, adoptAlreadyJamText,
+  adoptAlreadyAdoptedText, adoptPlan, attachTarget,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -4801,4 +4806,221 @@ test('v0.28 every new key is in the keyboard reference, and /history and --histo
   // A guest sees the same three rows: the feature is read-only and theirs too.
   const g = Object.fromEntries(menuItems(menuTree({ host: false })).map((i) => [i.id, i]));
   assert.ok(g['session.history'] && g['session.scroll']);
+});
+
+// ============================== v0.33: adopt a running session ====
+
+test('v0.33 $TMUX parses into the socket NAME that -L takes', () => {
+  assert.deepEqual(parseTmuxEnv('/private/tmp/tmux-501/default,12345,0'),
+    { socketPath: '/private/tmp/tmux-501/default', socket: 'default', pid: 12345, index: 0 });
+  assert.equal(parseTmuxEnv('/tmp/tmux-0/claude-jam-7777,9,3').socket, 'claude-jam-7777');
+  // A server started with `-S /some/where/mine` still yields a NAME; whether that name resolves
+  // is tmux's answer, and the caller reports the refusal it gets.
+  assert.equal(parseTmuxEnv('/some/where/mine,1,0').socket, 'mine');
+  for (const bad of ['', null, undefined, ',,']) assert.equal(parseTmuxEnv(bad), null, JSON.stringify(bad));
+});
+
+test('v0.33 a pane id is %<digits> and nothing else', () => {
+  for (const good of ['%0', '%23', '%999999999']) assert.equal(validPaneId(good), true, good);
+  for (const bad of ['0', '%', '%1a', '%-1', 'jam:claude', '%1;rm -rf /', '', null, 42, '%1\n%2']) {
+    assert.equal(validPaneId(bad), false, JSON.stringify(bad));
+  }
+  assert.equal(PANE_ID_RE.test('%12'), true);
+});
+
+test('v0.33 resolveAdoptTarget: flags win, then the environment, then there is no tmux', () => {
+  // Inside the session: claude runs `claude-jam adopt` as a Bash call and inherits both.
+  const env = { TMUX: '/private/tmp/tmux-501/default,10,0', TMUX_PANE: '%7' };
+  assert.deepEqual(resolveAdoptTarget({ env }),
+    { ok: true, pane: '%7', socket: 'default', paneFrom: 'environment', socketFrom: 'environment' });
+  // From another terminal: --pane names it, and with no --socket the env's server is the guess
+  // (same server is the common case), which the confirmation then prints for a human to check.
+  assert.deepEqual(resolveAdoptTarget({ pane: '%3', env }),
+    { ok: true, pane: '%3', socket: 'default', paneFrom: 'flag', socketFrom: 'environment' });
+  assert.deepEqual(resolveAdoptTarget({ pane: '%3', socket: 'work', env: {} }),
+    { ok: true, pane: '%3', socket: 'work', paneFrom: 'flag', socketFrom: 'flag' });
+  // No tmux at all is spec item 6, not an error: the caller prints the --resume alternative.
+  const none = resolveAdoptTarget({ env: {} });
+  assert.equal(none.ok, false);
+  assert.equal(none.noTmux, true);
+  // A pane that is not a pane id, and a socket name that would become a path, are refused with
+  // their reason — these two values become tmux arguments the daemon runs for the whole session.
+  assert.match(resolveAdoptTarget({ pane: 'claude-jam:claude', env: {} }).error, /pane id/);
+  assert.equal(resolveAdoptTarget({ pane: 'claude-jam:claude', env: {} }).noTmux, undefined);
+  assert.match(resolveAdoptTarget({ pane: '%1', socket: '../../etc/passwd', env: {} }).error, /socket name/);
+  assert.match(resolveAdoptTarget({ pane: '%1', socket: '-L evil', env: {} }).error, /socket name/);
+  assert.equal(SOCKET_NAME_RE.test('claude-jam-7777'), true);
+  assert.equal(SOCKET_NAME_RE.test('-leading-dash'), false);
+});
+
+test('v0.33 one display-message answers every fact the confirmation shows', () => {
+  assert.equal(PANE_FORMAT.split(PANE_SEP).length, PANE_FIELDS.length);
+  assert.ok(PANE_FORMAT.startsWith('#{pane_id}'));
+  const line = ['%23', '4242', 'node', '/Users/me/code/app', 'work', '2', '1', 'claude'].join(PANE_SEP);
+  assert.deepEqual(parsePaneInfo(line), {
+    paneId: '%23', pid: 4242, command: 'node', cwd: '/Users/me/code/app',
+    session: 'work', windowIndex: '2', paneIndex: '1', windowName: 'claude',
+  });
+  assert.deepEqual(parsePaneInfo(`${line}\n`), parsePaneInfo(line));
+  // tmux answering something else (no such pane) is null, never a half-filled record.
+  assert.equal(parsePaneInfo(''), null);
+  assert.equal(parsePaneInfo('can\'t find pane: %99'), null);
+  assert.equal(parsePaneInfo(['x', '1', 'node', '/p', 's', '0', '0', 'w'].join(PANE_SEP)), null);
+});
+
+test('v0.33 the foreground command is a note, never a gate', () => {
+  assert.equal(paneCommandNote('node'), null);
+  assert.equal(paneCommandNote('claude'), null);
+  assert.match(paneCommandNote('zsh'), /shell prompt/);
+  assert.match(paneCommandNote('vim'), /not how claude usually shows up/);
+  assert.match(paneCommandNote(''), /did not report/);
+});
+
+test('v0.33 transcripts are looked for by cwd, under both profiles', () => {
+  const g = claudeProjectGlobs('/Users/me/code/app', '/Users/me', null);
+  assert.deepEqual(g, ['/Users/me/.claude/projects/-Users-me-code-app/*.jsonl']);
+  const both = claudeProjectGlobs('/Users/me/code/app', '/Users/me', '/Users/me/.claude-work');
+  assert.equal(both.length, 2);
+  assert.equal(both[1], '/Users/me/.claude-work/projects/-Users-me-code-app/*.jsonl');
+  // The selected profile being the default one is not two globs.
+  assert.equal(claudeProjectGlobs('/p', '/Users/me', '/Users/me/.claude').length, 1);
+});
+
+test('v0.33 the session picked is the newest, and a stale one is FLAGGED not hidden', () => {
+  const now = 1_700_000_000_000;
+  const id = (n) => `0000000${n}-0000-4000-8000-000000000000`;
+  const files = [
+    { file: `/p/${id(1)}.jsonl`, mtime: now - 60_000 },
+    { file: `/p/${id(2)}.jsonl`, mtime: now - 5_000 },
+    { file: '/p/not-a-session.jsonl', mtime: now }, // never picked: the name is the id
+  ];
+  const got = pickAdoptSession(files, now);
+  assert.equal(got.ok, true);
+  assert.equal(got.sessionId, id(2));
+  assert.equal(got.others, 1);
+  assert.equal(got.stale, false);
+  // Older than the live window: still returned, but marked — `--yes` refuses it, and the
+  // confirmation says how old it is instead of adopting a guess nobody looked at.
+  const old = pickAdoptSession([{ file: `/p/${id(1)}.jsonl`, mtime: now - ADOPT_LIVE_MS - 1 }], now);
+  assert.equal(old.ok, true);
+  assert.equal(old.stale, true);
+  assert.ok(old.age > ADOPT_LIVE_MS);
+  assert.match(pickAdoptSession([], now).error, /no claude transcript/);
+  assert.match(pickAdoptSession([{ file: '/p/nope.jsonl', mtime: now }], now).error, /no claude transcript/);
+});
+
+test('v0.33 the confirmation shows the FIRST human line and the LAST agent line', () => {
+  const head = [
+    JSON.stringify({ type: 'user', isMeta: true, message: { content: 'boot noise' } }),
+    JSON.stringify({ type: 'user', message: { content: 'port the parser to rust' } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'starting' }] } }),
+  ].join('\n');
+  const tail = [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'the tests pass' }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } }),
+  ].join('\n');
+  assert.deepEqual(sessionPreview({ head, tail }), { first: 'port the parser to rust', last: 'the tests pass' });
+  // A byte window that lands mid-line parses to nothing rather than to a wrong line.
+  assert.deepEqual(sessionPreview({ head: '{"type":"us', tail: 'ge":{"content"' }), { first: '', last: '' });
+  assert.deepEqual(sessionPreview({}), { first: '', last: '' });
+  // Escapes never reach the terminal this is printed on, and the lines are capped.
+  const nasty = JSON.stringify({ type: 'user', message: { content: `\x1b[2Jwipe\nsecond` } });
+  assert.equal(sessionPreview({ head: nasty }).first, 'wipe second');
+  const long = JSON.stringify({ type: 'user', message: { content: 'x'.repeat(500) } });
+  assert.equal(sessionPreview({ head: long, max: 20 }).first.length, 20);
+});
+
+test('v0.33 adoptConfirmText names every resolved fact, and says when one is wrong', () => {
+  const base = { pane: '%23', socket: TMUX_DEFAULT_SOCKET, session: 'work', windowIndex: '2',
+    paneIndex: '0', windowName: 'claude', command: 'node', pid: 4242, cwd: '/c/app',
+    sessionId: 'abc', file: '/t/abc.jsonl', age: 90_000, first: 'hello', last: 'done' };
+  const t = adoptConfirmText(base);
+  for (const want of ['%23', 'work:2.0', 'your own tmux server', 'node', '4242', '/c/app',
+    'abc', '/t/abc.jsonl', 'hello', 'done', '1m ago']) {
+    assert.ok(t.includes(want), `${want} missing from:\n${t}`);
+  }
+  assert.equal(t.includes('!'), false, 'nothing is wrong, so nothing is flagged');
+  const flagged = adoptConfirmText({ ...base, stale: true, age: ADOPT_LIVE_MS + 1,
+    note: 'that pane is running `zsh`', others: 3 });
+  assert.match(flagged, /! that pane is running/);
+  assert.match(flagged, /probably\s+NOT the session on that screen/);
+  assert.match(flagged, /3 more transcript\(s\)/);
+});
+
+test('v0.33 with no tmux the answer is the whole --resume command, id already in it', () => {
+  const t = adoptNoTmuxText({ sessionId: 'ffffffff-0000-4000-8000-000000000000', cwd: '/c/app' });
+  assert.match(t, /claude-jam host --resume ffffffff-0000-4000-8000-000000000000 --cwd \/c\/app/);
+  // Never a bare "cannot": the alternative is complete even when nothing was detected.
+  assert.match(adoptNoTmuxText({}), /claude-jam host --resume <session-id> --cwd <dir>/);
+});
+
+test('v0.33 a jam is never adopted twice, and a shared pane is never doubled up on', () => {
+  assert.match(adoptAlreadyJamText('claude-jam', 'claude-jam'), /already a jam/);
+  assert.match(adoptAlreadyJamText('claude-jam', 'claude-jam'), /claude-jam host --attach\n/);
+  assert.match(adoptAlreadyJamText('work', 'work'), /--attach --tmux work/);
+  const t = adoptAlreadyAdoptedText('%23', { port: 7801, name: 'claude-jam-2' });
+  assert.match(t, /already being shared by a jam on :7801/);
+  assert.match(t, /claude-jam end claude-jam-2/);
+  assert.match(t, /the pane and claude are left alone/);
+});
+
+test('v0.33 adoptPlan is the whole contract between the two halves', () => {
+  const id = 'ffffffff-0000-4000-8000-000000000000';
+  const p = adoptPlan({ pane: '%23', socket: 'default', cwd: '/c/app', sessionId: id,
+    extra: ['--token', 'abcdefgh', '--tunnel'] });
+  assert.deepEqual(p.argv, ['--adopt-pane', '%23', '--adopt-socket', 'default',
+    '--cwd', '/c/app', '--session-id', id, '--token', 'abcdefgh', '--tunnel']);
+  // Nothing is recomputed in the second process, so nothing may be missing or malformed here.
+  assert.match(adoptPlan({ pane: 'nope', socket: 'default', cwd: '/c', sessionId: id }).error, /bad pane/);
+  assert.match(adoptPlan({ pane: '%1', socket: '../x', cwd: '/c', sessionId: id }).error, /bad socket/);
+  assert.match(adoptPlan({ pane: '%1', socket: 'default', cwd: '/c', sessionId: 'nope' }).error, /bad session id/);
+});
+
+test('v0.33 session.json carries the adopted pane, and only when it is a real one', () => {
+  const mk = (adopt) => sessionInfo({ tmux: 'claude-jam', port: 7801, viewPort: 7802, cwd: '/c',
+    sessionId: 'sid', createdAt: 1, pid: 2, state: '/s', socket: 'claude-jam-7801', adopt });
+  assert.equal(mk(null).adopt, null);
+  assert.equal(mk(undefined).adopt, null);
+  assert.equal(mk({ pane: 'claude-jam:claude' }).adopt, null, 'only a pane id ever lands here');
+  assert.deepEqual(mk({ pane: '%23', socket: 'default', session: 'work' }).adopt,
+    { pane: '%23', socket: 'default', session: 'work' });
+  // A pane with no socket means the shared server, exactly as elsewhere in this file.
+  assert.equal(mk({ pane: '%1' }).adopt.socket, TMUX_DEFAULT_SOCKET);
+  // And `tmux`/`socket` still name jam's OWN session: that pair is what may be killed.
+  assert.equal(mk({ pane: '%1' }).tmux, 'claude-jam');
+  assert.equal(mk({ pane: '%1' }).socket, 'claude-jam-7801');
+  assert.equal(parseSessionJson(JSON.stringify(mk({ pane: '%9' }))).adopt.pane, '%9');
+});
+
+test('v0.33 F3 attaches to the pane an adopted jam is driving, not to a window of jam\'s own', () => {
+  // An ordinary jam: the `claude` window by name, which is what v0.20 shipped.
+  assert.equal(attachTarget('claude-jam'), 'claude-jam:claude');
+  // An adopted one: the pane id IS the target — that pane may be window 3 of somebody's session
+  // and called anything at all, so `<session>:claude` would name nothing.
+  assert.equal(attachTarget('%23'), '%23');
+  assert.equal(tmuxAttachLine('default', '%23', attachTarget('%23')), 'tmux attach -t %23');
+});
+
+test('v0.33 the way back in names the adopted pane, and says what ending it does not do', () => {
+  const plain = reattachLines({ tmux: 'claude-jam', port: 7777, socket: 'claude-jam-7777' });
+  assert.ok(plain.some((l) => l.includes('raw TUI: tmux -L claude-jam-7777 attach -t claude-jam:claude')));
+  assert.ok(plain.some((l) => l === 'stop:    claude-jam end claude-jam'));
+  const adopted = reattachLines({ tmux: 'claude-jam-2', port: 7801, socket: 'claude-jam-7801',
+    adopt: { pane: '%23', socket: 'default', session: 'work' } });
+  assert.ok(adopted.some((l) => l.includes('raw TUI: tmux attach -t %23')), adopted.join('\n'));
+  assert.ok(adopted.some((l) => /the session you adopted/.test(l)));
+  // `end` still names jam's OWN session — that is the only thing it may kill — and says so.
+  assert.ok(adopted.some((l) => /stop:\s+claude-jam end claude-jam-2/.test(l)));
+  assert.ok(adopted.some((l) => /the pane and claude stay exactly as they are/.test(l)));
+});
+
+test('v0.33 adopt is in /menu, and the completeness check still passes', () => {
+  const by = Object.fromEntries(menuItems(menuTree({ host: true })).map((i) => [i.id, i]));
+  assert.ok(by['help.adopt'], 'a way to start a jam that /menu cannot explain is a menu gap');
+  assert.match(by['help.adopt'].desc, /claude-jam adopt/);
+  assert.match(by['help.adopt'].desc, /--pane/);
+  // A guest gets it too: it explains what "adopted" on their welcome line means.
+  assert.ok(Object.fromEntries(menuItems(menuTree({ host: false })).map((i) => [i.id, i]))['help.adopt']);
+  assert.deepEqual(menuGaps({ host: true }), { commands: [], flags: [], extra: [] });
+  assert.deepEqual(menuGaps({ host: false }), { commands: [], flags: [], extra: [] });
 });

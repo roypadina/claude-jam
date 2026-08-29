@@ -37,11 +37,11 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 
 | file | what it is |
 | --- | --- |
-| `claude-jam` | the launcher (bash). Owns the usage text; `host`/`join`/`sessions`/`end`/`clean`/`invite`/`invites`/`remote` dispatch from here. No arguments → `menu.mjs`. |
+| `claude-jam` | the launcher (bash). Owns the usage text; `host`/`adopt`/`join`/`sessions`/`end`/`clean`/`invite`/`invites`/`remote` dispatch from here. No arguments → `menu.mjs`. |
 | `jam` | a deprecated four-line alias that execs `claude-jam`. Never printed, never extended. |
 | `lib.mjs` | **pure functions only.** No fs, no spawn, no network, no clock it did not receive. Nearly every test is against this file. If a decision can be made here, it is made here. |
 | `host.mjs` | the launcher's other half (builds the tmux session) **and** the daemon (WS server, frame pipeline, injection, hooks endpoint, relays). |
-| `sessions.mjs` | tmux + fs lifecycle: list, end, clean, invite, remote. The only caller of `kill-session`. Imported by `host.mjs`, so there is exactly one "end". |
+| `sessions.mjs` | tmux + fs lifecycle: list, end, clean, invite, remote, **adopt**. The only caller of `kill-session`. Imported by `host.mjs`, so there is exactly one "end". v0.33: `adopt` is the one place that talks to a tmux server jam does not own, and every call it makes there is a read. |
 | `client.mjs` | the guest/host entry point; validates argv and hands off. |
 | `client-ink.mjs` | the real client (ink). `client-basic.mjs` is the `--basic` readline fallback. |
 | `menu.mjs` | the no-argument launcher menu. **Builds argv and shells into `claude-jam <subcommand>`** — it never re-implements one. |

@@ -400,6 +400,43 @@ If somebody asks **"how do I find Roy's jam?"**, this is the answer.
 - You may also be asked for the token: reveal it ONLY to the host (messages **without** a
   `[Name]:` prefix), never to bridged participants — tell them to ask the host.
 
+## Adopting a session that is already running (`claude-jam adopt`)
+
+There are two ways a jam starts. `claude-jam host` starts claude in a pane of claude-jam's own.
+`claude-jam adopt` shares **this** session — the one already running, in the tmux pane it is
+already in — without restarting it and without losing anything.
+
+- **How it is run.** From inside the session (you can run `claude-jam adopt` from the Bash tool
+  yourself: it inherits `$TMUX_PANE`), or from another terminal with
+  `claude-jam adopt --pane %23 [--socket <name>]`.
+- **It resolves and shows before it shares.** The pane, the tmux server it is on, what is running
+  in it, the directory, the session id it worked out, and that session's **first message and last
+  answer** — then it asks. `--yes` skips the question for scripting, and refuses outright if the
+  transcript it picked looks stale, because a wrong id would share the wrong conversation with
+  everybody in the room.
+- **Not in tmux?** Then there is no pane to read or type into, and adoption is impossible. It says
+  so and gives the whole alternative with the id already in it:
+  `claude-jam host --resume <session-id> --cwd <dir>`.
+- **claude-jam did not create this session, so it may never end it.** `claude-jam end` on an
+  adopted jam stops the daemon and its children (the browser view, the tunnel, the network
+  announcement) and leaves the pane, its tmux session and claude **exactly as they were**.
+  `claude-jam sessions` marks the row `adopted`, and `claude-jam clean` never touches it.
+  Nothing is written on the adopted session — not the ownership marker, not the status line, not
+  the fill character, and no key binding, because a tmux key table belongs to the whole server.
+- **Two things genuinely cannot be recovered on an adopted session.** Its `--settings` and its
+  system prompt were read once, when it started, so claude-jam cannot add hooks to it: **turn-end
+  and permission-wait come from the pane classifier** (the screen is read 2.5 times a second),
+  which is the authoritative source anyway. And the pane is **not resized** to fit a guest's
+  terminal — it is somebody's own window, usually with a human looking at it — so a guest with a
+  much smaller terminal sees it letterboxed rather than reflowed.
+- **You are told, in the session, that it is now shared.** At adoption claude-jam types one
+  message into the pane, prefixed `[claude-jam:tool]:` so it is visibly from the tool and not from
+  a person: the shared-session protocol, the two standing rules, a digest of how a jam works, who
+  is here, and where this manual is. `--no-brief` skips it for a session mid-thought (the client
+  then says out loud that claude has not been told). It is re-sent after a `/compact` or `/clear`,
+  because that is exactly when injected context disappears, and on a meaningful roster change when
+  the session is idle — at most one every ten minutes, and `--brief-updates off` turns that off.
+
 ## Ending a jam, and coming back to one
 
 claude-jam owns the tmux sessions it creates, so nobody has to remember a `tmux kill-session` line.
@@ -671,7 +708,11 @@ them while the jam runs, without dropping anybody who is already connected ·
 host's client · `--attach` reopen the client on a jam that is already running ·
 `--no-prompt` / `--keep-on-exit` / `--end-on-exit` decide the "keep it running?" question up
 front · `-- <args>` passed to claude (e.g. `-- --model haiku`).
-Other subcommands: `claude-jam find [--json]` / `claude-jam discover` (jams on this network),
+Other subcommands: `claude-jam adopt [--pane %23] [--socket NAME] [--yes] [--no-brief]
+[--brief-updates on|off]` (share the session that is already running — see **Adopting a session
+that is already running** above; it also takes any `claude-jam host` flag, so
+`claude-jam adopt --tunnel --token …` works),
+`claude-jam find [--json]` / `claude-jam discover` (jams on this network),
 `claude-jam sessions [--json]` / `claude-jam ls`, `claude-jam end [name] [--all]` / `claude-jam kill`,
 `claude-jam clean [--yes]`, `claude-jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]`,
 `claude-jam invites [--json]`, `claude-jam invite revoke <Name|id>`,

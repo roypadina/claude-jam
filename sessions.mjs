@@ -18,6 +18,7 @@
 // Other people's tmux sessions live on this machine. They are not ours to end.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import net from 'node:net';
@@ -35,8 +36,14 @@ import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verify
   DISCOVERY_TYPE, DISCOVERY_DOMAIN, FIND_MS, parseDnssdZone, discoveredJams, findTable, findJson,
   // v0.20: jam's tmux lives on a socket of its own, so every call here is per-socket. A row
   // whose session.json names none is a pre-v0.20 jam on the default server.
-  tmuxSocketArgs, TMUX_DEFAULT_SOCKET } from './lib.mjs';
+  tmuxSocketArgs, TMUX_DEFAULT_SOCKET,
+  // v0.33: `claude-jam adopt` — every decision about WHICH pane, WHICH session and whether to
+  // say yes at all. The tmux and fs calls that feed them are below, and all of them are reads.
+  resolveAdoptTarget, PANE_FORMAT, parsePaneInfo, paneCommandNote, claudeProjectGlobs,
+  pickAdoptSession, sessionPreview, adoptConfirmText, adoptNoTmuxText, adoptAlreadyJamText,
+  adoptAlreadyAdoptedText, adoptPlan, resolveConfigDir } from './lib.mjs';
 
+const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 // v0.20: the socket is part of the target. It is a REQUIRED argument in spirit — every caller
 // knows which jam it is asking about — and defaults to the shared server only so a session.json
@@ -292,7 +299,9 @@ function usage() {
     + '       claude-jam invite revoke <Name|id> [--jam NAME]                    take one back\n'
     + '       claude-jam remote <off|tunnel|funnel> [--jam NAME] [--reissue]\n'
     + '                                         put a running jam on a public relay, or take it off\n'
-    + '       claude-jam find [--json] [--for N]  jams announcing themselves on this network');
+    + '       claude-jam find [--json] [--for N]  jams announcing themselves on this network\n'
+    + '       claude-jam adopt [--pane %23] [--socket NAME] [--yes] [<claude-jam host flags>]\n'
+    + '                                         share the claude already running in a tmux pane');
   return 2;
 }
 
@@ -469,6 +478,163 @@ async function cmdRemote(argv) {
   return 0;
 }
 
+// ------------------------------------------- v0.33: adopt a session already running ----
+// `claude-jam adopt` shares the claude that is ALREADY in a tmux pane, without restarting it.
+// This is the first place in the project that talks to a tmux server jam does not own, so every
+// call it makes there is a READ — `display-message` for the pane's own facts, `show-options` for
+// the ownership marker — and the only thing it ever writes is the argv it hands to host.mjs.
+//
+// Resolution is deliberately visible before it is acted on: the pane, the socket, what is running
+// in it, the directory, the session id it guessed, and the first and last lines of that session's
+// transcript. A wrong id shares the wrong conversation with everybody in the room, which is not a
+// thing an apology fixes — so interactive use always confirms, and `--yes` (which does not) is
+// refused outright when the guess is stale.
+const ADOPT_WINDOW_BYTES = 256 * 1024;
+
+// The first and last N bytes of a file, without reading the middle: a transcript can be hundreds
+// of megabytes and this runs before anything has been decided.
+function readWindow(file, bytes, fromEnd) {
+  try {
+    const size = fs.statSync(file).size;
+    const start = fromEnd ? Math.max(0, size - bytes) : 0;
+    const len = Math.min(bytes, size - start);
+    if (len <= 0) return '';
+    const fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(len);
+    try { fs.readSync(fd, buf, 0, len, start); } finally { fs.closeSync(fd); }
+    return buf.toString('utf8');
+  } catch { return ''; }
+}
+
+// Newest-first is pickAdoptSession's job; this only measures. The profile matters: a claude
+// started with CLAUDE_CONFIG_DIR set keeps its transcripts there, so the same resolution the
+// daemon uses for its tail is the one used to find the id in the first place.
+function transcriptsFor(cwd, configDir) {
+  const out = [];
+  for (const glob of claudeProjectGlobs(cwd, os.homedir(), resolveConfigDir(configDir, process.env))) {
+    for (const file of fs.globSync(glob)) {
+      try { out.push({ file, mtime: fs.statSync(file).mtimeMs }); } catch { /* raced with a rotate */ }
+    }
+  }
+  return out;
+}
+
+// Is any jam already sharing this exact pane? Two jams typing into one claude would interleave
+// their pastes, so this is a refusal rather than a warning.
+async function adoptedAlready(pane, socket) {
+  for (const row of await listRows()) {
+    const a = row.info?.adopt;
+    if (a && a.pane === pane && (a.socket || TMUX_DEFAULT_SOCKET) === socket && row.state !== 'orphan') return row;
+  }
+  return null;
+}
+
+async function cmdAdopt(argv) {
+  // Consumed here; everything else is forwarded to host.mjs verbatim, so `claude-jam adopt
+  // --token X --tunnel` takes the host flags without this parser having to know them.
+  const take = (flag) => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : null; };
+  const drop = new Set(['--pane', '--socket', '--session-id', '--cwd']);
+  const flags = { pane: take('--pane'), socket: take('--socket'),
+    sessionId: take('--session-id'), cwd: take('--cwd'), configDir: take('--config-dir') };
+  const yes = argv.includes('--yes') || argv.includes('-y');
+  const rest = argv.filter((a, i) => {
+    if (a === '--yes' || a === '-y') return false;
+    if (drop.has(a)) return false;
+    return !(i > 0 && drop.has(argv[i - 1]));
+  });
+
+  // The directory decides where the transcripts are looked for, so it is resolved before the
+  // pane: it is also the one fact spec item 6 needs when there is no tmux at all.
+  const target = resolveAdoptTarget({ pane: flags.pane, socket: flags.socket, env: process.env });
+  const cwdGuess = flags.cwd ? path.resolve(flags.cwd) : process.cwd();
+
+  if (!target.ok && target.noTmux) {
+    // Not an error to hide behind: detect the session anyway and print the whole alternative
+    // with the id already in it (spec item 6).
+    const guess = pickAdoptSession(transcriptsFor(cwdGuess, flags.configDir), Date.now());
+    console.error(adoptNoTmuxText({ sessionId: guess.ok ? guess.sessionId : null, cwd: cwdGuess,
+      why: target.error }));
+    return 1;
+  }
+  if (!target.ok) { console.error(target.error); return 2; }
+
+  const ftmux = (...a) => tmux(target.socket, ...a);
+  const said = ftmux('display-message', '-p', '-t', target.pane, PANE_FORMAT);
+  const info = said.status === 0 ? parsePaneInfo(said.stdout) : null;
+  if (!info) {
+    console.error(`no tmux pane ${target.pane} on socket ${target.socket}`
+      + `${(said.stderr || '').trim() ? ` — ${(said.stderr || '').trim()}` : ''}\n`
+      + '  `tmux list-panes -a -F "#{pane_id} #{session_name}:#{window_index}"` shows what is there;\n'
+      + '  --socket <name> picks a different tmux server.');
+    return 1;
+  }
+
+  // A jam of jam's own is not adopted a second time — it is already shared, and `--attach` is
+  // the way back into it. Read-only: one show-options against the marker.
+  const marker = sessionMarker(info.session, target.socket);
+  if (marker && verifyOwned(info.session, marker, readSessionFile(marker)).ok) {
+    console.error(adoptAlreadyJamText(info.session, info.session));
+    return 1;
+  }
+  const busy = await adoptedAlready(target.pane, target.socket);
+  if (busy) { console.error(adoptAlreadyAdoptedText(target.pane, busy)); return 1; }
+
+  const cwd = flags.cwd ? path.resolve(flags.cwd) : (info.cwd || cwdGuess);
+  let sessionId = flags.sessionId || null;
+  let file = null;
+  let age = null;
+  let stale = false;
+  let others = 0;
+  const found = pickAdoptSession(transcriptsFor(cwd, flags.configDir), Date.now());
+  if (sessionId) {
+    // An id given by hand still has to exist, or the daemon would tail nothing and every guest
+    // would join a blank room.
+    const hit = transcriptsFor(cwd, flags.configDir).find((f) => path.basename(f.file, '.jsonl') === sessionId);
+    if (!hit) {
+      console.error(`no transcript for session ${sessionId} under ${cwd}\n`
+        + '  (drop --session-id and claude-jam picks the newest one there)');
+      return 1;
+    }
+    file = hit.file;
+    age = Math.max(0, Date.now() - hit.mtime);
+  } else {
+    if (!found.ok) { console.error(`${found.error}\n  directory: ${cwd}`); return 1; }
+    ({ sessionId, file, age, stale, others } = found);
+  }
+
+  const preview = sessionPreview({
+    head: readWindow(file, ADOPT_WINDOW_BYTES, false),
+    tail: readWindow(file, ADOPT_WINDOW_BYTES, true),
+  });
+  const note = paneCommandNote(info.command);
+  console.log(adoptConfirmText({ ...info, ...preview, pane: target.pane, socket: target.socket,
+    cwd, sessionId, file, age, stale, others, note }));
+
+  // The confirmation is the whole safety of this command, so the two ways of not having one are
+  // treated differently: `--yes` says "I have checked", and a pipe says nothing at all.
+  if (!yes) {
+    if (!process.stdin.isTTY) {
+      console.error('\nnothing adopted: there is no terminal here to confirm on.\n'
+        + '  Read the resolution above, then re-run with --yes if it is the right session.');
+      return 1;
+    }
+    if (!confirmYes(await askLine('\nshare THIS session? [y/N] '))) { console.log('nothing adopted'); return 1; }
+  } else if (stale) {
+    console.error('\nrefusing --yes on a stale transcript: nobody looked at the resolution above, '
+      + 'and that session has not been written to for a long time.\n'
+      + '  Run it without --yes and confirm, or name the session with --session-id <uuid>.');
+    return 1;
+  }
+
+  const plan = adoptPlan({ pane: target.pane, socket: target.socket, cwd, sessionId, extra: rest });
+  if (!plan.ok) { console.error(plan.error); return 2; }
+  // Nothing here can drive an ink client, and when claude runs this as a Bash call there is no
+  // terminal at all — so the host client is only opened when there is a tty to open it in.
+  const argvOut = [...plan.argv, ...(process.stdout.isTTY ? [] : ['--no-attach'])];
+  const r = spawnSync(process.execPath, [path.join(HERE, 'host.mjs'), ...argvOut], { stdio: 'inherit' });
+  return r.status ?? 0;
+}
+
 // v0.23: `claude-jam find` (alias `discover`). Browse the LAN for a few seconds and print what
 // answered. It talks to no daemon and holds no credential — the whole command is a browse and a
 // parse — and the table it prints says on every listing that finding a jam is not being let into
@@ -505,6 +671,8 @@ if (path.resolve(process.argv[1] || '') === path.resolve(new URL(import.meta.url
     invite: (a) => cmdInvite(a), invites: (a) => cmdInvite(a, 'list'), remote: cmdRemote,
     // v0.23: two spellings of one command, because both are the word people reach for.
     find: cmdFind, discover: cmdFind,
+    // v0.33: share the session already running in a tmux pane, without restarting it.
+    adopt: cmdAdopt,
   }[cmd];
   process.exit(run ? await run(rest) : usage());
 }
