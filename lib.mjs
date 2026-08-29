@@ -37,10 +37,25 @@ export function nameTaken(name, taken) {
   return taken.some((t) => String(t).toLowerCase() === n);
 }
 
+// ------------------------------------- v0.15: source vs installed client command ----
+
+// What a friend types to run the client: `jam join …` when the daemon itself is running out of
+// a Homebrew install (their `jam join` binary; no `client.mjs` sitting in their cwd), otherwise
+// the from-source `node client.mjs …`. `dirname` is the running host/client script's own
+// directory (a Cellar path is the one thing a plain `git clone` can never produce); `env` can
+// force either way — JAM_INSTALLED is for a bin wrapper to set explicitly, since a future
+// formula layout might not put anything under `/Cellar/claude-jam/` at all.
+export function clientCommand(dirname, env = {}) {
+  if (env.JAM_INSTALLED === '1') return 'jam join';
+  if (env.JAM_INSTALLED === '0') return 'node client.mjs';
+  return String(dirname ?? '').includes('/Cellar/claude-jam/') ? 'jam join' : 'node client.mjs';
+}
+
 // The friend-facing invite command, or null while no token is set — then the host sees
-// NO_TOKEN_HINT instead and friends get in by knocking.
-export function buildJoinLine(ip, port, token) {
-  return token ? `node client.mjs ws://${ip}:${port} --name <You> --token ${token}` : null;
+// NO_TOKEN_HINT instead and friends get in by knocking. `clientCmd` is clientCommand()'s answer;
+// the default keeps every caller that does not care (most tests) on the from-source form.
+export function buildJoinLine(ip, port, token, clientCmd = 'node client.mjs') {
+  return token ? `${clientCmd} ws://${ip}:${port} --name <You> --token ${token}` : null;
 }
 
 // The read-only browser view of the real claude TUI (ttyd), basic auth baked into the URL
@@ -714,8 +729,8 @@ export function parseTunnelUrl(text) {
 // wss:// and https://, no port (Cloudflare terminates TLS at the edge and proxies to :443).
 // null until the tunnel has resolved a hostname, or (join only) while no token is set — same
 // "nothing to hand out while knocking" rule as the LAN line.
-export function buildTunnelJoinLine(host, token) {
-  return host && token ? `node client.mjs wss://${host} --name <You> --token ${token}` : null;
+export function buildTunnelJoinLine(host, token, clientCmd = 'node client.mjs') {
+  return host && token ? `${clientCmd} wss://${host} --name <You> --token ${token}` : null;
 }
 export function buildTunnelViewUrl(host, key) {
   return host && key ? `https://jam:${key}@${host}` : null;

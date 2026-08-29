@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
-  exportFileName, resumeInstructions, stripTokenBlock } from './lib.mjs';
+  exportFileName, resumeInstructions, stripTokenBlock, clientCommand } from './lib.mjs';
 
 const user = (content, extra = {}) => JSON.stringify({ type: 'user', message: { content }, ...extra });
 const asst = (content) => JSON.stringify({ type: 'assistant', message: { content } });
@@ -246,6 +246,24 @@ test('buildJoinLine: null while no token is set', () => {
   assert.equal(buildJoinLine('100.86.8.97', 7777, 'smoketoken'),
     'node client.mjs ws://100.86.8.97:7777 --name <You> --token smoketoken');
   assert.equal(buildJoinLine('100.86.8.97', 7777, null), null);
+});
+
+test('buildJoinLine: an installed clientCmd swaps the prefix, nothing else', () => {
+  assert.equal(buildJoinLine('100.86.8.97', 7777, 'smoketoken', 'jam join'),
+    'jam join ws://100.86.8.97:7777 --name <You> --token smoketoken');
+});
+
+test('clientCommand: Cellar path means Homebrew install, everything else means source', () => {
+  assert.equal(clientCommand('/opt/homebrew/Cellar/claude-jam/0.14.0/libexec'), 'jam join');
+  assert.equal(clientCommand('/usr/local/Cellar/claude-jam/0.14.0/libexec'), 'jam join');
+  assert.equal(clientCommand('/Users/roy/Code/claude-jam'), 'node client.mjs');
+  assert.equal(clientCommand(), 'node client.mjs'); // no dirname at all
+});
+
+test('clientCommand: JAM_INSTALLED overrides the path check either way', () => {
+  assert.equal(clientCommand('/Users/roy/Code/claude-jam', { JAM_INSTALLED: '1' }), 'jam join');
+  assert.equal(clientCommand('/opt/homebrew/Cellar/claude-jam/0.14.0/libexec', { JAM_INSTALLED: '0' }),
+    'node client.mjs');
 });
 
 test('client: /accept with and without a name', () => {
@@ -935,6 +953,11 @@ test('buildTunnelJoinLine: needs both a resolved host and a token, wss:// and no
     'node client.mjs wss://rand1.trycloudflare.com --name <You> --token smoketoken');
   assert.equal(buildTunnelJoinLine(null, 'smoketoken'), null); // tunnel not up yet
   assert.equal(buildTunnelJoinLine('rand1.trycloudflare.com', null), null); // knock-only: nothing to hand out
+});
+
+test('buildTunnelJoinLine: an installed clientCmd swaps the prefix, same as buildJoinLine', () => {
+  assert.equal(buildTunnelJoinLine('rand1.trycloudflare.com', 'smoketoken', 'jam join'),
+    'jam join wss://rand1.trycloudflare.com --name <You> --token smoketoken');
 });
 
 test('buildTunnelViewUrl: needs both a resolved host and a key, https:// and no port', () => {
