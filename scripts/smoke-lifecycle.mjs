@@ -102,9 +102,17 @@ function stub(name, body) {
 // v0.19: a real claude refuses an unknown option and exits, which is exactly what the launcher's
 // --append-system-prompt-file probe reads. A stub that swallowed every flag and slept instead
 // would stall every launch for the probe's whole timeout, so this one answers like the real thing.
+// v0.28 release gate (2026-08-29): the marker used to be row 0 of a mostly-blank pane — a shape
+// no real claude ever has. The mirror's "welcome block moved" notice reserves one row for 45 s
+// (NOTICE_TTL) after every connect, and fitFrame crops the OLDEST row to make room — correct for
+// a real TUI, whose newest content is always at the bottom, but it silently ate this stub's only
+// line for the first 45 s of every attach. Bottom-anchored, like a real screen, so a top-crop of
+// any depth never touches it.
 const FAKE_CLAUDE = stub('claude', 'for a in "$@"; do case "$a" in --claude-jam-probe-unknown-flag)'
   + ' echo "error: unknown option \'$a\'" >&2; exit 1;; esac; done\n'
-  + "printf '%s\\n' 'fake claude — v0.18 lifecycle smoke' '' '\u276f '\nexec sleep 1800");
+  + 'rows=$(tput lines 2>/dev/null); [ -n "$rows" ] || rows=24\n'
+  + 'i=1; while [ "$i" -lt "$rows" ]; do echo; i=$((i+1)); done\n'
+  + "printf '%s' 'fake claude — v0.18 lifecycle smoke'\nexec sleep 1800");
 // ttyd and cloudflared stand-ins: they exist to hold a pid the daemon has to kill on the way out.
 const FAKE_TTYD = stub('ttyd', 'exec sleep 1800');
 stub('cloudflared', 'case "$1" in --version) echo "cloudflared version 0.0.0-fake"; exit 0;; esac\nexec sleep 1800');
