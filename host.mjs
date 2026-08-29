@@ -152,6 +152,10 @@ const ttyd = opts.view ? resolveTtyd(opts.viewTtyd, fs.existsSync) : null;
 if (opts.view && !ttyd) console.error('--view needs ttyd and could not find it: brew install ttyd (or --view-ttyd <path>)');
 let viewKey = ttyd ? resolveViewKey(currentToken, () => opts.viewKey || newToken()) : null;
 
+// The daemon drops this into the state dir the moment an end begins; the launcher reads it and
+// the whole directory goes seconds later. Nothing else ever looks at it.
+const ENDING_FILE = 'ending';
+
 // ---------------------------------------------------------------- launcher ----
 // v0.18-1: one keypress, read off the terminal, with no default — nothing destructive may
 // happen because somebody hit Enter or because stdin was a pipe (exitDecision already sent
@@ -219,6 +223,9 @@ async function resolveTargetSession() {
   if (choice === 'e') {
     const r = await endJam(owned.info, (l) => console.log(l));
     if (!r.ok) { console.error(`refused: ${r.why}`); process.exit(1); }
+    // The fresh jam is about to bind the same port the one we just ended was holding, so wait
+    // for the kernel to actually let go of it rather than racing into EADDRINUSE.
+    for (let i = 0; i < 30 && await portBusy(opts.port); i++) await new Promise((r2) => setTimeout(r2, 100));
     return {};
   }
   // `c`, no answer, or --no-prompt: the pre-v0.18 refusal, with the v0.18 ways out named.
@@ -361,8 +368,10 @@ async function runHostClient(info) {
       { stdio: 'inherit' });
     if (client.status) process.exitCode = client.status;
     // The daemon may have ended the jam under us (`/end` in the client): then there is nothing
-    // to keep, and asking about it would be nonsense.
-    if (!hasSession(info.tmux)) {
+    // to keep, and asking about it would be nonsense. The breadcrumb is what makes this
+    // race-free — the tmux session is still up for the second between the ending frame that
+    // made this client exit and the daemon actually killing it.
+    if (!hasSession(info.tmux) || fs.existsSync(path.join(info.state, ENDING_FILE))) {
       console.log('\nthe jam has ended — the tmux session and its state dir are gone.');
       return;
     }
@@ -977,6 +986,10 @@ function endSession(why) {
   if (ending) return;
   ending = true;
   console.log(`[end] ${why} — telling everyone, then shutting down`);
+  // Before the broadcast, because the broadcast is what makes the host's client exit: the
+  // launcher waiting on that client has to be able to tell "the jam ended" from "the client
+  // was closed", and for the next second the tmux session is still very much alive.
+  try { fs.writeFileSync(path.join(opts.state, ENDING_FILE), `${why}\n`); } catch { /* dir already gone */ }
   broadcast({ t: 'ending', by: opts.name, reason: why });
   // A second, so the frame is actually on the wire (and a guest's client is off the socket)
   // before the daemon starts dismantling the room around it.
