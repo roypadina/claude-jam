@@ -4,7 +4,10 @@ import readline from 'node:readline';
 import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames, reconnectMessage, historyDivider,
   // v0.17 Batch P: the bell, @mentions and the RTT chip work here too (P6's hint list does not —
   // this renderer only ever appends lines, it has no live region to draw one in).
-  BELL, bellAllowed, mentionsMe, rttText } from './lib.mjs';
+  BELL, bellAllowed, mentionsMe, rttText,
+  // v0.18: the host ended the jam — one line, exit 0, and no reconnect at a daemon that is
+  // deliberately gone. /end is the other half, and it asks before it sends.
+  endingNotice, confirmYes } from './lib.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, desktopNotify, DOWNLOAD_DIR } from './xfer.mjs';
 
 const argv = process.argv.slice(2);
@@ -50,6 +53,8 @@ let spin = 0;
 let spinTimer = null;
 let net = null; // v0.17 P5: the last heartbeat round trip the daemon measured for this socket
 let lastBell = 0;
+let ending = false; // v0.18: the jam is over on purpose, so the close below must not retry
+let confirming = null; // v0.18-4: `/end` asked, and the next line is the answer
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: '' });
 
@@ -228,6 +233,14 @@ function render(ev) {
       if (session) Object.assign(session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin, tunnelView: ev.tunnelView });
       return logJoin();
     }
+    // v0.18-7: the host ended the jam. Print the one line and leave with 0 — there is
+    // nothing to reconnect to, and an orderly end is not a failure.
+    case 'ending': {
+      ending = true;
+      const n = endingNotice(ev);
+      emit({ glyph: '·', text: n.text, textColor: C.dim });
+      return process.exit(n.code);
+    }
     // v0.14: a slash command ran in the TUI, or a guest's request was approved.
     case 'sys': return sys(ev.text);
     case 'error': return emit({ glyph: '!', glyphColor: C.err, text: ev.text, textColor: C.err });
@@ -273,6 +286,8 @@ function connect() {
       emit({ glyph: '!', glyphColor: C.err, text: `rejected: ${e.reason || 'auth'}`, textColor: C.err });
       process.exit(1);
     }
+    // The jam ended on purpose: the socket closing is the expected end of it, not a fault.
+    if (ending) return;
     setSpinner(false); // nothing is known about the turn while the socket is down
     sys(reconnectMessage(++attempts, backoff));
     setTimeout(connect, backoff);
@@ -329,6 +344,14 @@ function sendUpload(ev) {
 }
 
 rl.on('line', (raw) => {
+  // v0.18-4: /end asked "really end this jam for everyone?", and this is the answer —
+  // taken before anything is parsed, so a bare `y` can never become a message to claude.
+  if (confirming === 'end') {
+    confirming = null;
+    if (confirmYes(raw)) { sendMsg({ t: 'end' }); sys('ending the jam for everyone…'); }
+    else sys('nothing ended — the jam is still running');
+    return reprompt();
+  }
   const a = parseClientLine(raw);
   if (a.kind === 'continue') { cont.push(a.text); return reprompt(); }
   const act = cont.length ? parseClientLine([...cont, raw].join('\n')) : a;
@@ -392,6 +415,11 @@ rl.on('line', (raw) => {
     case 'slash':
       sendMsg({ t: 'slash', text: act.text });
       if (!IS_HOST) sys(`${act.text} — sent to the host for approval`);
+      break;
+    // v0.18-4: end the whole jam. Host-only here and in the daemon, and it asks first.
+    case 'end':
+      if (!IS_HOST) err('host only');
+      else { confirming = 'end'; sys('really end this jam for everyone? [y/N]'); }
       break;
     case 'quit': process.exit(0);
     case 'error': err(act.text); break;
