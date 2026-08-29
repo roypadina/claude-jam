@@ -2030,8 +2030,13 @@ ACL-restricted on Windows), `openExternal(url)`. macOS keeps today's `pngpaste`/
   current user, and say so in the security docs rather than pretending modes carry over.
 - Keys: verify F2/F3/PgUp/Shift+Enter/Esc sequences under Windows Terminal; the CSI-u newline
   handling already shipped must be re-verified there.
-- Install: `npm i -g claude-jam` (works on macOS too) and/or `winget`/`scoop`. **Publishing to
-  npm is net-new distribution and needs Roy's explicit approval before the first publish.**
+- Install: **`npm i -g claude-jam`** — Roy approved npm as the Windows (and cross-platform)
+  distribution on 2026-08-29, and the name is free on the registry (404 as of that date).
+  Homebrew stays the macOS path; both install the same package. Publishing checklist: `files`
+  whitelist in package.json so smokes/fixtures/spec stay out of the tarball, `bin` entries for
+  `claude-jam` + `jam`, `engines.node >= 22`, `os` NOT restricted (Windows must install), a
+  `prepublishOnly` running the unit tests, and `npm publish --dry-run` reviewed before the first
+  real publish. winget/scoop only if npm proves awkward.
 - CI: GitHub Actions matrix (macos-latest + windows-latest) running `node --test` on every push;
   the smoke suites stay manual/local since they need a real terminal and a real claude.
 
@@ -2042,11 +2047,32 @@ uses Windows Terminal. Work is integration, not rewrite: WSL-aware paths for the
 WSL (verify `--tunnel`/`--funnel` and the ttyd view reach the outside), the browser view URL, and
 a documented setup page. Tested on Roy's Windows machine before it is claimed to work.
 
-### W3 — native Windows host (ConPTY) — NOT recommended
-Replacing tmux means writing our own multiplexer on `node-pty`/ConPTY: screen capture with
-attributes, injection, an attach equivalent, and per-viewer sizing. That is a substrate rewrite,
-weeks of work, and it would fork the most safety-critical code in the project (injection +
-ownership). Only revisit if W2 proves genuinely unworkable; document the reasoning either way.
+### W3 — native Windows host: investigate first, WSL2 is the fallback not the requirement
+Roy's direction (2026-08-29): native client for sure; WSL2 may be *used* but must not be
+*forced* if a native host is achievable. That changes W3 from "not recommended" to "research,
+then decide", because a credible native path exists that I under-weighted:
+
+  `node-pty` (ConPTY on Windows) runs claude in a pty we own, and **`@xterm/headless`** — the
+  headless xterm.js build — consumes that pty stream and maintains the screen buffer with
+  attributes, which is precisely what `capture-pane -e` gives us today. Injection becomes a
+  pty write; "attach" becomes piping the pty raw to the host's stdin/stdout; resize is a pty
+  API call. Both packages are current (@xterm/headless 6.0.0, node-pty 1.1.0 as of 2026-08-29).
+
+So the design is a **terminal backend interface** with two implementations behind it —
+`backend/tmux.mjs` (macOS/Linux, existing and proven, stays the default) and `backend/pty.mjs`
+(Windows) — chosen at runtime. Everything above the backend (protocol, ladders, invites,
+mirror, discovery, clients) is untouched.
+
+Before building it, a research pass must answer, with evidence on a real Windows box:
+does `claude.exe` behave correctly under ConPTY (colors, resize, the input box, pickers)?
+does @xterm/headless reproduce the pane faithfully enough that our v0.31 classifier and the
+paste-placeholder detection still work? what is the CPU cost of maintaining the buffer at our
+frame cadence? does a detached-daemon model work without tmux (the daemon must outlive the
+launching terminal — a Windows service/detached process, and how does the host "attach" back)?
+what replaces the ownership marker and session enumeration that tmux gave us for free?
+If those answers are good, W3 becomes the Windows host and WSL2 stays a documented alternative
+for people who prefer it. If they are not, W2 (WSL2) is the host path and this section records
+why, with the failing evidence.
 
 ### Cross-platform matrix that must be tested (Roy has a Windows box)
 mac host ↔ Windows client, Windows(WSL) host ↔ mac client, Windows(WSL) host ↔ Windows client,
