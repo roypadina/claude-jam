@@ -182,7 +182,7 @@ await step('approved: the guest gets the real JSONL byte for byte, minus our tok
     const text = got.data.toString('utf8');
     if (text.includes(token)) throw new Error('the join token survived the export');
     if (/Join token:/.test(text)) throw new Error('the token block survived the export');
-    if (!text.includes('[jam join-token block removed on export]')) throw new Error('nothing was stripped');
+    if (!text.includes('[claude-jam join-token block removed on export]')) throw new Error('nothing was stripped');
     // And it is still the transcript: same line count, still parseable JSON.
     const lines = text.split('\n').filter(Boolean);
     JSON.parse(lines[0]);

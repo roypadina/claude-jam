@@ -6,17 +6,17 @@
 //   S2b v0.21: the OLD @jam-owned marker a 0.18.0 jam carries is still honoured, so a session
 //       created before the rename stays listable and endable
 //   S3  the live `jam` session on :7777, if one is running, is proved unkillable READ-ONLY:
-//       no marker, absent from `jam sessions`, refused by name. Nothing about it is touched
-//   1   `jam sessions` lists a live jam and an orphan state dir, and NOT the plain decoy
-//   2   `jam end` broadcasts {t:'ending'} (a scripted client sees it and exits 0), kills the
+//       no marker, absent from `claude-jam sessions`, refused by name. Nothing about it is touched
+//   1   `claude-jam sessions` lists a live jam and an orphan state dir, and NOT the plain decoy
+//   2   `claude-jam end` broadcasts {t:'ending'} (a scripted client sees it and exits 0), kills the
 //       children (daemon, claude, the ttyd and cloudflared stand-ins) and removes the state dir
-//   3   `jam clean` deletes the orphan and leaves the live jam's state dir alone
-//   4   `jam host` on a taken name drives all four choices: [c]ancel, [n]ew, [a]ttach, [e]nd
+//   3   `claude-jam clean` deletes the orphan and leaves the live jam's state dir alone
+//   4   `claude-jam host` on a taken name drives all four choices: [c]ancel, [n]ew, [a]ttach, [e]nd
 //   5   the exit prompt: `k` keeps the jam (and prints the way back), `e` ends it
 //   6   `/end` in the host client: `n` ends nothing, `y` ends it for everybody
 //
 // Self-contained, like smoke-transport and smoke-replay, and then some: it runs with a TMPDIR
-// of its own, so `jam sessions|end|clean` cannot even SEE a state dir that is not this smoke's
+// of its own, so `claude-jam sessions|end|clean` cannot even SEE a state dir that is not this smoke's
 // (the one deliberate exception is S3, which is read-only). No real claude, no real ttyd, no
 // real cloudflared — stand-ins that hold a pid and sleep. Every tmux session it creates starts
 // with `jamlife`, and it kills only those, by exact name.
@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-// The gate itself, called directly: `jam end <name>` refuses a decoy at the outer gate (it is
+// The gate itself, called directly: `claude-jam end <name>` refuses a decoy at the outer gate (it is
 // not in jam's own list at all), and this is the inner one — the marker check.
 import { ownedSession } from '../sessions.mjs';
 // v0.21: the marker was renamed, and the old name is still read. Both come from the one place
@@ -149,7 +149,7 @@ function watcher(port) {
   return w;
 }
 
-// A real client on a real tty, driven with send-keys — plus whatever `jam host` asks it.
+// A real client on a real tty, driven with send-keys — plus whatever `claude-jam host` asks it.
 function drive(cmd) {
   killMine(S.drive);
   const born = tmux('new-session', '-d', '-s', S.drive, '-x', '120', '-y', '40', '-c', ROOT,
@@ -163,7 +163,7 @@ const line = (s) => { type(s); key('Enter'); };
 const driveEnv = () => Object.entries({ TMPDIR: TMP, PATH: `${BIN}:${process.env.PATH}`, JAM_CLAUDE: FAKE_CLAUDE })
   .map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ');
 
-// A state dir in the REAL $TMPDIR, shaped exactly like the orphan `jam clean` exists to delete —
+// A state dir in the REAL $TMPDIR, shaped exactly like the orphan `claude-jam clean` exists to delete —
 // planted to prove that a `jam` running with a TMPDIR of its own cannot see, offer or remove it.
 // Its tmux session name was never created, so nothing else can pick it up either.
 const GHOST = path.join(os.tmpdir(), 'claude-jam-7999');
@@ -190,11 +190,11 @@ try {
     if (v.ok) throw new Error('verifyOwned accepted a session with no marker');
     if (!/carries no @claude-jam-owned marker/.test(v.why)) throw new Error(`unexpected reason: ${v.why}`);
     const r = jam('end', S.plain);
-    console.log(`      jam end ${S.plain} → exit ${r.code}: ${r.out.trim().split('\n')[0]}`);
-    if (r.code === 0) throw new Error('jam end accepted a session it did not create');
+    console.log(`      claude-jam end ${S.plain} → exit ${r.code}: ${r.out.trim().split('\n')[0]}`);
+    if (r.code === 0) throw new Error('claude-jam end accepted a session it did not create');
     if (!alive(S.plain)) throw new Error('the plain session was killed anyway');
     // And it is not in the list, so it cannot be picked out of one either.
-    if (jamJson().some((j) => j.name === S.plain)) throw new Error('a non-jam session appeared in `jam sessions`');
+    if (jamJson().some((j) => j.name === S.plain)) throw new Error('a non-jam session appeared in `claude-jam sessions`');
   });
 
   await step('S2 REFUSAL a hand-written @claude-jam-owned marker buys nothing, even with a session.json copied in', async () => {
@@ -264,11 +264,11 @@ try {
       console.log(`      ${opt} on jam: ${JSON.stringify((marker.stdout || marker.stderr || '').trim())}`);
     }
     // The real $TMPDIR, on purpose and read-only: this is the one place the smoke looks outside
-    // its own namespace, because "would `jam sessions` offer somebody else's session?" is the
+    // its own namespace, because "would `claude-jam sessions` offer somebody else's session?" is the
     // question. Nothing here ends, kills or deletes anything.
     const real = spawnSync(JAM, ['sessions', '--json'], { encoding: 'utf8', env: { ...process.env, PATH: ENV.PATH } });
     const rows = JSON.parse(real.stdout || '[]');
-    console.log(`      \`jam sessions\` in the real TMPDIR: ${rows.length} row(s)${rows.length ? ` — ${rows.map((r) => `${r.name}:${r.state}`).join(', ')}` : ''}`);
+    console.log(`      \`claude-jam sessions\` in the real TMPDIR: ${rows.length} row(s)${rows.length ? ` — ${rows.map((r) => `${r.name}:${r.state}`).join(', ')}` : ''}`);
     // A `jam` that IS one of v0.18's own is legitimately listed FOR ITS OWNER; what must never
     // happen is this smoke ending it. So the hard assertions are the two below.
     if (rows.some((r) => r.name === 'jam')) console.log('      (that one is a v0.18 jam of its own — listed for its owner, still not this smoke\'s to end)');
@@ -277,8 +277,8 @@ try {
     console.log(`      ownedSession('jam') → ${v.ok ? 'VERIFIED (it is a v0.18 jam of its own)' : v.why}`);
     // Named outright, in this smoke's own namespace, it is still refused.
     const r = jam('end', 'jam');
-    console.log(`      jam end jam → exit ${r.code}: ${r.out.trim().split('\n')[0]}`);
-    if (r.code === 0) throw new Error('jam end accepted the live session');
+    console.log(`      claude-jam end jam → exit ${r.code}: ${r.out.trim().split('\n')[0]}`);
+    if (r.code === 0) throw new Error('claude-jam end accepted the live session');
     if (dtmux('has-session', '-t', '=jam').status !== 0) throw new Error('THE LIVE JAM IS GONE — this is the thing that must never happen');
     console.log('      still alive, still attached to whatever it was doing');
   });
@@ -354,7 +354,7 @@ try {
     killMine(S.drive);
   });
 
-  await step('2 jam end: everybody is told, the children die, the state dir goes', async () => {
+  await step('2 claude-jam end: everybody is told, the children die, the state dir goes', async () => {
     // Every child the daemon spawned, by the pid it logged for itself.
     pids.daemon = main.pid;
     pids.claude = Number((tmux('list-panes', '-t', `${S.jam}:claude`, '-F', '#{pane_pid}').stdout || '').trim());
@@ -371,7 +371,7 @@ try {
     await w.want('the welcome', (f) => f.t === 'welcome');
     const r = jam('end', S.jam);
     console.log(r.out.split('\n').filter(Boolean).map((l) => `      ${l}`).join('\n'));
-    if (r.code !== 0) throw new Error(`jam end exited ${r.code}`);
+    if (r.code !== 0) throw new Error(`claude-jam end exited ${r.code}`);
     // The frame that makes a client leave instead of reconnect.
     const ending = await until('the {t:\'ending\'} frame', () => w.ended, 10000);
     console.log(`      the watcher got: ${JSON.stringify(ending)}`);
@@ -392,7 +392,7 @@ try {
     drive(`env ${driveEnv()} node ${path.join(ROOT, 'client.mjs')} ws://127.0.0.1:${P.main} --name Dana --token ${TOKEN}`);
     await until('the client to be in the room', () => /fake claude|live TUI/.test(pane(S.drive)), 25000);
     const r = jam('end', S.jam);
-    if (r.code !== 0) throw new Error(`jam end exited ${r.code}: ${r.out}`);
+    if (r.code !== 0) throw new Error(`claude-jam end exited ${r.code}: ${r.out}`);
     const out = await until('the client to leave', () => (/JAMEXIT=/.test(back(S.drive)) ? back(S.drive) : null), 15000);
     const exit = /JAMEXIT=(\d+)/.exec(out);
     const notice = out.split('\n').filter((l) => /ended the jam/.test(l)).at(-1) || '';
@@ -407,7 +407,7 @@ try {
   });
 
   // ============================================================= orphans and clean ====
-  await step('3 an orphan state dir is listed with a !, and `jam clean` takes only that one', async () => {
+  await step('3 an orphan state dir is listed with a !, and `claude-jam clean` takes only that one', async () => {
     // The realistic orphan: the tmux session goes away under a jam (a crash, a kill by hand),
     // leaving the state dir behind. Exact name, and one this script created.
     const orphan = launch(S.jam, P.orphan);
@@ -424,7 +424,7 @@ try {
     if (o.name !== null) throw new Error('an orphan has no tmux session, so it has no name');
     if (l?.state !== 'live' || l.cleanable) throw new Error(`the live jam is ${JSON.stringify(l)}`);
     // Without an answer, nothing is deleted: stdin is not a tty here, so the question cannot be
-    // put, and `jam clean` treats that as no.
+    // put, and `claude-jam clean` treats that as no.
     const asked = jam('clean');
     console.log(asked.out.split('\n').filter(Boolean).map((l2) => `      ${l2}`).join('\n'));
     if (asked.code === 0) throw new Error('clean deleted something with nobody to confirm it');
@@ -457,7 +457,7 @@ try {
     }
     line('c');
     const out = await until('it to stand down', () => (/JAMEXIT=/.test(back(S.drive)) ? back(S.drive) : null), 10000);
-    console.log(out.split('\n').filter((l) => /jam host --attach|jam end|second jam|JAMEXIT/.test(l)).map((l) => `      ${l.trim()}`).join('\n'));
+    console.log(out.split('\n').filter((l) => /jam host --attach|claude-jam end|second jam|JAMEXIT/.test(l)).map((l) => `      ${l.trim()}`).join('\n'));
     if (!/JAMEXIT=1/.test(out)) throw new Error('cancel should be a refusal, i.e. non-zero');
     if (!alive(S.live)) throw new Error('cancel ended the jam');
     if (!/jam host --attach/.test(out)) throw new Error('the refusal does not name the way in');
@@ -494,7 +494,7 @@ try {
     console.log(`      ${asked.split('\n').filter((l) => /still running/.test(l)).at(-1).trim()}`);
     line('k');
     const out = await until('the way back', () => (/JAMEXIT=/.test(back(S.drive)) ? back(S.drive) : null), 15000);
-    console.log(out.split('\n').filter((l) => /jam is still running|jam host --attach|jam sessions|jam end|raw TUI/.test(l)).map((l) => `      ${l.trim()}`).join('\n'));
+    console.log(out.split('\n').filter((l) => /jam is still running|claude-jam host --attach|claude-jam sessions|claude-jam end|raw TUI/.test(l)).map((l) => `      ${l.trim()}`).join('\n'));
     if (!alive(S.live)) throw new Error('`k` ended the jam');
     if (!fs.existsSync(stateDir(P.live))) throw new Error('`k` removed the state dir');
     if (!/jam host --attach/.test(out) || !/jam sessions/.test(out)) throw new Error('the reattach lines are missing');
@@ -556,7 +556,7 @@ try {
     killMine(S.drive);
   });
 
-  await step('3 `jam end --all` ends jam\'s own two and nothing else', async () => {
+  await step('3 `claude-jam end --all` ends jam\'s own two and nothing else', async () => {
     const a = launch(S.jam, P.main);
     const b = launch(S.live, P.live);
     const listed = jamJson().map((r) => r.name).sort();
@@ -580,7 +580,7 @@ try {
     if (liveJam && dtmux('has-session', '-t', '=jam').status !== 0) throw new Error('THE LIVE JAM WENT AWAY DURING THIS RUN');
     if (liveJam) console.log('      jam (the live one): still alive, still never touched');
     // And the namespace proof: a state dir outside this smoke's TMPDIR — orphan-shaped, so the
-    // most temping thing `jam clean` could possibly reach — was not touched by anything above.
+    // most temping thing `claude-jam clean` could possibly reach — was not touched by anything above.
     if (!fs.existsSync(path.join(GHOST, 'session.json'))) throw new Error('the planted state dir outside our TMPDIR is gone');
     console.log(`      ${GHOST}: untouched (a real orphan, in the real TMPDIR, and none of jam's business here)`);
   });

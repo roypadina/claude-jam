@@ -36,8 +36,8 @@ const URLS = (flag('jam-addresses') || '').split(',').map((s) => s.trim()).filte
 let addr = 0;
 // No --token is normal now: the host may run knock-only, and then you wait to be accepted.
 if (!url || !NAME) {
-  console.error('usage: jam join <invite-link>\n'
-    + '       jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host]');
+  console.error('usage: claude-jam join <invite-link>\n'
+    + '       claude-jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host]');
   process.exit(2);
 }
 
@@ -316,7 +316,7 @@ function render(ev) {
     case 'invite': {
       if (ev.state === 'refused') return err(ev.text);
       if (ev.state !== 'minted' || !ev.link) return;
-      for (const l of inviteMintedLines(ev.invite || {}, ev.link, 'jam join')) {
+      for (const l of inviteMintedLines(ev.invite || {}, ev.link, 'claude-jam join')) {
         emit({ glyph: '*', text: l, textColor: C.dim });
       }
       return;
