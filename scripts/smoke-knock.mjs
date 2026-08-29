@@ -68,6 +68,19 @@ await step('friend hello without a token lands in knock pending, host is told', 
   if (host.roster().includes('Dana')) throw new Error('a pending knocker is in the roster');
 });
 
+// v0.16: the bar in the host's client is driven by one frame carrying the whole pending set,
+// pushed on every change — so this is what a knock has to produce besides the text line.
+await step('v0.16: host clients get the pending set with an expiry, and it empties on admit', async () => {
+  const p = await host.want('pending with Dana', (f) => f.t === 'pending' && f.items?.some((i) => i.name === 'Dana'));
+  const item = p.items.find((i) => i.name === 'Dana');
+  eq(item.kind, 'knock', 'item.kind');
+  if (!item.ip) throw new Error('the pending item carries no ip');
+  const left = item.expires - Date.now();
+  if (!(left > 60000 && left <= 120000)) throw new Error(`expires is ${left}ms away, want ~2min`);
+  console.log(`      pending: ${JSON.stringify(p.items)} (${Math.round(left / 1000)}s left)`);
+  if (dana.frames.some((f) => f.t === 'pending')) throw new Error('a guest was told about the pending set');
+});
+
 await step('a pending socket cannot talk (say is refused)', async () => {
   dana.send({ t: 'say', text: 'let me in' });
   await dana.want('error', (f) => f.t === 'error' && /approval/i.test(f.text));
@@ -81,6 +94,9 @@ await step('host admit ok:true welcomes the knocker and puts it in the roster', 
   eq(w.session.join, undefined, 'a friend must not receive the join line');
   await host.want('roster with Dana', (f) => f.t === 'roster' && f.joined === 'Dana');
   if (!host.roster().includes('Dana')) throw new Error(`roster is ${host.roster().join(',')}`);
+  // v0.16: and the bar comes down, because the pending set is pushed again and is now empty.
+  const last = [...host.frames].reverse().find((f) => f.t === 'pending');
+  if (last.items.length) throw new Error(`still pending after admit: ${JSON.stringify(last.items)}`);
 });
 
 await step('a second Dana is closed 4409', async () => {
