@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // claude-jam terminal client. No dependencies: global WebSocket + readline.
 import readline from 'node:readline';
-import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines } from './lib.mjs';
+import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, nextBlock, onboardingLines, humanBytes, resumeInstructions, xferFrames, pumpFrames } from './lib.mjs';
+import { xferStart, xferChunk, saveXfer, readForUpload, clipboardPng, DOWNLOAD_DIR } from './xfer.mjs';
 
 const argv = process.argv.slice(2);
 const url = argv.find((a) => a.startsWith('ws'));
@@ -168,6 +169,22 @@ function render(ev) {
     case 'cmdreq':
       return emit({ glyph: '⌘', glyphColor: C.accent,
         text: `${ev.name} wants to run ${ev.cmd} — /allow-cmd ${ev.name} · /allow-cmd ${ev.name} always · /deny-cmd ${ev.name}` });
+    // v0.12/v0.13: the transcript and file requests, same ladder, host clients only.
+    case 'exportreq':
+      return emit({ glyph: '⇩', glyphColor: C.accent,
+        text: `${ev.name} requests the session transcript — /allow-export ${ev.name} · /allow-export ${ev.name} always · /deny-export ${ev.name}` });
+    case 'filereq':
+      return emit({ glyph: '⇪', glyphColor: C.accent,
+        text: `${ev.name} wants to send ${ev.file} (${humanBytes(ev.size)}) — /accept-file ${ev.name} · /accept-file ${ev.name} always · /deny-file ${ev.name}` });
+    case 'offer':
+      return emit({ glyph: '⇩', glyphColor: C.accent,
+        text: `${ev.from} offers ${ev.name} (${humanBytes(ev.size)}) — /get ${ev.name} saves it to ./${DOWNLOAD_DIR}/` });
+    case 'xfergrant': return sendUpload(ev);
+    case 'xfer': return xferStart(xfers, ev);
+    case 'file': {
+      const done = xferChunk(xfers, ev);
+      return done ? saveIncoming(done) : undefined;
+    }
     case 'token': {
       // Tunnel pair included (v0.14): a rotation changes the credential inside all four.
       if (session) Object.assign(session, { join: ev.join, view: ev.view, tunnelJoin: ev.tunnelJoin, tunnelView: ev.tunnelView });
@@ -224,6 +241,50 @@ function connect() {
 const err = (text) => emit({ glyph: '!', glyphColor: C.err, text, textColor: C.err });
 const sendMsg = (o) => { if (ws?.readyState === 1) ws.send(JSON.stringify(o)); else err('not connected'); };
 
+// --------------------------------------- v0.12/v0.13: the export and files ----
+// Same behaviour as the ink client: an incoming transfer is written to this client's own cwd,
+// an export prints the recipe that revives it, and an upload waits for the host's yes.
+const xfers = new Map();
+let upload = null; // {name, data, caption} read and waiting for the host
+
+function saveIncoming(rec) {
+  try {
+    const file = saveXfer(rec);
+    sys(`saved ${file} (${humanBytes(rec.data.length)})`);
+    if (rec.kind === 'export') {
+      for (const l of resumeInstructions(rec.session, file, process.cwd())) emit({ text: l, textColor: C.dim, bare: true });
+    }
+  } catch (e) { err(`could not save the transfer: ${e.message}`); }
+}
+
+function doSend(p) {
+  if (IS_HOST) return sendMsg({ t: 'offer', path: p });
+  let file;
+  try { file = readForUpload(p); } catch (e) { return err(e.message); }
+  stageUpload(file.name, file.data, '');
+}
+
+function doPaste(caption) {
+  let img;
+  try { img = clipboardPng(); } catch (e) { return err(e.message); }
+  stageUpload(img.name, img.data, caption);
+}
+
+function stageUpload(name, data, caption) {
+  upload = { name, data, caption };
+  sendMsg({ t: 'upload', name, size: data.length, caption: caption || undefined });
+  if (!IS_HOST) sys(`${name} (${humanBytes(data.length)}) — waiting for the host to accept it`);
+}
+
+function sendUpload(ev) {
+  if (!upload) return err('a file was approved that I am no longer holding — /send it again');
+  if (ev.name && ev.name !== upload.name) return err(`${ev.name} was approved, but I am holding ${upload.name}`);
+  const up = upload;
+  upload = null;
+  sys(`sending ${up.name} (${humanBytes(up.data.length)})…`);
+  pumpFrames(xferFrames(ev.xfer, up.data), (f) => sendMsg(f), () => ws?.readyState === 1);
+}
+
 rl.on('line', (raw) => {
   const a = parseClientLine(raw);
   if (a.kind === 'continue') { cont.push(a.text); return reprompt(); }
@@ -248,11 +309,24 @@ rl.on('line', (raw) => {
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'admit', name: act.name || undefined, ok: act.kind === 'accept' });
       break;
-    // v0.14: answering a guest's /command request.
+    // v0.14: answering a guest's /command request; v0.12/v0.13 the same for the transcript
+    // and for a file. The daemon enforces host+loopback on all three.
     case 'cmd':
+    case 'export-ok':
+    case 'file-ok':
       if (!IS_HOST) err('host only');
-      else sendMsg({ t: 'cmd', op: act.op, name: act.name || undefined, always: act.always });
+      else {
+        const t = { cmd: 'cmd', 'export-ok': 'exportok', 'file-ok': 'fileok' }[act.kind];
+        sendMsg({ t, op: act.op, name: act.name || undefined, always: act.always });
+      }
       break;
+    case 'export':
+      sendMsg({ t: 'export' });
+      if (!IS_HOST) sys('asked the host for the session transcript…');
+      break;
+    case 'send': doSend(act.path); break;
+    case 'paste': doPaste(act.caption); break;
+    case 'get': sendMsg({ t: 'get', name: act.name || undefined }); break;
     case 'token':
       if (!IS_HOST) err('host only');
       else sendMsg({ t: 'token', op: act.op, value: act.value });
