@@ -205,7 +205,7 @@ try {
     tmux('set-option', '-t', S.decoy, OWNED_OPTION, NOTJAM);
     const v1 = ownedSession(S.decoy, SOCKET);
     console.log(`      ownedSession (empty dir)  → ${v1.why}`);
-    if (v1.ok || !/there is no session\.json jam wrote/.test(v1.why)) throw new Error(`unexpected: ${JSON.stringify(v1)}`);
+    if (v1.ok || !/there is no session\.json claude-jam wrote/.test(v1.why)) throw new Error(`unexpected: ${JSON.stringify(v1)}`);
     const bare = jam('end', S.decoy);
     console.log(`      empty dir  → exit ${bare.code}: ${bare.out.trim().split('\n')[0]}`);
     if (bare.code === 0 || !alive(S.decoy)) throw new Error('the decoy was ended');
@@ -288,8 +288,8 @@ try {
   const pids = {};
 
   await step('1 a launched jam is stamped, listed live, and says which relays it has', async () => {
-    const opt = (tmux('show-options', '-t', S.jam, '-v', '@jam-owned').stdout || '').trim();
-    console.log(`      @jam-owned → ${opt}`);
+    const opt = (tmux('show-options', '-t', S.jam, '-v', OWNED_OPTION).stdout || '').trim();
+    console.log(`      ${OWNED_OPTION} → ${opt}`);
     if (opt !== stateDir(P.main)) throw new Error(`marker is ${opt}`);
     for (const k of ['tmux', 'port', 'viewPort', 'cwd', 'sessionId', 'createdAt', 'pid', 'state', 'socket']) {
       if (!(k in main)) throw new Error(`session.json has no ${k}`);

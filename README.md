@@ -230,7 +230,7 @@ claude-jam creates the tmux session, so claude-jam cleans it up — no `tmux kil
 Closing the host's client asks `[k]eep it running · [e]nd it · [c]ancel`; `--no-prompt`,
 `--keep-on-exit` and `--end-on-exit` answer it up front, and a stdin that is not a terminal
 counts as **keep**. `claude-jam host` on a name already held by one of claude-jam's own offers
-`[a]ttach as host · [n]ew session (jam-2) · [e]nd it and start fresh · [c]ancel`.
+`[a]ttach as host · [n]ew session (claude-jam-2) · [e]nd it and start fresh · [c]ancel`.
 
 **claude-jam only ever ends a tmux session it created.** On creation it stamps
 `@claude-jam-owned <state-dir>` on the session and writes `session.json` into that dir; ending anything
