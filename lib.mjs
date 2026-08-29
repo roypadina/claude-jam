@@ -1516,6 +1516,301 @@ export function commandMatches(input, commands = JAM_COMMANDS, max = COMMAND_HIN
   return hits.slice(0, max);
 }
 
+// ------------------------------- v0.18: jam owns its tmux sessions ----
+// THE SAFETY RULE, which every helper in this section exists to serve: jam may end a tmux
+// session only when ALL of these hold — the caller named it explicitly (or picked it out of
+// jam's own verified list), the session carries an `@jam-owned` option, and that option points
+// at a state dir holding the `session.json` jam wrote FOR THAT NAME. Never a name pattern,
+// never a filtered sweep over `tmux list-sessions`, never `--all` without re-verifying every
+// single one, never `kill-server`. The machine this runs on has other people's tmux sessions
+// on it, and a "cleanup" that once filtered a list of workspaces cost seven live ones.
+//
+// So: enumeration happens over jam's OWN namespace (`$TMPDIR/claude-jam-<port>` state dirs),
+// the decisions are all here where they can be tested, and the impure half — tmux, fs, the
+// HTTP call, the prompts — is sessions.mjs and host.mjs. Every refusal path has a test.
+export const OWNED_OPTION = '@jam-owned';
+export const SESSION_FILE = 'session.json';
+export const STATE_PREFIX = 'claude-jam-';
+export const SESSION_TAG = 'claude-jam'; // what session.json says it is, so a stray JSON is not one
+export const SESSION_V = 1;
+
+// `$TMPDIR/claude-jam-<port>` — the state dir the launcher has always used, and now also the
+// namespace `jam sessions` / `jam clean` enumerate. Nothing outside it is ever looked at.
+export function stateDirFor(tmpdir, port) {
+  return path.join(String(tmpdir ?? ''), `${STATE_PREFIX}${port}`);
+}
+
+// The reverse, for that enumeration. A directory name that is not exactly `claude-jam-<port>`
+// is not ours and comes back null — never a "close enough".
+const STATE_DIR_RE = new RegExp(`^${STATE_PREFIX}(\\d{1,5})$`);
+export function portFromStateDir(name) {
+  const m = STATE_DIR_RE.exec(String(name ?? ''));
+  const port = m ? Number(m[1]) : NaN;
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+// What the launcher writes into the state dir the moment it creates the session, and what
+// verifyOwned checks a marker against. `state` is in here on purpose: it is what makes the
+// pair self-consistent, so a session.json copied out of a real jam's dir cannot validate in
+// the dir somebody copied it into. `secret` is the daemon's hook secret, which is how `jam end`
+// authenticates its POST /end — the same loopback+secret gate the knock popup already uses; it
+// lives in a 0700 dir beside token.json, which already holds the join token.
+export function sessionInfo({ tmux, port, viewPort, cwd, sessionId, createdAt, pid, state, secret = null }) {
+  return {
+    jam: SESSION_TAG,
+    v: SESSION_V,
+    tmux: String(tmux ?? ''),
+    port: Number(port),
+    viewPort: Number(viewPort),
+    cwd: String(cwd ?? ''),
+    sessionId: String(sessionId ?? ''),
+    createdAt: Number(createdAt) || 0,
+    pid: Number(pid) || 0,
+    state: String(state ?? ''),
+    secret: secret || null,
+  };
+}
+
+// A session.json off disk. Anything that is not jam's own shape is null, which every caller
+// reads as "jam did not write this" — i.e. a refusal, not a fallback.
+export function parseSessionJson(text) {
+  let o;
+  try { o = JSON.parse(String(text ?? '')); } catch { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  if (o.jam !== SESSION_TAG || !Number.isInteger(o.v)) return null;
+  if (typeof o.tmux !== 'string' || !o.tmux) return null;
+  if (typeof o.state !== 'string' || !o.state) return null;
+  if (!Number.isInteger(o.port) || o.port <= 0 || o.port > 65535) return null;
+  return o;
+}
+
+// The gate every kill goes through, and the only place that may say yes. Deliberately dumb and
+// total: it is handed the exact name asked for, the raw `@jam-owned` value tmux reported for
+// THAT name (null when the option is unset) and the parsed session.json found in the directory
+// that value names (null when there is none). Anything that does not line up is a refusal
+// carrying its own reason — a refusal is never "probably fine".
+export function verifyOwned(name, marker, session) {
+  const n = String(name ?? '');
+  if (!n) return { ok: false, why: 'no session name was given, and jam never guesses one' };
+  if (!marker) {
+    return { ok: false, why: `tmux session "${n}" carries no ${OWNED_OPTION} marker — jam did not `
+      + 'create it, so jam will not end it' };
+  }
+  const dir = String(marker);
+  if (!path.isAbsolute(dir)) {
+    return { ok: false, why: `"${n}"'s ${OWNED_OPTION} is ${JSON.stringify(dir.slice(0, 80))}, `
+      + 'which is not an absolute state dir — refusing' };
+  }
+  if (!session) {
+    return { ok: false, why: `"${n}"'s ${OWNED_OPTION} points at ${dir}, where there is no `
+      + `${SESSION_FILE} jam wrote — that marker was put there by hand, refusing` };
+  }
+  if (session.state !== dir) {
+    return { ok: false, why: `${path.join(dir, SESSION_FILE)} says its state dir is `
+      + `${session.state} — the pair was not written together, refusing` };
+  }
+  if (session.tmux !== n) {
+    return { ok: false, why: `${path.join(dir, SESSION_FILE)} belongs to session `
+      + `"${session.tmux}", not "${n}" — refusing` };
+  }
+  return { ok: true, dir, info: session };
+}
+
+// What state one row of jam's namespace is in. Three measured facts in, one word out:
+//   live       the tmux session is there, its marker verifies, the daemon answers
+//   no-daemon  session and marker fine, nothing listening — the daemon died under it
+//   orphan     no tmux session and no listener: the state dir is all that is left, and this is
+//              the ONLY state `jam clean` may delete
+//   no-session no tmux session but something IS on that port — flagged, never cleaned, because
+//              whatever holds the port is not ours to remove
+//   foreign    the tmux session exists and does NOT verify: shown, never touched, ever
+export const JAM_STATES = ['live', 'no-daemon', 'orphan', 'no-session', 'foreign'];
+export function classifyJam({ tmuxAlive = false, owned = false, portAlive = false } = {}) {
+  if (!tmuxAlive) return portAlive ? 'no-session' : 'orphan';
+  if (!owned) return 'foreign';
+  return portAlive ? 'live' : 'no-daemon';
+}
+
+// The `!` in the table: anything that is not a healthy live jam wants the host's eye.
+export function jamMark(state) { return state === 'live' ? ' ' : '!'; }
+
+// `jam clean` removes state dirs and nothing else, and only in the one state that means the
+// session behind them is provably gone.
+export function cleanable(row) { return row?.state === 'orphan'; }
+
+// `jam end` with no name. Exactly one jam is unambiguous; several is a numbered picker; none is
+// an error. A name is matched EXACTLY against jam's own verified rows — no prefix, no case
+// folding, no fnmatch — because this is the input that decides what gets killed. (tmux itself
+// would happily prefix-match `jam` onto `jamtest`, which is exactly the mistake to avoid.)
+export function resolveTarget(rows = [], name = null) {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && r.name && r.state !== 'foreign');
+  const asked = name == null || name === '' ? null : String(name);
+  if (asked == null) {
+    if (!list.length) {
+      return { ok: false, why: 'no jam of jam\'s own is running — `jam sessions` lists what it knows about' };
+    }
+    if (list.length === 1) return { ok: true, row: list[0] };
+    return { ok: false, why: `${list.length} jams are running — name one, or pick a number`, choices: list };
+  }
+  const hit = list.find((r) => r.name === asked);
+  if (hit) return { ok: true, row: hit };
+  return { ok: false, choices: list, why: `no jam-owned tmux session is called "${asked}" — `
+    + (list.length ? `jam knows about ${list.map((r) => r.name).filter(Boolean).join(', ')}`
+      : 'jam knows about none right now') };
+}
+
+// Answering a numbered picker. 1-based, exact digits only: an out-of-range or non-numeric
+// answer is null, which every caller treats as "nothing was chosen".
+export function pickNumber(text, choices = []) {
+  const t = String(text ?? '').trim();
+  if (!/^\d{1,3}$/.test(t)) return null;
+  const i = Number(t) - 1;
+  return i >= 0 && i < choices.length ? choices[i] : null;
+}
+
+// One keypress answering one of jam's prompts. Lowercased first visible character, and it has
+// to be one of the offered keys — anything else is null, i.e. ask again. There is deliberately
+// no default: nothing destructive may happen because somebody hit Enter.
+export function promptChoice(input, keys = []) {
+  const c = String(input ?? '').trim().toLowerCase().slice(0, 1);
+  return c && keys.includes(c) ? c : null;
+}
+
+// v0.18-1: what happens when the host's client exits. The flags win over the prompt, and stdin
+// that is not a terminal cannot answer one — in both of those cases the answer is KEEP, so
+// nothing destructive ever happens because nobody was there to say no. A guest is never asked
+// at all: their client was a window onto somebody else's session.
+export function exitDecision({ endOnExit = false, keepOnExit = false, noPrompt = false, isTty = false, isHost = true } = {}) {
+  if (endOnExit && keepOnExit) return 'conflict';
+  if (!isHost) return 'keep';
+  if (endOnExit) return 'end';
+  if (keepOnExit || noPrompt || !isTty) return 'keep';
+  return 'prompt';
+}
+
+export const EXIT_KEYS = ['k', 'e', 'c'];
+export function exitPromptText(guests = 0) {
+  const n = Math.max(0, Math.floor(Number(guests) || 0));
+  const who = n === 1 ? '1 guest connected' : `${n} guests connected`;
+  return `this jam is still running (${who}) — [k]eep it running · [e]nd it · [c]ancel`;
+}
+
+// The way back in, printed whenever a client leaves a jam running (`k`, `--keep-on-exit`, a
+// non-interactive exit) — one wording, so the launcher and `jam sessions` agree.
+export function reattachLines({ tmux = 'jam', port = 7777, clientCmd = 'node client.mjs', name = 'Host', token = null } = {}) {
+  return [
+    `client:  jam host --attach${tmux === 'jam' ? '' : ` --tmux ${tmux}`}`,
+    `  or:    ${clientCmd} ws://127.0.0.1:${port} --name ${name}${token ? ` --token ${token}` : ''} --host`,
+    `raw TUI: tmux attach -t ${tmux}`,
+    `list:    jam sessions`,
+    `stop:    jam end ${tmux}`,
+  ];
+}
+
+// v0.18-5: `jam host` when the name it wants is taken. A jam of jam's own gets four ways out;
+// anything else is refused without being touched.
+export const TAKEN_KEYS = ['a', 'n', 'e', 'c'];
+export function takenPromptText(name, next) {
+  return `tmux session "${name}" is already a jam of yours — [a]ttach as host · `
+    + `[n]ew session (${next}) · [e]nd it and start fresh · [c]ancel`;
+}
+
+export function foreignSessionText(name, why = '') {
+  return `tmux session "${name}" already exists and is NOT one of jam's — jam will not touch it.\n`
+    + `  ${why || 'no @jam-owned marker'}\n`
+    + `  run this jam under another name:  jam host --tmux ${name}-jam\n`
+    + `  or look at it yourself:           tmux attach -t ${name}`;
+}
+
+// `jam` → `jam-2` → `jam-3`. The first free suffix, so a third jam does not reuse a name that
+// is only free because the second one is between states.
+export function autoSessionName(base, taken = []) {
+  const b = String(base ?? 'jam');
+  const used = new Set((Array.isArray(taken) ? taken : []).map(String));
+  if (!used.has(b)) return b;
+  for (let n = 2; n <= 99; n++) { if (!used.has(`${b}-${n}`)) return `${b}-${n}`; }
+  return null;
+}
+
+// v0.18-7: `{t:'ending'}` — the session is going away on purpose. A client prints one line and
+// leaves with 0; the one thing it must NOT do is reconnect at a daemon that is deliberately
+// gone. Exit code 0 always: an orderly end is not a failure, in a script or anywhere else.
+export function endingNotice(ev = {}) {
+  const who = validName(ev?.by) ? ev.by : null;
+  const why = typeof ev?.reason === 'string' && ev.reason.trim() ? ` (${stripControl(ev.reason).slice(0, 80)})` : '';
+  return { code: 0, text: `${who ? `${who} ended the jam` : 'the host ended the jam'}${why} — nothing to reconnect to` };
+}
+
+// v0.18-4: `/end` in the host client, which ends the session for everybody, so it is the one
+// jam command that asks twice. Only a real yes counts; Enter alone is a no.
+export function confirmYes(text) {
+  const t = String(text ?? '').trim().toLowerCase();
+  return t === 'y' || t === 'yes';
+}
+
+// `3h 12m` / `12m` / `41s` — how long a jam has been up, for the table.
+export function uptimeText(ms) {
+  const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+// v0.18-2: `jam sessions`. Rows are built by sessions.mjs out of jam's own namespace; this only
+// lays them out. `id` is the first 8 of the claude session id (enough to recognise, short enough
+// to fit), `here` the roster, `urls` which relays are configured — never the URLs themselves,
+// because a join line carries the token.
+export const SESSIONS_COLS = ['', '#', 'name', 'port', 'state', 'up', 'session', 'here', 'urls', 'cwd'];
+export function sessionsRow(row = {}, now = 0, i = 0) {
+  return {
+    mark: jamMark(row.state),
+    n: String(i + 1),
+    name: row.name || '—',
+    port: String(row.port ?? '—'),
+    state: row.state || '?',
+    up: row.createdAt ? uptimeText(Number(now) - Number(row.createdAt)) : '—',
+    session: String(row.sessionId || '').slice(0, 8) || '—',
+    here: (row.participants || []).length ? row.participants.join(', ') : '—',
+    urls: [row.view ? 'view' : null, row.tunnel ? 'tunnel' : null].filter(Boolean).join('+') || '—',
+    cwd: row.cwd || '—',
+  };
+}
+
+export function sessionsTable(rows = [], now = 0) {
+  if (!rows.length) {
+    return 'no jams — `jam host` starts one, and this list only ever shows jam\'s own sessions';
+  }
+  const cells = [SESSIONS_COLS, ...rows.map((r, i) => Object.values(sessionsRow(r, now, i)))];
+  const w = SESSIONS_COLS.map((_, c) => Math.max(...cells.map((row) => String(row[c] ?? '').length)));
+  const out = cells.map((row) => row.map((v, c) => String(v ?? '').padEnd(c === row.length - 1 ? 0 : w[c])).join(' ').trimEnd());
+  const notes = [];
+  if (rows.some((r) => r.state === 'orphan')) notes.push('! orphan = the tmux session is gone; `jam clean` removes those state dirs');
+  if (rows.some((r) => r.state === 'no-daemon')) notes.push('! no-daemon = the session is up but nothing answers on its port; `jam end <name>` clears it');
+  if (rows.some((r) => r.state === 'no-session')) notes.push('! no-session = no tmux session, but something still holds that port — jam leaves it alone');
+  if (rows.some((r) => r.state === 'foreign')) notes.push('! foreign = that name is somebody else\'s tmux session; jam will never touch it');
+  return [...out, ...notes].join('\n');
+}
+
+// `jam sessions --json`: the row as measured, for scripting. Same facts, no layout.
+export function sessionsJson(rows = [], now = 0) {
+  return rows.map((r) => ({
+    name: r.name ?? null,
+    state: r.state,
+    port: r.port ?? null,
+    viewPort: r.viewPort ?? null,
+    cwd: r.cwd ?? null,
+    sessionId: r.sessionId ?? null,
+    createdAt: r.createdAt ?? null,
+    uptimeMs: r.createdAt ? Math.max(0, Number(now) - Number(r.createdAt)) : null,
+    participants: r.participants || [],
+    view: !!r.view,
+    tunnel: !!r.tunnel,
+    state_dir: r.dir ?? null,
+    cleanable: cleanable(r),
+  }));
+}
+
 export function buildSettings(hooksPath) {
   const cmd = (arg) => ({ hooks: [{ type: 'command', command: `${hooksPath} ${arg}` }] });
   return {
