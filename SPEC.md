@@ -765,7 +765,8 @@ feedback arrives only on the next 250 ms `capture-pane` poll. Locally that is ~3
 key — unusable for real typing.
 
 1. **Host F3 = real attach, not proxy.** In the HOST client (host + loopback), F3 suspends the
-   ink app (unmount/stdin release), spawns `tmux attach -t <jam>` with the terminal inherited
+   ink app (unmount/stdin release), spawns `tmux attach -t <jam>:claude` (the WINDOW by name —
+   a bare session target lands on window 0, the daemon's log) with the terminal inherited
    (stdio: 'inherit'), and re-renders the client when tmux detaches. Native latency, full
    fidelity (pickers, permission dialogs, mouse, colors). Status line hint becomes
    "F3 → attach to the real TUI (Ctrl-b d to come back)". While attached, the daemon pauses the
@@ -778,6 +779,16 @@ key — unusable for real typing.
    send nothing. Cap 25 frames/s per client. Where available prefer `tmux pipe-pane -o` to a
    local socket/fifo as the change signal (poll capture-pane only when the signal fires) — if
    pipe-pane proves fiddly, keep the adaptive poll (document which shipped).
+   **Shipped: the adaptive poll**, not pipe-pane. pipe-pane would have to carry every byte a
+   full-screen TUI redraws into a fifo of our own, and `capture-pane` would still be the thing
+   that turns it into a frame — so the only win was over an idle mirror, which already cost 4
+   polls/s and now costs none at all when nobody is watching. One self-rescheduling timer
+   instead: `frameCadence()` in lib.mjs, activity stamped by broadcast(), by a keystroke and by
+   a frame that actually changed, and the pane size cached for 500 ms so the fast cadence does
+   not double the tmux spawn count. Measured (smoke-mirror, 2026-08-29): 14 frames in 3 s while
+   a haiku turn ran, gaps min 46 ms / median 139 ms — under v0.14 no gap could be under 250 ms —
+   then 0 frames in 3 s once idle, with the daemon logging the
+   `[frames] cadence 40ms (active)` -> `250ms (idle)` transition.
 3. **Guest key latency honesty:** guests keep proxied input; the client shows a one-time hint
    that raw TUI control is host-only, and echoes their submitted line locally so typing feels
    instant even when the frame lags.
