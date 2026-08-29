@@ -45,12 +45,12 @@ const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 const TOKEN = 'adoptsmoketoken';
 // Clear of jam's 7777 and of every other smoke's block (7799/7801, 7811-7819, 7823/7825, 7831,
 // 7851-7855, 7861, 7871, 7881, 7891-7895, 7901).
-const P = { own: 7921, dflt: 7923, jam: 7925 };
+const P = { own: 7921, dflt: 7923, jam: 7925, roster: 7927 };
 
 // Every tmux session this script creates, and the only ones it ever kills. S12's lives on the
 // DEFAULT server, so its name is randomised — nothing may collide with somebody's own session.
 const RAND = randomBytes(4).toString('hex');
-const S = { pane: 'jamadoptpane', jam: 'jamadoptjam', dflt: `jamadopt-${RAND}` };
+const S = { pane: 'jamadoptpane', jam: 'jamadoptjam', dflt: `jamadopt-${RAND}`, rpane: 'jamadoptrpane' };
 for (const [k, v] of Object.entries(S)) {
   if (typeof v !== 'string' || !v.startsWith('jamadopt')) throw new Error(`S.${k} is ${v}`);
 }
@@ -153,6 +153,12 @@ const stateDir = (port) => path.join(TMP, `claude-jam-${port}`);
 
 function jam(...args) {
   const r = spawnSync(JAM, args, { encoding: 'utf8', env: ENV });
+  return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+}
+// Same, with extra environment. S7c needs JAM_BRIEF_MIN_GAP, which is an internal JAM_* var like
+// JAM_HOOK_SECRET rather than a flag — see the note beside it in host.mjs.
+function jamEnv(extra, ...args) {
+  const r = spawnSync(JAM, args, { encoding: 'utf8', env: { ...ENV, ...extra } });
   return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
 }
 const jamJson = () => JSON.parse(jam('sessions', '--json').out);
@@ -486,6 +492,47 @@ try {
     ok(pidAfter === pidBefore && running(pidAfter), `pid changed: ${pidBefore} → ${pidAfter}`);
     console.log(`      ${S.dflt} on the default socket survived, same pid ${pidAfter}`);
   });
+  await step('S13 a ROSTER re-brief: somebody joined, so claude is told who is in the room now', async () => {
+    // TESTING.md deferred this because the ten-minute rate limit is armed by the adoption
+    // briefing seconds earlier, so nothing can cross it inside a smoke. JAM_BRIEF_MIN_GAP is the
+    // hook that deferral asked for — an internal JAM_* var like JAM_HOOK_SECRET, so no flag, no
+    // /menu entry and no doc surface. Its own pane, its own port and its own daemon, because the
+    // gap is read once at daemon start and every other step must keep the shipped ten minutes.
+    //
+    // LAST on purpose: adoption names its own tmux session `claude-jam`, taking the first free
+    // one, so while the S6 jam is up there are two of that name on two sockets and `claude-jam
+    // end <name>` is ambiguous. By here the S6 jam is gone, and the teardown below ends this one
+    // by the name its own session.json records.
+    const rp = makePane(S.rpane);
+    // The baseline goes BEFORE the adopt: the briefing lands within a second of it, and sampling
+    // afterwards counts it as history and then waits forever for a second one.
+    const base = submitted().filter((x) => x.startsWith(`[${BRIEF_NAME}]: `)).length;
+    const r = jamEnv({ JAM_BRIEF_MIN_GAP: '0' }, 'adopt', '--pane', rp.id, '--socket', SOCKET,
+      '--yes', '--port', String(P.roster), '--token', TOKEN, '--no-popup', '--no-announce', '--no-attach');
+    ok(r.code === 0, `adopt exited ${r.code}:\n${r.out}`);
+    const rrow = jamJson().find((x) => x.port === P.roster);
+    ok(rrow && rrow.name, `no sessions row for port ${P.roster}: ${JSON.stringify(jamJson())}`);
+    const rlog = () => (spawnSync(TMUX, ['-L', rrow.socket, 'capture-pane', '-p', '-S', '-400',
+      '-t', `${rrow.name}:daemon`], { encoding: 'utf8' }).stdout || '');
+    const briefs = () => submitted().filter((x) => x.startsWith(`[${BRIEF_NAME}]: `));
+    const adoptBrief = await until('the adoption briefing', () => (briefs().length > base ? briefs().length : null), 40000)
+      .catch((e) => { console.log(`      second daemon log:\n${rlog().split('\n').filter(Boolean).slice(-12).map((l) => `        ${l}`).join('\n')}`); throw e; });
+    // Somebody joins. A real change to the participant SET is what rosterKey/briefUpdateDecision
+    // are for — the same person reconnecting is deliberately NOT one.
+    const rg = connect(P.roster, 'Yossi');
+    await rg.ready;
+    const again = await until('a roster re-brief in the adopted pane',
+      () => (briefs().length > adoptBrief ? briefs().at(-1) : null), 40000)
+      .catch((e) => { console.log(`      second daemon log:\n${rlog().split('\n').filter(Boolean).slice(-12).map((l) => `        ${l}`).join('\n')}`); throw e; });
+    ok(/In the room: /.test(again), `the re-brief lost the roster:\n${again.slice(0, 200)}`);
+    ok(/Yossi/.test(again), `the re-brief did not name who joined:\n${again.slice(0, 300)}`);
+    ok(/NEVER reveal the join token/.test(again), 'the roster re-brief lost the standing rules');
+    // And the daemon said WHY, on the roster path rather than the compaction one.
+    ok(/\[brief\] roster:/.test(rlog()), `no roster re-brief in the daemon log:\n${rlog().split('\n').filter((l) => /brief/.test(l)).join('\n')}`);
+    console.log(`      ${rlog().split('\n').filter((l) => /\[brief\]/.test(l)).slice(-2).map((l) => l.trim()).join('\n      ')}`);
+    try { rg.ws.close(); } catch { /* gone */ }
+  });
+
 } finally {
   // Any jam of this run's own that is still up, by the name its own session.json records — never
   // a sweep, never `--all`, and never `kill-server`, on any socket, for any reason.
@@ -499,6 +546,7 @@ try {
   // each one was made on. S.dflt lives on the DEFAULT server, which is why its name is random.
   killMine(S.pane);
   killMine(S.jam);
+  killMine(S.rpane);
   killMine(S.dflt, dtmux);
   for (const d of [TMP, HOME, BIN, WORK, BARE]) fs.rmSync(d, { recursive: true, force: true });
   const secs = Math.round((Date.now() - started) / 1000);

@@ -1035,7 +1035,7 @@ function rosterChanged(extra) {
   const key = rosterKey(names());
   const d = briefUpdateDecision({ mode: opts.briefUpdates, reason: 'roster',
     key, lastKey: briefedRoster, busy: status.busy, promptKind: prompt.kind,
-    lastAt: briefedAt, now: Date.now() });
+    lastAt: briefedAt, now: Date.now(), ...BRIEF_GAP_OVERRIDE });
   if (!d.brief) return;
   briefedRoster = key;
   console.log(`[brief] roster: re-telling claude — ${d.why}`);
@@ -3704,6 +3704,16 @@ async function inject(name, text, ws = null, kept = null, { keep = true } = {}) 
 // somebody's message; it is NOT kept in the outbox (it is regenerated from the roster whenever it
 // is needed); and it is never broadcast as a `say`, because a paragraph of protocol in everyone's
 // transcript is noise. The room gets one line saying it happened.
+// The roster re-brief is rate-limited to once every ten minutes, and the adoption briefing arms
+// that limit seconds earlier — so an end-to-end test of it needs either a fake clock or a way to
+// shorten the gap. This is that way, and it is an internal JAM_* env var like JAM_HOOK_SECRET and
+// JAM_TMUX_BIN rather than a flag: nothing a human reads gains an entry, and `--help`, `/menu`,
+// MANUAL and the wiki stay exactly as they are. Absent = the shipped ten minutes.
+const BRIEF_GAP_OVERRIDE = (() => {
+  const v = Number(process.env.JAM_BRIEF_MIN_GAP);
+  return Number.isFinite(v) && v >= 0 ? { minGap: v } : {};
+})();
+
 let briefedAt = 0;
 let briefing = false;
 let briefFails = 0; // one retry per daemon, not one per tick — see the catch below

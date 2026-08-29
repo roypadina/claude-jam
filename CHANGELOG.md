@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added — `JAM_BRIEF_MIN_GAP`, so the roster re-brief can be tested end to end
+
+The roster re-brief is rate-limited to once every ten minutes, and the adoption briefing arms
+that limit seconds earlier — so no test could ever cross it, and TESTING.md had carried the whole
+behaviour as unproven end to end since v0.33.
+
+`JAM_BRIEF_MIN_GAP` overrides the gap. It is an internal `JAM_*` environment variable like
+`JAM_HOOK_SECRET` and `JAM_TMUX_BIN`, deliberately not a flag: nothing a human reads gains an
+entry, so `--help`, `/menu`, `MANUAL.md`, the README and the wiki are untouched. Absent, the
+shipped ten minutes stand.
+
+`smoke-adopt` S13 uses it: adopt a pane, wait for the adoption briefing, have somebody join, and
+assert the re-brief lands in the pane, names them, keeps the standing rules, and is logged on the
+`roster` path. Ignoring the hook makes S13 time out — checked, not assumed.
+
 ### Fixed — adoption warned "check you named the right pane" at the most ordinary install
 
 Claude Code's own native installer puts the binary at
