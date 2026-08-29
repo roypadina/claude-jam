@@ -1864,3 +1864,56 @@ prompt is, cleared only when the next assistant record happens to arrive.
 5. Docs: README, MANUAL (claude must be able to say "anyone can answer my questions, only Roy
    can approve tools"), wiki Joining-a-Jam + Security-Model, CHANGELOG; `/answer` wording and the
    `--answers` toggle appear in `/menu` (v0.24 completeness test).
+
+## v0.32 — Windows support (one repo, phased; queued after the feature work)
+
+Decision: **one repo**, not a fork — a second repo would drift and double every future feature.
+Cross-platform code lives behind one seam; Windows-only implementations sit beside the macOS
+ones in the same files/dirs and are chosen at runtime.
+
+Honest scoping, because client and host are not the same problem: the client is node +
+WebSocket + ink and is genuinely portable; the **host is tmux** (sessions, `capture-pane -e`
+frames, `paste-buffer` injection, `send-keys`, `display-popup`, the ownership marker, socket
+isolation, F3 attach) and Windows has no tmux.
+
+### W0 — platform seam (do this early, it is small)
+`platform.mjs` exporting: `clipboardImage()`, `notify(title, body)`, `playSound(kind)`,
+`stateDir()`, `configDir()`, `historyFile()`, `secureWrite(path, data)` (chmod 600 on POSIX,
+ACL-restricted on Windows), `openExternal(url)`. macOS keeps today's `pngpaste`/`osascript`/
+`afplay`. Every existing call site routes through it; a unit test asserts no module outside
+`platform.mjs` spawns a platform binary.
+
+### W1 — native Windows client (full guest parity, no WSL)
+- Runtime: node ≥ 22 on Windows; Windows Terminal (ANSI + alt-screen) is the supported host
+  terminal; `cmd.exe` legacy console explicitly unsupported, with a clear message.
+- Clipboard image: PowerShell `Get-Clipboard -Format Image` → temp PNG (argv, never a shell
+  string). Notifications: PowerShell toast (BurntToast when present, else a WinRT toast script);
+  sound: `[console]::beep()` fallback, `System.Media.SoundPlayer` for distinct knock/join tones.
+- Paths: `%TEMP%` / `%APPDATA%\claude-jam`; no `0600` semantics — use an ACL that grants only the
+  current user, and say so in the security docs rather than pretending modes carry over.
+- Keys: verify F2/F3/PgUp/Shift+Enter/Esc sequences under Windows Terminal; the CSI-u newline
+  handling already shipped must be re-verified there.
+- Install: `npm i -g claude-jam` (works on macOS too) and/or `winget`/`scoop`. **Publishing to
+  npm is net-new distribution and needs Roy's explicit approval before the first publish.**
+- CI: GitHub Actions matrix (macos-latest + windows-latest) running `node --test` on every push;
+  the smoke suites stay manual/local since they need a real terminal and a real claude.
+
+### W2 — Windows host via WSL2 (recommended host path)
+tmux and Claude Code both run in WSL2, so the daemon runs unchanged inside WSL while the human
+uses Windows Terminal. Work is integration, not rewrite: WSL-aware paths for the state dir, the
+`\\wsl$` boundary for `/send`/`/paste`/`jam-uploads`, `localhost` port forwarding from Windows to
+WSL (verify `--tunnel`/`--funnel` and the ttyd view reach the outside), the browser view URL, and
+a documented setup page. Tested on Roy's Windows machine before it is claimed to work.
+
+### W3 — native Windows host (ConPTY) — NOT recommended
+Replacing tmux means writing our own multiplexer on `node-pty`/ConPTY: screen capture with
+attributes, injection, an attach equivalent, and per-viewer sizing. That is a substrate rewrite,
+weeks of work, and it would fork the most safety-critical code in the project (injection +
+ownership). Only revisit if W2 proves genuinely unworkable; document the reasoning either way.
+
+### Cross-platform matrix that must be tested (Roy has a Windows box)
+mac host ↔ Windows client, Windows(WSL) host ↔ mac client, Windows(WSL) host ↔ Windows client,
+over LAN and over `--tunnel`. Each of: mirror rendering, F2/F3, invites, knock+approval, `/c`,
+`/send` + `/paste` both directions, `/answer`, `/export` + resume on the other OS, sounds,
+notifications, scrollback. A `docs/COMPATIBILITY.md` table records what was actually verified,
+on what build, on what date — never a claim without a run.
