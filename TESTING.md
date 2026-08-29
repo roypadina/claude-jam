@@ -91,11 +91,17 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   end-to-end run: proving it needs a fake clock, because the 10-minute rate limit is armed by the
   adoption briefing seconds earlier. Prove: either a `--brief-min-gap` test hook, or a campaign
   run long enough to cross the gap with somebody joining.
-- 2026-08-29 · v0.29 peer tasks, guest half: the other seventeen smokes were not re-run. Nothing
-  that existed before this batch changed behaviour — the daemon gained new frame types and a new
-  loopback endpoint, the clients gained new commands and a new frame case, and `peer.mjs` is new —
-  so no existing path was edited. `smoke-peer` covers everything that is new. Prove: full sweep at
-  the next release gate.
+- 2026-08-29 · v0.29 peer tasks: of the other seventeen smokes, four were re-run and thirteen were
+  not. RE-RUN and green: `smoke-lifecycle` (real jams through the launcher, and `writeSystemPrompt`
+  took a new argument), `smoke-answer` (the daemon's frame dispatch plus a real ink client),
+  `smoke-nudge` (the `/menu` tree gained a section, and the platform seam), `smoke-scroll` (a real
+  ink client on a real pty — the stdin key chain gained `peerKeys` in front of the approval bar).
+  NOT re-run: `smoke-ink`, `smoke-xfer`, `smoke.mjs`, `smoke-mirror`, `smoke-popup`, `smoke-slash`,
+  `smoke-perm`, `smoke-knock`, `smoke-transport`, `smoke-replay`, `smoke-invite`, `smoke-discover`,
+  `smoke-adopt` — judged unaffected (no existing code path was edited; the daemon gained frame
+  types and one loopback endpoint, the clients gained commands and a frame case, `peer.mjs` and
+  `peer-mcp.mjs` are new files) and six of them spend tokens. Prove: full sweep at the next
+  release gate.
 - 2026-08-29 · The peer executor has NEVER been a real `claude`. `smoke-peer` drives
   `scripts/fake-claude.mjs`, so five flags on the spawn argv are unverified against the real
   binary even though they are documented in its `--help` on 2.1.251: `--restricted`,
