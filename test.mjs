@@ -71,7 +71,10 @@ import path from 'node:path';
 // v0.32 W0: the platform seam, asserted from outside — it is the only module allowed to spawn
 // a platform binary, and this file is what says so.
 import { clipboardImage, notify, playSound, stateDir, configDir, historyFile, secureWrite,
-  secureDir, openExternal } from './platform.mjs';
+  secureDir, openExternal,
+  // v0.23: mDNS is a platform binary too, so advertising and browsing come through the same seam.
+  DNSSD_PATHS, DNSSD_MISSING, resolveDnssd, discoveryAvailable, advertiseSpawn, browseSpawn,
+  browseText, BROWSE_BUF_MAX } from './platform.mjs';
 
 // ---------------------------------------------------------------- pane fixtures ----
 // Real `tmux capture-pane -p` output, captured 2026-08-29 against claude 2.1.251 in a 100x32 (and
@@ -3707,9 +3710,13 @@ test('v0.21 no user-visible string emits a bare `jam ` command form', () => {
 // W1 would have to find twice: once when the feature breaks, and again when somebody adds
 // another one. tmux, claude, git, curl, cloudflared, tailscale and ttyd are NOT in this list —
 // they are the tool's dependencies, spelled the same everywhere.
+// v0.23 adds the mDNS tools to the list for the same reason: `dns-sd` is Apple's Bonjour CLI,
+// avahi's is spelled differently, and a module that reached for either directly would be a
+// second door for W1 to find.
 const PLATFORM_BINS = ['osascript', 'pngpaste', 'afplay', 'say', 'terminal-notifier',
   'pbcopy', 'pbpaste', 'xclip', 'xsel', 'clip', 'open', 'xdg-open', 'start',
-  'powershell', 'pwsh', 'cmd'];
+  'powershell', 'pwsh', 'cmd',
+  'dns-sd', 'avahi-publish-service', 'avahi-publish', 'avahi-browse'];
 
 test('v0.32 W0 no module outside platform.mjs spawns a platform binary', () => {
   const read = (f) => fs.readFileSync(new URL(`./${f}`, import.meta.url), 'utf8');
@@ -3727,7 +3734,8 @@ test('v0.32 W0 no module outside platform.mjs spawns a platform binary', () => {
     }
     // And the unambiguous names must not appear as a bare string at all, which catches the
     // `const cmd = ['pbcopy', []]` shape that never names the binary at the spawn itself.
-    for (const bin of ['osascript', 'pngpaste', 'afplay', 'pbcopy', 'pbpaste', 'xclip', 'xdg-open', 'terminal-notifier']) {
+    for (const bin of ['osascript', 'pngpaste', 'afplay', 'pbcopy', 'pbpaste', 'xclip', 'xdg-open', 'terminal-notifier',
+      'dns-sd', 'avahi-publish-service', 'avahi-browse']) {
       for (const lit of jsStringLiterals(src)) {
         assert.ok(!lit.text.split(/[\s'"`,()[\]]+/).includes(bin),
           `${f}:${lit.line} names ${bin} — that belongs in platform.mjs`);
@@ -4121,4 +4129,51 @@ test('v0.23 the service type and browse window are constants everybody shares', 
   assert.equal(FIND_MS, 3000);
   // The parser defaults to the same type it is told about, so nothing can drift.
   assert.equal(parseDnssdZone('x._claude-jam._tcp SRV 0 0 7777 h.local.', DISCOVERY_TYPE).length, 1);
+});
+
+test('v0.23 the mDNS seam resolves its binary, and refuses with a reason and a fix', () => {
+  // The override wins, exactly the way JAM_TAILSCALE and JAM_TTYD do.
+  assert.deepEqual(resolveDnssd({ JAM_DNSSD: '/opt/mine/dns-sd' }, (p) => p === '/opt/mine/dns-sd'),
+    { ok: true, bin: '/opt/mine/dns-sd' });
+  const bad = resolveDnssd({ JAM_DNSSD: '/nope/dns-sd' }, () => false);
+  assert.equal(bad.ok, false);
+  assert.match(bad.why, /is not there/);
+  // Then the known locations, in order.
+  assert.equal(resolveDnssd({}, (p) => p === DNSSD_PATHS[0]).bin, DNSSD_PATHS[0]);
+  assert.equal(resolveDnssd({}, (p) => p === DNSSD_PATHS[2]).bin, DNSSD_PATHS[2]);
+  // Nothing anywhere is not an error: discovery is skipped, and the refusal names the fix for
+  // all three platforms rather than being a shrug.
+  const none = resolveDnssd({}, () => false);
+  assert.equal(none.ok, false);
+  assert.equal(none.why, DNSSD_MISSING);
+  assert.match(DNSSD_MISSING, /avahi-utils/);
+  assert.match(DNSSD_MISSING, /Bonjour/);
+  assert.match(DNSSD_MISSING, /JAM_DNSSD/);
+  // And it says the rest of claude-jam is unaffected, because it is.
+  assert.match(DNSSD_MISSING, /everything else works/);
+  assert.equal(discoveryAvailable({ JAM_DNSSD: '/nope' }), false);
+  assert.equal(typeof advertiseSpawn, 'function');
+  assert.equal(typeof browseSpawn, 'function');
+  assert.equal(typeof browseText, 'function');
+  assert.equal(BROWSE_BUF_MAX, 256 * 1024);
+});
+
+test('v0.23 the mDNS seam never throws when there is no tool — it answers', async () => {
+  const env = { JAM_DNSSD: '/definitely/not/here' };
+  const a = advertiseSpawn({ name: 'x', type: DISCOVERY_TYPE, port: 7777, txt: ['jam=x'] }, env);
+  assert.equal(a.ok, false);
+  assert.equal(a.child, undefined);
+  const b = browseSpawn({ type: DISCOVERY_TYPE }, env);
+  assert.equal(b.ok, false);
+  // browseText is what `claude-jam find` calls, so its no-tool answer has to be usable as one.
+  const t = await browseText({ type: DISCOVERY_TYPE, ms: 5 }, env);
+  assert.equal(t.ok, false);
+  assert.equal(t.text, '');
+  assert.match(t.why, /is not there/); // the refusal names the path that was pointed at
+  // With no override at all the refusal is the full one, with the per-platform fix.
+  assert.equal((await browseText({ type: DISCOVERY_TYPE, ms: 5 }, { JAM_DNSSD: '' })).ok,
+    discoveryAvailable({ JAM_DNSSD: '' }));
+  // …and the empty text parses to the empty listing rather than to a crash.
+  assert.deepEqual(parseDnssdZone(t.text), []);
+  assert.equal(findTable(discoveredJams(parseDnssdZone(t.text))), FIND_EMPTY);
 });
