@@ -662,6 +662,14 @@ function peerCommand(op) {
     peerMe = false;
     if (op === 'never') peerNever = true;
     sendMsg({ t: 'peer', op });
+    // Saying no in general answers the one in front of you too — a task left waiting after the
+    // person has opted out reads as "still considering it". (answerTask clears `task` before it
+    // calls this, so a `/peer never` that came in AS the answer does not decline twice.)
+    if (task) {
+      const t = task;
+      task = null;
+      sendMsg({ t: 'peertask-decline', task: t.id, why: 'declined', detail: op });
+    }
     return sys(op === 'never'
       ? 'peer tasks: NEVER for this client session. Nothing more will be offered to you here.'
       : 'peer tasks: off for you. Nothing will be dispatched to this machine.');
