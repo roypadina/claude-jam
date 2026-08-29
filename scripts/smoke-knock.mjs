@@ -56,7 +56,10 @@ let dana, eli, noa;
 await step('loopback host hello (host:true, no token) is welcomed', async () => {
   const w = await host.want('welcome', (f) => f.t === 'welcome');
   eq(w.you, 'SmokeHost', 'welcome.you');
-  eq(w.session.join, null, 'welcome.session.join with no token set');
+  // Knock mode: the address is still handed out, only the --token part is dropped (017bf4b).
+  if (!/ --name <You>$/.test(w.session.join || '')) {
+    throw new Error(`welcome.session.join should be a token-less invite line, got ${w.session.join}`);
+  }
 });
 
 await step('friend hello without a token lands in knock pending, host is told', async () => {
