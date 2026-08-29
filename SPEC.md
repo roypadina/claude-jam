@@ -2040,17 +2040,56 @@ ACL-restricted on Windows), `openExternal(url)`. macOS keeps today's `pngpaste`/
 - CI: GitHub Actions matrix (macos-latest + windows-latest) running `node --test` on every push;
   the smoke suites stay manual/local since they need a real terminal and a real claude.
 
-### W2 — Windows host via WSL2 (recommended host path)
+### W2 — Windows host via WSL2 (THE host path; W3 was investigated and dropped)
 tmux and Claude Code both run in WSL2, so the daemon runs unchanged inside WSL while the human
 uses Windows Terminal. Work is integration, not rewrite: WSL-aware paths for the state dir, the
 `\\wsl$` boundary for `/send`/`/paste`/`jam-uploads`, `localhost` port forwarding from Windows to
 WSL (verify `--tunnel`/`--funnel` and the ttyd view reach the outside), the browser view URL, and
 a documented setup page. Tested on Roy's Windows machine before it is claimed to work.
 
-### W3 — native Windows host: investigate first, WSL2 is the fallback not the requirement
-Roy's direction (2026-08-29): native client for sure; WSL2 may be *used* but must not be
-*forced* if a native host is achievable. That changes W3 from "not recommended" to "research,
-then decide", because a credible native path exists that I under-weighted:
+### W3 — native Windows host: investigated, and dropped (2026-08-29)
+Research pass done; report at `~/ClaudWork/2026-08-29-jam-windows-host-research/RESEARCH.md`.
+**Decision: there is no native Windows host. W2 (WSL2) is the Windows host path.**
+
+**The deciding fact: nothing reattaches to a running ConPTY.** No mechanism was found by which a
+second, later-launched process can take over a pseudo-console another process already owns, the
+way `tmux attach` reattaches to a named session. `CreatePseudoConsole` hands back handles, not a
+name — there is nothing to look up later — and `node-pty` inherits that gap. Everything that
+might have filled it was checked and none of it holds: the community "tmux for Windows" ports
+(psmux, bitcode/tmux-windows, wintmux) are small and unverified; zellij's native Windows support
+is months old (v0.44.0) with open display bugs of its own; and `wezterm-mux-server`, the most
+credible option, has no documented pure-native daemon-then-reattach flow — every concrete Windows
+use of its Unix-domain muxing in the docs is GUI-to-WSL bridging — and adopting it would mean
+driving wezterm's RPC protocol instead of owning a pty at all.
+
+So a native Windows host would put its own operator on the ~300 ms proxy path. That is precisely
+the latency **v0.15** introduced F3 to escape (7–26 ms attached, measured). A host build whose
+worst experience belongs to the person running it is not worth having, and no amount of backend
+abstraction buys it back.
+
+**Two consequences, both simplifications.**
+1. **The terminal-backend interface is not built.** It existed only so a pty backend could stand
+   in for tmux; with one backend it is an interface with one implementation. tmux stays the
+   substrate, unwrapped.
+2. **Roy's "WSL2 may be used, must not be forced" is honoured, not bent.** Nothing is forced on a
+   *guest*: the W1 native client needs no WSL, no tmux and no pty — it is a WebSocket plus a
+   raw-mode terminal, both native Node. WSL2 is asked only of somebody who wants to *host* from
+   Windows, which is the smaller and more technical audience.
+
+Supporting evidence, recorded so a future reversal starts from facts rather than optimism:
+- ConPTY resize/reflow garbling is an **open bug class against Claude Code itself** on Windows
+  (anthropics/claude-code#80123, #66795). `claude.exe` is the exact binary a native jam would
+  drive. Inside WSL2 there is a real pty and the class does not apply.
+- `@xterm/addon-serialize`, which would have had to reproduce `capture-pane -e` output closely
+  enough for the v0.31 pane classifier's regexes, is self-described as experimental.
+- One genuinely good finding, useful whenever npm publishing lands: the published
+  `node-pty@1.1.0` tarball bundles working prebuilt binaries for **both** win32-x64 and
+  win32-arm64, and its install script checks for those before ever falling back to node-gyp. The
+  README's "install Python + Visual Studio Build Tools" is contributor-facing, for building from
+  source. Unverified without a Windows box, but it means a native path would not have failed on
+  install pain — it failed on reattach.
+
+The original case for the native path, kept for the record:
 
   `node-pty` (ConPTY on Windows) runs claude in a pty we own, and **`@xterm/headless`** — the
   headless xterm.js build — consumes that pty stream and maintains the screen buffer with
@@ -2058,21 +2097,12 @@ then decide", because a credible native path exists that I under-weighted:
   pty write; "attach" becomes piping the pty raw to the host's stdin/stdout; resize is a pty
   API call. Both packages are current (@xterm/headless 6.0.0, node-pty 1.1.0 as of 2026-08-29).
 
-So the design is a **terminal backend interface** with two implementations behind it —
-`backend/tmux.mjs` (macOS/Linux, existing and proven, stays the default) and `backend/pty.mjs`
-(Windows) — chosen at runtime. Everything above the backend (protocol, ladders, invites,
-mirror, discovery, clients) is untouched.
-
-Before building it, a research pass must answer, with evidence on a real Windows box:
-does `claude.exe` behave correctly under ConPTY (colors, resize, the input box, pickers)?
-does @xterm/headless reproduce the pane faithfully enough that our v0.31 classifier and the
-paste-placeholder detection still work? what is the CPU cost of maintaining the buffer at our
-frame cadence? does a detached-daemon model work without tmux (the daemon must outlive the
-launching terminal — a Windows service/detached process, and how does the host "attach" back)?
-what replaces the ownership marker and session enumeration that tmux gave us for free?
-If those answers are good, W3 becomes the Windows host and WSL2 stays a documented alternative
-for people who prefer it. If they are not, W2 (WSL2) is the host path and this section records
-why, with the failing evidence.
+The intended shape was a **terminal backend interface** with `backend/tmux.mjs` and
+`backend/pty.mjs` behind it, chosen at runtime, with everything above it (protocol, ladders,
+invites, mirror, discovery, clients) untouched. Of the questions that pass was meant to settle —
+does `claude.exe` behave under ConPTY, does @xterm/headless reproduce the pane faithfully enough
+for the v0.31 classifier, what does maintaining the buffer cost at our frame cadence, and **how
+does the host attach back** — the last one has no answer, and it is the one that decides.
 
 ### Cross-platform matrix that must be tested (Roy has a Windows box)
 mac host ↔ Windows client, Windows(WSL) host ↔ mac client, Windows(WSL) host ↔ Windows client,
