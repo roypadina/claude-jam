@@ -1391,7 +1391,8 @@ Ink overlay (Select-driven, Esc closes, everything it does maps to an existing c
 #### v0.22B + the `/kick` half of v0.22C — shipped 2026-08-29
 
 The invite half only (A, the no-argument launcher menu, and the rest of C's live `/menu` panel are
-not built). 16 unit tests and `scripts/smoke-invite.mjs`, the twelfth smoke — 237 tests total.
+not built). 16 unit tests and `scripts/smoke-invite.mjs`, the twelfth smoke — 245 tests in all
+after v0.19 and v0.20 landed alongside it.
 What is worth knowing beyond the item text:
 
 - **The version is in the PREFIX as well as the payload.** `cjam1_` is matched by
