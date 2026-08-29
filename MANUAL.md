@@ -567,6 +567,13 @@ the view. Its hostname is the host machine's own name — `wss://<machine>.<tail
 so it is the **same URL every run**, which a quick tunnel's random words are not. Startup
 checks `tailscale status` and refuses with the exact missing step if Funnel is not available.
 
+One caveat worth knowing before you pick it: Funnel's stable hostname is proven, its long
+session is not. Tailscale issue #18827 (open since 2026-02-27) reports WebSockets through the
+`tailscale serve` reverse proxy that Funnel rides closing every 10–40 s, and no heartbeat of
+ours can outrun a 10 s drop. Nobody has yet run a real jam over Funnel end to end. Until
+somebody does, `--tunnel` is the safer choice for a long sitting and `--funnel` the better one
+for a URL you want to hand out once.
+
 Either way the tunnel invite/view lines print first everywhere invite lines appear (the
 client's `/join`, the `daemon` window, `token.json`, hence your own context). TLS is
 terminated at the relay's edge; the join token / knock approval is still the real gate, and
