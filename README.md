@@ -18,7 +18,8 @@ each message.
 Requires node ≥ 22, tmux, and the `claude` CLI on PATH. Dependencies: `ws` for the daemon,
 `ink` + `react` + `ink-text-input` for the client's UI (`--basic` runs the client without
 them). Optional: `ttyd` for the browser view (`--view`, `brew install ttyd`), `cloudflared`
-for `--tunnel` (`brew install cloudflared`).
+for `--tunnel` (`brew install cloudflared`), `pngpaste` for `/paste` (macOS falls back to
+`osascript` without it).
 
 ## Host quickstart
 
@@ -153,11 +154,12 @@ participants can never share a name (attribution is by name, so `Dana` is refuse
 "host only". Your own client is trusted because the launcher spawns it on loopback; a `host`
 claim from any other address is treated as an ordinary friend.
 
-### Approving a knock (and a command request) from the TUI
+### Approving a knock (or any request) from the TUI
 
 Your own client shows every knock, so this is for the case where you are attached to tmux
-instead. On every knock — and on every guest command request — the daemon opens a small
-`tmux display-popup` over the claude window, on the clients attached to the jam session:
+instead. On every knock — and on every guest request: a command, the transcript, a file — the
+daemon opens a small `tmux display-popup` over the claude window, on the clients attached to the
+jam session:
 
 ```
   ⚑ Dana wants to join (100.86.8.97)
@@ -165,8 +167,9 @@ instead. On every knock — and on every guest command request — the daemon op
   [a]ccept · [d]eny · [i]gnore/Esc
 ```
 
-A command request renders the same way — `⌘ Dana wants to run /compact` with `[a]llow` — and
-grants that one command only, never standing approval.
+Every other kind of request renders the same way — `⌘ Dana wants to run /compact` with
+`[a]llow`, `⇩ Dana wants the session transcript`, `⇪ Dana wants to send photo.png (2.1 MB)` —
+and one key grants that one request only, never standing approval (`always` needs a client).
 
 One key, no Enter: `a` admits her exactly as `/accept Dana` would, `d` denies her (socket
 closed 4403). Anything else — `i`, Esc, Ctrl-C — closes the popup and leaves the knock
@@ -347,6 +350,9 @@ does this jam work?"). `/help` reprints it.
   `Dana … ❯`.
 - **`/tools`** reprints the last completed turn's full tool log; `/tools on` stops collapsing
   tool lines, `/tools off` (default) collapses them — see below.
+- **`/send <path>`** and **`/paste`** hand claude a file, **`/get <name>`** takes one the host
+  offered, **`/export`** takes the session transcript home — all three need the host's yes, see
+  [files and the transcript](#files-and-the-transcript-send-paste-get-export).
 - The client has four regions, bottom-up: the input row (`Dana ❯ …`), a status row of its own,
   the 3-row chat strip, and the live TUI (or, after F2, the transcript). The status row carries
   the view chip (`⧉ live TUI` / `≡ transcript`), `✻ claude is working…` and
@@ -404,7 +410,8 @@ sending exactly the bytes you pressed.
 ## claude's own commands (host passthrough and guest requests)
 
 jam owns `/c` `/who` `/help` `/quit` `/mirror` `/tools` `/join` `/accept` `/deny` `/token`
-`/allow-cmd` `/deny-cmd`. **Everything else that starts with a slash belongs to claude.**
+`/allow-cmd` `/deny-cmd` `/export` `/allow-export` `/deny-export` `/send` `/paste` `/get`
+`/accept-file` `/deny-file`. **Everything else that starts with a slash belongs to claude.**
 
 From the **host's** client it is typed into the real TUI verbatim — `send-keys -l` then Enter,
 no `[Name]:` prefix — so claude's own command palette runs it. `/model`, `/compact`, `/mcp`,
@@ -435,6 +442,54 @@ for everyone, so there is no approval path at all and standing approval never co
 Before anything reaches the pane the command is validated: one `/name` of letters, digits and
 `:._-`, optional single-line arguments, control characters stripped, length capped — so a
 newline cannot smuggle a second line in behind it.
+
+## Files and the transcript (`/send`, `/paste`, `/get`, `/export`)
+
+Three transfers, one approval ladder — the same shape as a guest's slash command: default deny,
+one request in flight per person, a two-minute expiry, a tmux popup for whoever is attached, and
+`always` for standing approval that lives in daemon memory and dies with it.
+
+| who | command | what happens |
+| --- | --- | --- |
+| guest | `/send <path>` | uploads it; the host sees `⇪ Dana wants to send photo.png (2.1 MB) — /accept-file Dana · /accept-file Dana always · /deny-file Dana`. Accepted → `<cwd>/jam-uploads/photo.png` |
+| anyone | `/paste [caption]` | same, with an image off the **macOS** clipboard (`pngpaste`, else `osascript` `«class PNGf»`) |
+| host | `/send <path>` | **offers** it: every guest sees `⇩ Roy offers notes.md (12 KB) — /get notes.md saves to ./jam-downloads/` |
+| guest | `/get [name]` | writes that offer into their own `./jam-downloads/` (no name = the only offer) |
+| guest | `/export` | asks for this session's transcript: `⇩ Dana requests the session transcript — /allow-export Dana · /allow-export Dana always · /deny-export Dana` |
+
+An accepted upload is announced to everyone as an ordinary attributed message —
+`[Dana]  sent a file: jam-uploads/photo.png have a look` — which is also how **claude** hears
+about it, so it can `Read` the path. Nothing is executed, nothing is opened, and the file is
+written 0644.
+
+`/export` writes `./jam-session-<session-id>.jsonl` in the guest's own cwd and prints the recipe
+to continue the conversation themselves:
+
+```
+mkdir -p ~/.claude/projects/-Users-dana-code
+cp ./jam-session-<sid>.jsonl ~/.claude/projects/-Users-dana-code/<sid>.jsonl
+claude --resume <sid>
+```
+
+The folder name is **their cwd with every non-alphanumeric character turned into `-`** (the rule
+is printed with the recipe, because it is their cwd, not ours) — `claude --resume` then finds it
+by scanning `projects/*.jsonl`.
+
+**What an export actually hands over.** The transcript is everything claude saw in this session:
+the file contents it read, every tool's output, the whole context — not just the visible
+conversation. jam strips **its own join-token block** from the copy (a regex on the text
+hooks.sh writes, plus the raw token wherever else it appears) and nothing else, so treat this as
+best effort: after sharing a transcript, run `/token new`. A guest could already read the
+conversation off the mirror; the export is what lets them keep the files and tool output too.
+
+**Where the trust boundary is.** All of it is enforced daemon-side, not in the client: the file
+name is reduced to a basename of `[A-Za-z0-9._-]` (a name containing `/` or `\`, or `.`/`..`, is
+refused outright, never "fixed"), a collision gets a `-1` suffix instead of overwriting, uploads
+are capped at 20 MB and the transcript/offers at 50 MB, a client may have one upload in flight,
+chunks must arrive in order and may not exceed the size that was announced, and bytes only move
+after the ladder said yes. Answering the ladder needs `--host` **and** loopback, the same gate as
+F3. Transfers are `{t:'file', xfer, seq, done, b64}` frames of 64 KB, base64 so a PNG survives a
+JSON text frame, fed out a few per tick so a big transcript does not stall the daemon.
 
 ## How the client reads
 
@@ -513,20 +568,30 @@ new|off` cannot break the turn-status round trip. The hook endpoint is loopback-
 Three more paths reach the pane, all of them typed in by the daemon and never through a shell:
 a slash command (`send-keys -l` + Enter, host+loopback, or a guest's after approval), F3 raw
 keys (`send-keys -H` hex / `-l` literal, host+loopback only, size-capped) and the window resize
-the host's client asks for (`resize-window`). The live view reads it back with
-`capture-pane -e`. Everything a guest can send is either sanitized (messages, chat) or gated
-(commands, keys, resize) — the wire frames are `say`/`chat`/`typing`/`mirror`/`slash`/`cmd`/
-`key`/`resize`/`admit`/`token` in, and `welcome`/`roster`/`say`/`chat`/`typing`/`agent`/
-`status`/`screen`/`knock`/`cmdreq`/`token`/`sys`/`error` out.
+the host's client asks for (`resize-window`). An accepted upload reaches claude the same way an
+ordinary message does — written to `jam-uploads/` and injected as `[Dana]: sent a file: …` — so
+the file is text in a prompt and never something the daemon runs. The live view reads the pane
+back with `capture-pane -e`. Everything a guest can send is either sanitized (messages, chat,
+captions) or gated (commands, keys, resize, transfers) — the wire frames are
+`say`/`chat`/`typing`/`mirror`/`slash`/`cmd`/`key`/`resize`/`admit`/`token`/`export`/`exportok`/
+`upload`/`file`/`fileok`/`offer`/`get` in, and `welcome`/`roster`/`say`/`chat`/`typing`/`agent`/
+`status`/`screen`/`knock`/`cmdreq`/`exportreq`/`filereq`/`offer`/`xfer`/`xfergrant`/`file`/
+`token`/`sys`/`error` out.
 
 ## Testing
 
-`node --test test.mjs` covers the pure functions in `lib.mjs` — **111 tests**: JSONL
+`node --test test.mjs` covers the pure functions in `lib.mjs` — **125 tests**: JSONL
 classification including tool results, sanitizer, name, prefix, UUID and token-value
 validation, hello classification, invite-line building (LAN, view, tunnel and the combined
 `inviteLines` list), view-key rule, ttyd resolution, `token.json` shape, client command parsing
-(`/mirror`, `/tools`, `/help`, `/allow-cmd`, `/deny-cmd`), the v0.14 command tables
-(`JAM_COMMANDS` all answered by the client, `RESERVED_COMMANDS` refused as unbuilt, `slashName`
+(`/mirror`, `/tools`, `/help`, `/allow-cmd`, `/deny-cmd`, and the v0.12/v0.13 set — `/export`,
+`/allow-export`, `/send`, `/paste`, `/get`, `/accept-file`, each with its lookalikes), the
+transfer helpers (`humanBytes`; `safeBaseName` refusing every traversal form and reducing the
+rest; `uniqueName`'s collision suffix; `xferFrames`' 64 KB chunking, `done` flag, empty-file case
+and a real PNG round trip; `pumpFrames` sending everything a few per tick and stopping on a dead
+peer; `projectSlug` against the real `~/.claude/projects` rule; `resumeInstructions`;
+`stripTokenBlock` removing our block and the raw token without running past a JSON string), the
+v0.14 command tables (`JAM_COMMANDS` all answered by the client, `slashName`
 lowercasing, `validSlashCommand` refusing newlines/control characters/overlong arguments,
 `guestSlashDecision` ask/run/refuse), the key tables (every F2 and F3 spelling, the
 Shift/Alt+Enter forms, the held partial sequence, and `PASSTHROUGH_SEQS` letting everything but
@@ -537,7 +602,7 @@ normalisation, the JSONL glob list, the claude pane target, and the rendering lo
 its palette exclusions, the message-block separation rule, screen-row sanitising, the frame
 diff/coalesce decision, tool-name extraction and turn summaries, the onboarding block).
 
-Six end-to-end smokes, all verified 2026-08-28 on node 24 / tmux 3.7c / claude 2.1.251 /
+Seven end-to-end smokes, all verified 2026-08-29 on node 24.15 / tmux 3.7c / claude 2.1.251 /
 ttyd 1.7.7. Run `smoke-ink.mjs` against a **fresh** daemon: it asserts on what is on screen,
 and a daemon with replayed history puts an older turn's collapsed-tool line there.
 
@@ -548,16 +613,17 @@ and a daemon with replayed history puts an older turn's collapsed-tool line ther
 tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
   "JAM_CLAUDE=$(whence -p claude 2>/dev/null || command -v claude) node host.mjs \
    --tmux jamtest --port 7799 --view-port 7801 --name Host --token smoketoken \
-   --hook-secret smokehooksecret --cwd '$PWD' --no-attach -- --model haiku; sleep 300"
+   --hook-secret smokehooksecret --cwd '$PWD' --no-attach -- --model haiku; sleep 1800"
 
 node scripts/smoke-ink.mjs   ws://127.0.0.1:7799 smoketoken jamtest   # first: needs empty history
-node scripts/smoke-slash.mjs ws://127.0.0.1:7799 smoketoken jamtest
+node scripts/smoke-xfer.mjs  ws://127.0.0.1:7799 smoketoken jamtest smokehooksecret
 node scripts/smoke.mjs       ws://127.0.0.1:7799 smoketoken
 node scripts/smoke-mirror.mjs ws://127.0.0.1:7799 smoketoken
 node scripts/smoke-popup.mjs ws://127.0.0.1:7799 jamtest 7799 smokehooksecret
+node scripts/smoke-slash.mjs ws://127.0.0.1:7799 smoketoken jamtest   # last: see below
 tmux kill-session -t jamtest          # exact names only, never a pattern
 tmux kill-session -t jamdrive
-rm -rf "$TMPDIR/claude-jam-7799"
+rm -rf "$TMPDIR/claude-jam-7799" jam-uploads
 
 # knock-only daemon (no --token) for the admission smoke
 tmux new-session -d -s jamdrive -x 120 -y 40 -c "$PWD" \
@@ -567,6 +633,12 @@ node scripts/smoke-knock.mjs ws://127.0.0.1:7799
 tmux kill-session -t jamtest; tmux kill-session -t jamdrive
 rm -rf "$TMPDIR/claude-jam-7799"
 ```
+
+**Run `smoke-slash.mjs` (and `smoke-popup.mjs`) last, or press Escape in the pane afterwards.**
+They approve a guest's `/cost`, and in claude 2.1.251 `/cost` leaves a full-screen usage report
+over the input box: the next injection then fails with `pasted text never appeared in the claude
+pane` and `smoke.mjs` / `smoke-mirror.mjs` fail for a reason that has nothing to do with them.
+`tmux send-keys -t jamtest:claude Escape` puts the prompt back.
 
 **The v0.14 unified view, verified by hand on a real pty** (launcher run inside a 120x40 tmux
 session so its client had a terminal): `tmux ls` shows `jamtest` with **no `(attached)`**
@@ -619,6 +691,44 @@ landing in the chat strip above the status row and then in the transcript; the v
 (two windows, one pane in `claude`, **nothing attached**, `fill-character " "`); and a guest's
 `/compact` showing `sent to the host for approval`, logged as `[cmd] Dana wants /compact` and
 absent from the pane.
+
+`smoke-xfer.mjs` (11 steps, all passing) covers v0.12/v0.13 against the real daemon and the real
+TUI, with scripted peers plus the client's own `xfer.mjs` for the receiving half — so the code
+that ships is the code under test. It asserts: a guest's `/export` **denied**
+(`Host did not share the transcript`, zero bytes moved); approved, the received file is
+`jam-session-<sid>.jsonl` and its **sha256 equals the real JSONL on disk after the token strip**
+(276 KB / 170 lines on the verified run), with the token, its join command and the whole "reveal
+these ONLY to the host" block replaced by `[jam join-token block removed on export]` and the
+first line still parsing as JSON; `/allow-export … always` then serving two more exports with
+**no further prompt** (3 prompts, 4 exports); `../../evil`, `/etc/passwd`, `sub/evil.txt` and
+`..` each refused server-side with nothing written to `jam-uploads/`, `../../evil` or `/etc`; a
+20 MB + 1 upload refused before the host is asked; a second upload while one is in flight refused
+(`first.txt is still waiting for the host — one file at a time`); more bytes than announced
+dropping the transfer (`upload dropped: more bytes than the 4 B it announced`) and writing
+nothing; an accepted upload landing as `My_Report__final__<stamp>.txt` (mode 644, sha256 match),
+announced as `[Guest…] sent a file: jam-uploads/… have a look`, with that exact line **in the
+JSONL**; a host `/send` offer that the guest's `/get` writes to `./jam-downloads/notes.md` (sha
+match, 644) while a name nobody offered is refused; and — end to end — a 64×64 red PNG put on
+the real clipboard, grabbed by `/paste` (`pngpaste` at `/opt/homebrew/bin/pngpaste`), accepted,
+written to `jam-uploads/paste-<stamp>.png` byte-identical, with **claude reading it and answering
+`red`**. With the hook secret as a 4th argument it also answers both new request kinds through
+the popup's endpoint (`POST /admit kind=export` and `kind=file` → 200 and the transfer happens;
+a wrong `x-jam-secret` → 403).
+
+**The export recipe, actually followed.** The `/export` line printed by a real ink client in a
+scratch cwd was executed as printed: `mkdir -p ~/.claude/projects/<that cwd slugged>`, `cp` the
+315 KB file in as `<sid>.jsonl`, then
+`claude --resume <sid> --model haiku -p "One word only: what colour was the image someone sent
+you earlier in this conversation?"` → **`red`**. The resumed session had the uploaded PNG, the
+tool calls and the whole conversation. (The test project directory was removed afterwards.)
+
+**The client half on a pty**, driven with `tmux send-keys` in a 120x40 session of its own:
+`/export` printed `saved …/jam-session-<sid>.jsonl (308 KB)` and the full recipe;
+`/send /tmp/…/vera-note.txt` showed `vera-note.txt (16 B) — waiting for the host to accept it`,
+then `sending vera-note.txt (16 B)…`, then `[Vera]  sent a file: jam-uploads/vera-note.txt`
+followed by claude's own `⚙ Read` of that path, `⎿ 1 vera says hello` and `[Claude] Vera says
+hello.`; `/get notes.md` wrote `./jam-downloads/notes.md`. The transcript, the upload and the
+download all landed in the client's own cwd, never the host's.
 
 `smoke-mirror.mjs` drives two scripted clients and asserts: a client that never subscribes gets
 no frames; `{t:'mirror',on:true}` delivers the current screen at once (142x35, 35 rows, SGR
@@ -784,6 +894,32 @@ v0.14; their flags are accepted as no-ops.
   That is the transcript doing its job, but it does scroll.
 - Nothing tells a guest that the host is in TUI control: their view keeps updating (they can see
   the keystrokes land), but the `⌨` marker is local to the host's client.
+- **Export scrubbing is best effort.** The only thing removed from an exported transcript is
+  jam's own token block (matched by the text hooks.sh writes) and the raw token string. Anything
+  else claude saw — file contents, tool output, another secret it happened to read — goes with
+  the copy. A changed hook wording would silently stop matching; the token replacement is the
+  backstop. `/token new` after an export is the real mitigation.
+- A transfer is held whole in memory at both ends (a 50 MB transcript is ~50 MB + its base64
+  frames a few at a time), there is no resume: a socket that drops mid-transfer loses it and the
+  partial file is never written. Uploads are 20 MB, the transcript and offers 50 MB.
+- `jam-uploads/` is append-only as far as jam is concerned: nothing is ever cleaned up, and a
+  repeat name gets `-1`, `-2`, … up to 99, then the upload is refused. Same for a guest's
+  `jam-downloads/`.
+- Offers live for the daemon's whole life and are never re-broadcast: a guest who joins after
+  `/send` is not told about it (they can still `/get <name>` if somebody tells them the name),
+  and an offer whose file is deleted or grown past the cap only fails when someone tries.
+- `/paste` is macOS-only by nature (`pngpaste`, else `osascript` `«class PNGf»`), and it takes
+  the clipboard as PNG only — a copied file, a PDF or an HTML snippet is not an image. The name
+  it invents is `paste-<yyyymmdd-hhmmss>.png`, so two pastes in the same second collide (and get
+  the `-1` suffix).
+- Standing approval (`/allow-export always`, `/accept-file always`) is per name, per kind, in
+  daemon memory, with no way to revoke it short of a restart — same ceiling as `/allow-cmd
+  always`. A guest reconnecting under the same name keeps it.
+- The host's `/export` writes into the host's own cwd, next to the project. It is the same file
+  claude is already writing, so it is a copy, not a move.
+- Nothing scans an uploaded file. It is written 0644, never executed, never opened, and claude is
+  merely told the path — but the moment claude `Read`s it, its contents are in the session's
+  context (and therefore in anybody's later `/export`).
 - No rate limiting, no web client, single session per host, no Windows.
 - First run in a fresh directory hits claude's "is this a folder you trust?" dialog. Before
   every injection until one succeeds, the daemon waits up to 30 s for either that dialog (it
