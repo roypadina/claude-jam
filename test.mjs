@@ -97,6 +97,9 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   peerEntry, peerDayKey, peersReport, peerLogLine, parsePeerLog, peerLogReport, peerStreamEvent,
   peerProgressLine, peerStructured, parsePeerCommand,
   PEER_MCP_FILE, PEER_MCP_NAME, buildPeerMcpConfig, peerSystemPrompt,
+  // v0.34: host identity is a local secret, not a network address.
+  HOST_KEY_FILE, HOST_KEY_BYTES, validHostKey, hostKeyPath, hostKeyMatches, hostGate,
+  hostRefusal, hostKeyNotice,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -108,7 +111,13 @@ import { clipboardImage, notify, playSound, SOUNDS, MAC_SOUND_DIR, soundFile,
   secureDir, openExternal,
   // v0.23: mDNS is a platform binary too, so advertising and browsing come through the same seam.
   DNSSD_PATHS, DNSSD_MISSING, resolveDnssd, discoveryAvailable, advertiseSpawn, browseSpawn,
-  browseText, BROWSE_BUF_MAX } from './platform.mjs';
+  browseText, BROWSE_BUF_MAX,
+  // v0.34: the one place the host key is read off disk.
+  readHostKey } from './platform.mjs';
+
+// v0.34: two well-formed host keys — 32 bytes of hex each, the shape the daemon writes.
+const KEY_A = 'a'.repeat(64);
+const KEY_B = `${'b'.repeat(63)}c`;
 
 // ---------------------------------------------------------------- pane fixtures ----
 // Real `tmux capture-pane -p` output, captured 2026-08-29 against claude 2.1.251 in a 100x32 (and
@@ -326,7 +335,7 @@ test('nameTaken is case-insensitive', () => {
 
 test('classifyHello: a matching token admits straight away', () => {
   assert.deepEqual(classifyHello({ name: 'Dana', token: 'smoketoken' }, 'smoketoken', false),
-    { ok: true, name: 'Dana', host: false, admit: 'token' });
+    { ok: true, name: 'Dana', host: false, admit: 'token', failed: [] });
 });
 
 test('classifyHello: no token, a wrong token, or a token while none is set all knock', () => {
@@ -336,21 +345,22 @@ test('classifyHello: no token, a wrong token, or a token while none is set all k
   assert.equal(classifyHello({ name: 'Dana', token: 'smoketoken' }, null, false).admit, 'knock');
 });
 
-test('classifyHello: host:true is honoured only from loopback', () => {
-  // The launcher's own client: trusted by construction, admitted even with no token set.
-  assert.deepEqual(classifyHello({ name: 'Roy', host: true }, null, true),
-    { ok: true, name: 'Roy', host: true, admit: 'token' });
-  // Same frame from anywhere else is just a friend, and knocks.
-  assert.deepEqual(classifyHello({ name: 'Mallory', host: true }, 'smoketoken', false),
-    { ok: true, name: 'Mallory', host: false, admit: 'knock' });
+test('classifyHello: host:true needs the key AND loopback', () => {
+  // v0.34: the launcher's own client — it read <state>/host.key, so it proves the claim, and
+  // is admitted even with no token set.
+  assert.deepEqual(classifyHello({ name: 'Roy', host: true, hostKey: KEY_A }, null, true, KEY_A),
+    { ok: true, name: 'Roy', host: true, admit: 'token', failed: [] });
+  // Same frame from anywhere else is just a friend, and knocks — and now fails BOTH conditions.
+  assert.deepEqual(classifyHello({ name: 'Mallory', host: true }, 'smoketoken', false, KEY_A),
+    { ok: true, name: 'Mallory', host: false, admit: 'knock', failed: ['locality', 'key-missing'] });
   // A friend with the right token gets in, but not as a host.
-  assert.deepEqual(classifyHello({ name: 'Dana', host: true, token: 'smoketoken' }, 'smoketoken', false),
-    { ok: true, name: 'Dana', host: false, admit: 'token' });
+  assert.deepEqual(classifyHello({ name: 'Dana', host: true, token: 'smoketoken' }, 'smoketoken', false, KEY_A),
+    { ok: true, name: 'Dana', host: false, admit: 'token', failed: ['locality', 'key-missing'] });
 });
 
 test('classifyHello: a bad name is refused before any token check', () => {
   for (const name of ['', ' Roy', 'Roy!', 'a'.repeat(25), undefined, 42]) {
-    assert.deepEqual(classifyHello({ name, token: 'smoketoken' }, 'smoketoken', true),
+    assert.deepEqual(classifyHello({ name, token: 'smoketoken' }, 'smoketoken', true, KEY_A),
       { ok: false, code: 4400, error: 'bad name' }, String(name));
   }
 });
@@ -5986,12 +5996,12 @@ test('classifyHello: host:true is refused once the socket is known to be relayed
   const relayed = { 'cf-ray': 'a32ea05c0091da54-TLV', 'x-forwarded-for': '84.229.122.233' };
   const asHost = { t: 'hello', name: 'Mallory', host: true };
   // Before the fix this admitted Mallory as the host with no token at all.
-  const bad = classifyHello(asHost, 'sometoken', localSocket('127.0.0.1', relayed));
+  const bad = classifyHello(asHost, 'sometoken', localSocket('127.0.0.1', relayed), KEY_A);
   assert.equal(bad.ok, true);
   assert.equal(bad.host, false);
   assert.equal(bad.admit, 'knock'); // no token was sent, so they knock like anybody else
-  // The host's own client, on a real local socket, is unchanged.
-  const good = classifyHello(asHost, 'sometoken', localSocket('127.0.0.1', {}));
+  // The host's own client, on a real local socket AND holding the key, is unchanged.
+  const good = classifyHello({ ...asHost, hostKey: KEY_A }, 'sometoken', localSocket('127.0.0.1', {}), KEY_A);
   assert.equal(good.host, true);
   assert.equal(good.admit, 'token');
 });
@@ -6217,4 +6227,237 @@ test('paneCommandNote: the native installer runs claude as its VERSION, and that
   assert.match(paneCommandNote('vim'), /check you named the right pane/);
   assert.match(paneCommandNote('2'), /check you named the right pane/); // not version-shaped
   assert.equal(paneCommandNote(''), 'tmux did not report what is running in that pane');
+});
+
+// ------------------------------------------------------------------- v0.34 ----
+// Host identity is a local secret, not a network address. F1's fix read the proxy headers a
+// relay cannot suppress — measured for cloudflared, unverified for --funnel, and structurally a
+// blocklist. These pin the replacement: a 0600 key file only a local process can read, checked
+// as a SECOND condition beside locality, either of which failing denies host.
+
+test('validHostKey: exactly 32 bytes of lowercase hex, and nothing else', () => {
+  assert.equal(validHostKey(KEY_A), true);
+  assert.equal(HOST_KEY_BYTES * 2, KEY_A.length); // the file the daemon writes is this shape
+  assert.equal(validHostKey(''), false);
+  assert.equal(validHostKey(null), false);
+  assert.equal(validHostKey(undefined), false);
+  assert.equal(validHostKey('a'.repeat(63)), false); // a half-written file must not validate
+  assert.equal(validHostKey('a'.repeat(65)), false);
+  assert.equal(validHostKey('A'.repeat(64)), false); // toString('hex') is lowercase
+  assert.equal(validHostKey(`${'a'.repeat(63)}z`), false); // z is not hex
+  assert.equal(validHostKey(0), false);
+  assert.equal(validHostKey({ toString: () => KEY_A }), false);
+});
+
+test('hostKeyPath: the key lives in the state dir, beside token.json', () => {
+  assert.equal(hostKeyPath('/tmp/claude-jam-7777'), `/tmp/claude-jam-7777/${HOST_KEY_FILE}`);
+  assert.equal(HOST_KEY_FILE, 'host.key');
+});
+
+test('hostKeyMatches: constant-time, and a malformed key never matches — not even itself', () => {
+  assert.equal(hostKeyMatches(KEY_A, KEY_A), true);
+  assert.equal(hostKeyMatches(KEY_A, KEY_B), false);
+  // A truncated file compared against itself is the trap: two equal strings that are not keys.
+  assert.equal(hostKeyMatches('short', 'short'), false);
+  assert.equal(hostKeyMatches('', ''), false);
+  assert.equal(hostKeyMatches(null, null), false);
+  assert.equal(hostKeyMatches(KEY_A, null), false);
+  assert.equal(hostKeyMatches(null, KEY_A), false);
+});
+
+test('hostGate: both conditions, checked independently', () => {
+  // Both hold: the host's own client.
+  assert.deepEqual(hostGate({ claimed: true, local: true, presented: KEY_A, expected: KEY_A }),
+    { host: true, failed: [] });
+  // The key but a non-local address — a relay that somehow learned the key still is not the host.
+  assert.deepEqual(hostGate({ claimed: true, local: false, presented: KEY_A, expected: KEY_A }),
+    { host: false, failed: ['locality'] });
+  // A local socket with no key at all: a guest, and it says which condition.
+  assert.deepEqual(hostGate({ claimed: true, local: true, presented: null, expected: KEY_A }),
+    { host: false, failed: ['key-missing'] });
+  // A local socket with the WRONG key.
+  assert.deepEqual(hostGate({ claimed: true, local: true, presented: KEY_B, expected: KEY_A }),
+    { host: false, failed: ['key-mismatch'] });
+  // The F1 probe shape: relay headers and a relay address, no key. BOTH conditions fail, and
+  // both are named — either one alone would already have denied it.
+  assert.deepEqual(hostGate({ claimed: true, local: false, presented: null, expected: KEY_A }),
+    { host: false, failed: ['locality', 'key-missing'] });
+  // Nobody claimed host: no refusal to report, because nothing was refused.
+  assert.deepEqual(hostGate({ claimed: false, local: true, presented: KEY_A, expected: KEY_A }),
+    { host: false, failed: [] });
+  assert.deepEqual(hostGate(), { host: false, failed: [] });
+});
+
+test('hostGate: fails CLOSED when the daemon has no key of its own', () => {
+  // A daemon that could not write host.key has nobody who can prove host — and the ONE thing it
+  // must never do is fall back to the address, which is F1 exactly.
+  assert.deepEqual(hostGate({ claimed: true, local: true, presented: KEY_A, expected: null }),
+    { host: false, failed: ['key-unset'] });
+  assert.deepEqual(hostGate({ claimed: true, local: true, presented: KEY_A, expected: 'garbage' }),
+    { host: false, failed: ['key-unset'] });
+  // And `claimed` is strictly true, not merely truthy: a hello carrying host:'yes' is a guest.
+  assert.equal(hostGate({ claimed: 'yes', local: true, presented: KEY_A, expected: KEY_A }).host, false);
+  assert.equal(hostGate({ claimed: 1, local: true, presented: KEY_A, expected: KEY_A }).host, false);
+});
+
+test('hostRefusal: says WHICH condition failed, and quotes neither key', () => {
+  const both = hostRefusal(['locality', 'key-missing']);
+  assert.match(both, /did not start on this machine/);
+  assert.match(both, /no host key was presented/);
+  assert.match(both, /BOTH conditions/);
+  assert.match(hostRefusal(['key-mismatch']), /is not the one in this jam/);
+  assert.match(hostRefusal(['key-unset']), /no host\.key on disk/);
+  assert.match(hostRefusal(['locality']), /relay or another host is in front of it/);
+  // Nothing failed → nothing to say.
+  assert.equal(hostRefusal([]), null);
+  assert.equal(hostRefusal(), null);
+  assert.equal(hostRefusal('locality'), null); // not an array: no guessing
+  // The refusal is a sentence a human reads, so it must never carry the credential itself.
+  for (const f of [['locality'], ['key-missing'], ['key-mismatch'], ['key-unset']]) {
+    assert.equal(hostRefusal(f).includes(KEY_A), false);
+  }
+});
+
+test('hostKeyNotice: no key file means guest, said out loud, with the path and not the key', () => {
+  const n = hostKeyNotice('/tmp/claude-jam-7777/host.key');
+  assert.match(n, /joining as a GUEST/);
+  assert.match(n, /\/tmp\/claude-jam-7777\/host\.key/);
+  assert.match(n, /end the jam and start it again/); // what to actually DO about it
+  assert.equal(n.includes(KEY_A), false);
+  // Even with no path to name it says the same thing rather than failing silently.
+  assert.match(hostKeyNotice(null), /host\.key/);
+  assert.match(hostKeyNotice(undefined), /joining as a GUEST/);
+});
+
+test('classifyHello: the three v0.34 refusal cases, each for its own reason', () => {
+  const relayed = { 'cf-ray': 'a32ea05c0091da54-TLV', 'x-forwarded-for': '84.229.122.233' };
+  // 1. The F1 probe: relay headers, relay address, no key. Refused on BOTH conditions.
+  const f1 = classifyHello({ name: 'Mallory', host: true }, 'tok',
+    localSocket('127.0.0.1', relayed), KEY_A);
+  assert.equal(f1.host, false);
+  assert.deepEqual(f1.failed, ['locality', 'key-missing']);
+  // 2. The key, from a non-local address. Refused on locality alone.
+  const offbox = classifyHello({ name: 'Mallory', host: true, hostKey: KEY_A }, 'tok',
+    localSocket('100.86.8.97', {}), KEY_A);
+  assert.equal(offbox.host, false);
+  assert.deepEqual(offbox.failed, ['locality']);
+  // 3. A local socket with no key. Refused on the key alone, and joins as a guest.
+  const nokey = classifyHello({ name: 'Dana', host: true, token: 'tok' }, 'tok',
+    localSocket('127.0.0.1', {}), KEY_A);
+  assert.equal(nokey.host, false);
+  assert.deepEqual(nokey.failed, ['key-missing']);
+  assert.equal(nokey.admit, 'token'); // still in — as a guest, on their token
+});
+
+test('classifyHello: an older caller with no key argument makes NOBODY the host', () => {
+  // The whole point of failing closed: a call site that was never updated must not grant host on
+  // the address alone, which is what v0.21.1 did.
+  const c = classifyHello({ name: 'Roy', host: true, hostKey: KEY_A }, null, true);
+  assert.equal(c.host, false);
+  assert.deepEqual(c.failed, ['key-unset']);
+});
+
+test('stripTokenBlock: the host key is scrubbed like the join token', () => {
+  const text = `the token is smoketoken and the key is ${KEY_A}, ok?`;
+  const out = stripTokenBlock(text, 'smoketoken', KEY_A);
+  assert.equal(out.includes(KEY_A), false);
+  assert.equal(out.includes('smoketoken'), false);
+  assert.match(out, /\[host key removed\]/);
+  // A key that is not one is not a scrub pattern — otherwise a short string would gut the file.
+  assert.equal(stripTokenBlock('aaa bbb', null, 'aaa'), 'aaa bbb');
+  assert.equal(stripTokenBlock('aaa bbb', null, null), 'aaa bbb');
+  assert.equal(stripTokenBlock('aaa bbb', null), 'aaa bbb'); // the pre-v0.34 arity still works
+});
+
+test('readHostKey: only a well-formed 0600 file is a key, everything else is null', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-hostkey-'));
+  try {
+    const good = path.join(dir, HOST_KEY_FILE);
+    secureWrite(good, `${KEY_A}\n`); // exactly what the daemon writes: hex plus a newline
+    assert.equal(readHostKey(good), KEY_A);
+    assert.equal(fs.statSync(good).mode & 0o777, 0o600); // a credential, not a config file
+    const short = path.join(dir, 'short.key');
+    secureWrite(short, 'a'.repeat(30));
+    assert.equal(readHostKey(short), null); // a half-written file is not a key
+    assert.equal(readHostKey(path.join(dir, 'nope.key')), null); // an older jam has none
+    assert.equal(readHostKey(''), null);
+    assert.equal(readHostKey(null), null);
+    assert.equal(readHostKey(dir), null); // a directory is not a key either
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true }); // the exact path this test made
+  }
+});
+
+test('reattachLines: the raw host command carries the key FILE, never the key', () => {
+  const lines = reattachLines({ tmux: 'jamtest', port: 7799, name: 'Roy', token: 'tok',
+    clientCmd: 'claude-jam join', state: '/tmp/claude-jam-7799' }).join('\n');
+  assert.match(lines, /--host --host-key-file \/tmp\/claude-jam-7799\/host\.key/);
+  assert.equal(lines.includes(KEY_A), false);
+  // No state to name (a row off `claude-jam sessions` that never had one): the flag is left off
+  // rather than pointed at a path that is not there.
+  assert.equal(/--host-key-file/.test(reattachLines({ port: 7777 }).join('\n')), false);
+});
+
+test('the host key never rides in a frame the daemon sends, or in any log line', () => {
+  // The daemon compares the key and drops it: nothing it builds may contain it. This is a lint
+  // over the shapes host.mjs sends — the runtime proof is smoke-slash's leak step.
+  const src = fs.readFileSync(path.join(import.meta.dirname, 'host.mjs'), 'utf8');
+  // No frame field, no console line, no tmux/injection payload may name the key VALUE. The only
+  // legitimate uses are the comparison itself and the export scrub.
+  const uses = src.split('\n')
+    .map((l, i) => [i + 1, l])
+    .filter(([, l]) => /\bHOST_KEY\b/.test(l) && !/^\s*(\/\/|\*)/.test(l));
+  for (const [n, l] of uses) {
+    assert.equal(/console\.(log|error)\([^)]*HOST_KEY\b/.test(l), false, `host.mjs:${n} logs the key`);
+    assert.equal(/send\(|broadcast\(|sendHosts\(/.test(l) && /\bHOST_KEY\b/.test(l), false,
+      `host.mjs:${n} puts the key in a frame`);
+  }
+  // And it is used at all — a lint that passes because the symbol vanished proves nothing.
+  assert.equal(uses.length >= 3, true, `expected the key to be read in host.mjs, saw ${uses.length}`);
+});
+
+test('v0.34 every surface that opens the host\'s OWN client hands it the key file', () => {
+  // The 0.21.1 canary's lesson: a demoted host is nearly invisible — it falls through to the
+  // read-only allowlist and the pane looks identical. So this is asserted structurally, because
+  // the four surfaces (`claude-jam host`, `--attach`, the launcher menu's attach, and
+  // `claude-jam adopt`) can only be proven together if there is exactly ONE place that spawns
+  // the host's client. There is: runHostClient in host.mjs.
+  const here = import.meta.dirname;
+  const src = fs.readFileSync(path.join(here, 'host.mjs'), 'utf8');
+  const code = (t) => t.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  // 1. host.mjs spawns client.mjs exactly once.
+  const spawns = code(src).split('\n').filter((l) => /client\.mjs/.test(l));
+  assert.equal(spawns.length, 1, `host.mjs spawns the client in ${spawns.length} places, not 1`);
+  // 2. …inside runHostClient, and that argv carries BOTH the claim and its proof.
+  const from = src.indexOf('async function runHostClient(');
+  assert.equal(from > 0, true, 'runHostClient is gone — this lint no longer proves anything');
+  const body = src.slice(from, src.indexOf('\n}\n', from));
+  assert.match(body, /'--host'/);
+  assert.match(body, /'--host-key-file', hostKeyPath\(/);
+  // 3. Both host entry points funnel through it, so `host`, `--attach` and (via sessions.mjs)
+  //    `adopt` cannot each grow their own spawn.
+  assert.match(code(src), /if \(attach\) return attachHostClient\(attach\);/);
+  assert.match(code(src), /return runHostClient\(info\);/);
+  // 4. And no other module spawns a client of its own — the menu and `adopt` shell into
+  //    `claude-jam host`, which is the whole reason one lint can cover four surfaces.
+  for (const f of ['menu.mjs', 'sessions.mjs']) {
+    assert.equal(/client\.mjs/.test(code(fs.readFileSync(path.join(here, f), 'utf8'))), false,
+      `${f} spawns a client of its own — it would bypass the host key`);
+  }
+});
+
+test('v0.34 both clients demote themselves to a guest when the key file is not there', () => {
+  // Two renderers, one rule. A client that claims `--host` without a readable key file must say
+  // so and join as a guest — the silent fall back to address-only host is F1 for whoever
+  // upgrades without restarting, and it is exactly what this asserts is absent.
+  for (const f of ['client-ink.mjs', 'client-basic.mjs']) {
+    const src = fs.readFileSync(path.join(import.meta.dirname, f), 'utf8');
+    assert.match(src, /const HOST_CLAIM = argv\.includes\('--host'\);/, f);
+    assert.match(src, /const HOST_KEY = HOST_CLAIM \? readHostKey\(flag\('host-key-file'\)\) : null;/, f);
+    assert.match(src, /if \(HOST_CLAIM && !HOST_KEY\) console\.error\(hostKeyNotice\(/, f);
+    assert.match(src, /const IS_HOST = HOST_CLAIM && !!HOST_KEY;/, f);
+    // The key goes out in the hello and nowhere else.
+    assert.match(src, /hostKey: HOST_KEY \|\| undefined/, f);
+    assert.equal(/console\.(log|error)\([^)]*\bHOST_KEY\b/.test(src), false, `${f} logs the key`);
+  }
 });

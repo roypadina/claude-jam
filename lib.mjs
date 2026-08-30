@@ -134,17 +134,93 @@ export function localSocket(ip, headers = {}) {
   return loopbackAddress(ip) && !proxiedRequest(headers);
 }
 
+// -------------------------------------------------- v0.34: the host's own key ----
+// F1's fix (above) reads the proxy headers a relay cannot suppress. That was measured for
+// cloudflared, and it is structurally a BLOCKLIST: it enumerates what a relay looks like. The
+// next relay that proxies to 127.0.0.1 without a header on that list re-opens the same hole,
+// silently, and the hole hands a stranger the host's machine and the join token.
+//
+// So host authority stops being INFERRED from the network and starts being PROVEN: 32 random
+// bytes in a 0600 file inside the state dir that is already 0700. A process on another machine
+// cannot read it, whatever address its packets appear to come from and whatever headers they
+// carry — which is what makes this transport-independent. `--funnel`, whose headers were never
+// measured, and every relay added later stop being a question: a relayed socket has no key.
+//
+// This is NOT a new trust assumption. Anyone who can read `<state>/host.key` can already read
+// `token.json` beside it, and is already a local user with the host's own privileges. The key
+// grants nothing filesystem access did not already grant; it stops the NETWORK impersonating
+// the filesystem.
+export const HOST_KEY_FILE = 'host.key';
+export const HOST_KEY_BYTES = 32;
+const HOST_KEY_RE = /^[0-9a-f]{64}$/; // HOST_KEY_BYTES as hex, exactly — a short or odd file is not one
+export function validHostKey(v) {
+  return typeof v === 'string' && HOST_KEY_RE.test(v);
+}
+
+export function hostKeyPath(state) {
+  return path.join(String(state ?? ''), HOST_KEY_FILE);
+}
+
+// Same constant-time comparison the join token gets, and the same refusal on anything that is
+// not a well-formed key — a truncated or half-written file must never compare equal to itself.
+export function hostKeyMatches(given, current) {
+  return validHostKey(given) && validHostKey(current) && tokenMatches(given, current);
+}
+
+// The two conditions, checked INDEPENDENTLY, either of which failing denies host. Belt and
+// braces is the point: this is the gate that owns somebody's machine. `failed` names every
+// condition that failed rather than the first, because "you are not the host on your own
+// machine" is otherwise an unanswerable bug report.
+export function hostGate({ claimed = false, local = false, presented = null, expected = null } = {}) {
+  if (claimed !== true) return { host: false, failed: [] };
+  const failed = [];
+  if (!local) failed.push('locality');
+  if (!validHostKey(expected)) failed.push('key-unset');
+  else if (typeof presented !== 'string' || !presented) failed.push('key-missing');
+  else if (!hostKeyMatches(presented, expected)) failed.push('key-mismatch');
+  return { host: failed.length === 0, failed };
+}
+
+const HOST_FAIL_WHY = {
+  locality: 'this connection did not start on this machine — a relay or another host is in front of it',
+  'key-unset': `this jam has no ${HOST_KEY_FILE} on disk, so nothing here can prove it is the host`,
+  'key-missing': `no host key was presented — the host's own client reads ${HOST_KEY_FILE} out of the jam's state dir`,
+  'key-mismatch': `the host key presented is not the one in this jam's ${HOST_KEY_FILE}`,
+};
+
+// Said out loud to whoever claimed host and did not get it. Never quotes either key.
+export function hostRefusal(failed = []) {
+  const parts = (Array.isArray(failed) ? failed : []).map((f) => HOST_FAIL_WHY[f]).filter(Boolean);
+  if (!parts.length) return null;
+  return `host refused, joining as a guest: ${parts.join('; and ')}. `
+    + 'Host needs BOTH conditions: the key file, which only a local process can read, AND a '
+    + 'connection that started on this machine.';
+}
+
+// What the host's own client prints when the key file is not there to read — an older jam, or a
+// daemon somebody started by hand. It says so and joins as a guest: a silent fall back to
+// address-only host would re-open F1 for exactly the people who upgrade without restarting.
+export function hostKeyNotice(file) {
+  return `! no host key at ${file || `<the jam's state dir>/${HOST_KEY_FILE}`} — joining as a GUEST.\n`
+    + '  Since v0.34 host authority is proven by that file, never by the address you connect from.\n'
+    + '  A daemon started before v0.34 does not write one: end the jam and start it again '
+    + '(claude-jam end <session>, then claude-jam host) to be its host.';
+}
+
 // How a hello frame gets in. `admit:'token'` → straight to welcome, `admit:'knock'` →
-// pending until the host accepts. `host:true` is honoured only from a LOCAL socket: that
-// connection is the client the launcher itself spawned, so it is trusted by construction
-// (and admitted even with no token set); anyone else claiming it is just a friend. "Local"
-// is localSocket() above, not the address alone — see the note there for why.
-export function classifyHello(hello, currentToken, isLoopback) {
+// pending until the host accepts. `host:true` is honoured only when hostGate() says BOTH
+// conditions hold — the key out of the 0600 file, and a socket that started on this machine
+// (localSocket() above, not the address alone). Anyone else claiming it is just a friend, and
+// `failed` carries the reason back so the refusal can say which condition it was.
+// `hostKey` absent (an older caller, a daemon with no key) means nobody can be host: this fails
+// CLOSED on purpose — address-only host is the hole this exists to close.
+export function classifyHello(hello, currentToken, isLoopback, hostKey = null) {
   const name = hello?.name;
   if (!validName(name)) return { ok: false, code: 4400, error: 'bad name' };
-  const host = hello?.host === true && !!isLoopback;
-  const admit = host || tokenMatches(hello?.token, currentToken) ? 'token' : 'knock';
-  return { ok: true, name, host, admit };
+  const g = hostGate({ claimed: hello?.host === true, local: !!isLoopback,
+    presented: hello?.hostKey, expected: hostKey });
+  const admit = g.host || tokenMatches(hello?.token, currentToken) ? 'token' : 'knock';
+  return { ok: true, name, host: g.host, admit, failed: g.failed };
 }
 
 // Session ids (both `claude --session-id` and `--resume`) are UUIDs. Loose check on
@@ -1403,9 +1479,12 @@ export function resumeInstructions(sessionId, file, cwd) {
 // documented as such: a transcript is everything claude saw, and only the join credential is
 // worth trying to keep out of a copy that leaves the host.
 export const TOKEN_BLOCK_RE = /Join token: [^"\n]{0,800}?tell them to ask the host\./g;
-export function stripTokenBlock(text, token = null) {
+// v0.34: the host key gets the same scrub. It is never put in a frame and never told to claude,
+// so it has no route into a transcript — this is the belt to that braces, and it costs one split.
+export function stripTokenBlock(text, token = null, hostKey = null) {
   let out = String(text).replace(TOKEN_BLOCK_RE, '[claude-jam join-token block removed on export]');
   if (typeof token === 'string' && token.length >= 8) out = out.split(token).join('[token removed]');
+  if (validHostKey(hostKey)) out = out.split(hostKey).join('[host key removed]');
   return out;
 }
 
@@ -2186,11 +2265,15 @@ export function exitPromptText(guests = 0) {
 
 // The way back in, printed whenever a client leaves a jam running (`k`, `--keep-on-exit`, a
 // non-interactive exit) — one wording, so the launcher and `claude-jam sessions` agree.
+// v0.34: the raw `or:` line is a HOST client, so it carries `--host-key-file` — since v0.34
+// `--host` alone gets a guest (loudly), because the key file is what proves the claim. The PATH
+// is not a secret; the file behind it is 0600 and only a local process can read it.
 export function reattachLines({ tmux = DEFAULT_TMUX, port = 7777, clientCmd = 'node client.mjs', name = 'Host',
-  token = null, socket = TMUX_DEFAULT_SOCKET, adopt = null } = {}) {
+  token = null, socket = TMUX_DEFAULT_SOCKET, adopt = null, state = null } = {}) {
   return [
     `client:  claude-jam host --attach${tmux === DEFAULT_TMUX ? '' : ` --tmux ${tmux}`}`,
-    `  or:    ${clientCmd} ws://127.0.0.1:${port} --name ${name}${token ? ` --token ${token}` : ''} --host`,
+    `  or:    ${clientCmd} ws://127.0.0.1:${port} --name ${name}${token ? ` --token ${token}` : ''} --host`
+      + `${state ? ` --host-key-file ${hostKeyPath(state)}` : ''}`,
     // v0.20: jam's tmux lives on a socket of its own, so a bare `tmux attach` no longer finds it.
     // v0.33: unless the jam was ADOPTED, and then the raw TUI is the pane it is driving, on
     // whatever server that pane lives on — jam's own session holds only the daemon's log.
@@ -2746,7 +2829,9 @@ HOW A JAM WORKS (the short version; ${manual} arrives in your context with the l
 
 ${peerTasks ? peerSystemPrompt() : ''}
 These are instructions to you, not an enforcement boundary — the hard gates are the host's own
-approval and the server-side host+loopback checks. Hold the two rules above anyway.
+approval and the server-side host check: since v0.34 the host is whoever presented the daemon's
+0600 \`host.key\` from a local socket, so no participant on the far side of a relay is ever the
+host, whatever they say. Hold the two rules above anyway.
 `;
 }
 

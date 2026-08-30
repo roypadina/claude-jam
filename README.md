@@ -296,6 +296,38 @@ near-identical copy. The few seconds are real and measured: cloudflared reports 
 about 2.5 s before the edge will route to it, so a client that connects the instant the line
 appears gets one disconnect and then reconnects.
 
+### Who is the host — a file on the host's disk, not an address (v0.34)
+
+Being **the host** is what lets a client type raw keystrokes into the real TUI (F3), `/end`,
+`/kick`, `/invite`, `/remote`, `/announce`, `/grants` and switch the browser view. Two conditions,
+checked independently, and either one failing means guest:
+
+1. **The key.** At start the daemon writes `<state>/host.key` — 32 random bytes, mode `0600`,
+   inside the state dir that is already `0700`. The host's own client reads that file and presents
+   it when it connects. A process on another machine cannot read it, whatever address its packets
+   arrive from and whatever headers they carry.
+2. **The address.** The connection must also have started on this machine — loopback, with no
+   proxy header on the upgrade (the 0.21.1 test, kept).
+
+Before v0.34 the address was the whole gate, and every relay claude-jam offers proxies to
+`localhost` — so a header test was standing in for identity. It held for cloudflared, which was
+measured; it was a guess for anything else. The key is what makes the answer transport-independent:
+a relayed socket has no key, whichever relay it is.
+
+**This grants nothing filesystem access did not already grant.** Anyone who can read
+`<state>/host.key` can already read `token.json` beside it, and is already a local user with your
+own privileges. What it stops is the *network* impersonating the filesystem.
+
+**No key, no host — and it says so.** `claude-jam host`, `host --attach`, the launcher menu's
+attach and `claude-jam adopt` all hand the client the key's *path* (`--host-key-file`), and the
+client reads the file. Against a jam that has no key file — a daemon from before v0.34, or one
+started by hand — the client prints one line and **joins as a guest** rather than falling back to
+the address. End the jam and start it again to be its host. If a host claim is refused, the reason
+names which of the two conditions failed.
+
+The key is a credential: it is never logged, never sent back in any frame, never told to claude,
+and it is scrubbed out of `/export` alongside the join token. Only its path is ever printed.
+
 ### Uploads and the transcript: two policies, two defaults
 
 Every `/send` and `/paste` from a guest hits the approval ladder. That is the default and it is
@@ -540,7 +572,7 @@ approves.
 | **PgUp** / **PgDn** | anyone | in the live TUI: scroll back through the host's **real pane history** (`capture-pane`, colours included), 2000 lines at most. **Shift+↑/↓** moves one line, the wheel three *if your terminal sends wheel events* — claude-jam never turns mouse reporting on, because that would take text selection away from you |
 | **End** / `G` / **Esc** | anyone | back to the live screen. While you are scrolled, live frames are **held, not dropped** — the status row says how many are waiting |
 | `/history [n\|all]` | anyone | re-print further back than the replay you were given, a page at a time, under a dim divider that says what is still behind it. `/export` is always the complete record |
-| **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. **F3 again** (or `Ctrl-b d`) comes back. Host **and** loopback only |
+| **F3** | host | **attach** the real TUI — `tmux attach` takes the terminal, so permission prompts, pickers, the mouse and Ctrl-C all work at native speed. **F3 again** (or `Ctrl-b d`) comes back. Host only: the `0600` `host.key` **and** a local socket (v0.34) |
 | `a` `d` `i`/Esc | host | answer the approval bar above the status row — accept · deny · dismiss. Only while the input line is empty |
 | `/tools`, `/tools on\|off` | anyone | reprint the last turn's full tool log · stop/resume collapsing tool lines |
 | `/files` | anyone | every path this session read, wrote or edited — newest first, with a count |
@@ -723,6 +755,13 @@ test instead of somebody's message.
   revoke is the pair that actually keeps them out.
 - Admission is per person, and since v0.22 there are per-person credentials — but once in,
   everybody is still equally trusted: an invite grants exactly the same abilities a knock does.
+- **Host is a local file, not an address (v0.34).** `<state>/host.key` is `0600` in a `0700` dir,
+  and reading it is what proves the claim; the loopback test is kept as a second, independent
+  condition. A client that claims `--host` with no key file joins as a guest and says so — there
+  is no fall back to the address. This is a floor, not a ceiling: it says the *network* cannot
+  become the host, and nothing more. Any local process running as you can read the key — but it
+  can already read `token.json`, so that is not a new boundary. It is also not device binding: the
+  key protects host authority, not the machine.
 - The token-in-context guard ("reveal only to the host") is an instruction to the model, not a
   boundary — and neither is the appended system prompt that repeats it. What the system prompt
   buys is durability, not enforcement: it survives a `/compact` that would have summarised the
