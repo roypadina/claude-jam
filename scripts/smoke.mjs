@@ -87,7 +87,7 @@ ws.addEventListener('message', (m) => {
   }
   // v0.30: the daemon confirmed the send (busy went back to false), so the transcript is written.
   if (bigAt && ev.t === 'status' && ev.busy === false && ev.ts > bigAt && !got.big) {
-    setTimeout(() => { got.big = jsonlHasBig(got.sessionId); finish(got.jsonl && got.big?.whole ? 0 : 1); }, 1500);
+    setTimeout(() => { got.big = jsonlHasBig(got.sessionId); finish(missing().length ? 1 : 0); }, 1500);
     bigAt = 0;
   }
   // Or it could not be confirmed at all, which v0.30 says must be an explicit, recoverable error.
@@ -97,6 +97,17 @@ ws.addEventListener('message', (m) => {
   }
 });
 ws.addEventListener('error', (e) => { console.error('WS error', e.message || e); process.exit(1); });
+
+// 2026-08-30 suite audit: this suite PRINTS five checks and used to exit on two of them, so it
+// could report `agent event : MISSING` and `status busy:false: MISSING` and still exit 0 — and the
+// sweep's results.tsv is exit-code driven, so a regression in either path would have passed the
+// gate in silence. Every check it prints as a check now decides the exit. `sysprompt` is the one
+// deliberate exception and says why below: --no-system-prompt is a supported configuration.
+function missing() {
+  return [['session-id', got.sessionId], ['agent event', got.agent], ['status busy:false', got.statusIdle],
+    ['jsonl [Tester]:', got.jsonl], ['v0.30 big paste', got.big?.whole]]
+    .filter(([, v]) => !v).map(([k]) => k);
+}
 
 function finish(code) {
   console.log('\n--- RESULT ---');
@@ -114,6 +125,8 @@ function finish(code) {
     ? (got.big.whole ? `WHOLE in the transcript (${got.big.lines}/${got.big.want} marked lines)`
       : `INCOMPLETE — ${got.big.kept || `${got.big.lines}/${got.big.want} marked lines in the transcript`}`)
     : 'MISSING');
+  const gaps = missing();
+  if (gaps.length) console.log(`FAILING CHECKS   : ${gaps.join(', ')}`);
   process.exit(code);
 }
 setTimeout(() => { console.error('\nTIMEOUT'); finish(1); }, Number(process.env.SMOKE_TIMEOUT || 150000));

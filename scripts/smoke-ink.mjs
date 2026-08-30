@@ -372,6 +372,14 @@ try {
   });
 
   show('Dana — 120x40 ink client', PEER_SESSION);
+} catch (e) {
+  // 2026-08-30 suite audit: without this, an exception BETWEEN steps was swallowed by the
+  // finally below and the suite printed "all steps passed" having run none of them — measured on
+  // smoke-nudge, which had been doing exactly that through every release gate. A suite may fail;
+  // it may never report a pass it did not earn.
+  failed++;
+  console.log(`FAIL  setup or teardown threw — no step below it ran: ${e.message}`);
+  console.log(String(e.stack || "").split("\n").slice(1, 4).join("\n"));
 } finally {
   tmux('kill-session', '-t', PEER_SESSION); // exact name, only the session this script created
 }
