@@ -104,6 +104,35 @@ platform-independent (`lstat` + `st.uid` + `st.mode`). See the Deferred list.
 
 ## Release gates that have actually run
 
+- **0.23.2 — 2026-08-30. The second security patch in a row, gated on all nineteen.**
+  All nineteen suites plus the unit suite (**453 tests, 450 pass, 3 skipped, 0 fail**) and
+  `check-terminal-gate`, on node 24.15 / tmux 3.7c / claude 2.1.251 / ttyd 1.7.7 /
+  cloudflared 2026.8.2, and `npm pack --dry-run` clean at 21 files. Suites 1–6 shared one
+  `--model haiku` daemon on :7799 in the documented order (`smoke-ink` first against a fresh
+  daemon, `smoke-slash` last and once), suite 7 its own knock-only daemon on the same port after
+  that one was torn down, `smoke-perm` its own, suites 8–19 self-contained. **19/19, every suite
+  green.** `smoke.mjs`'s `--- RESULT ---` block was read rather than counted, as the 0.23.1 gate
+  established: `pong` returned, the jsonl `[Tester]:` line found, the system prompt in effect, and
+  the v0.30 big paste whole at 7650 chars / 120 marked lines.
+
+  Two results in this gate are load-bearing for the release itself, not just green rows:
+  - **`smoke-lifecycle` is 19 steps now** (S4/S4b, new), and it is the only behavioural proof of
+    the state-dir gate. It passed twice, and each of its two canaries was run.
+  - **The false-positive check that macOS *can* answer.** The gate daemon on :7799 logged
+    `[host-key] wrote …/claude-jam-7799/host.key (0600)` and started normally, and `smoke-slash`
+    step 12 re-verified `host.key is 0600 and the only file holding the key`. So the new gate does
+    not refuse an ordinary jam on this platform. The Linux/WSL2 equivalent is the deferral below.
+
+  Cleanup verified rather than assumed: every session killed by exact name on its own socket, no
+  `dns-sd`/`ttyd`/`cloudflared`/daemon child left (checked by listing processes, never by pattern
+  kill), no state dir left under `$TMPDIR` except **Roy's dormant 7777 and 7873, untouched
+  throughout**, and `jam-uploads/` removed from the repo cwd.
+
+  **Not measured here, and it is the honest gap for this release:** the takeover finding 3 fixes
+  cannot occur on macOS at all, so this gate proves the fix does not regress a macOS host and does
+  not prove it stops the attack on the platform where the attack exists. See the Deferred entry
+  naming the three Linux/WSL2 experiments.
+
 - **0.23.1 — 2026-08-30. The security patch, and the first gate with nineteen suites.**
   All nineteen in the documented order, one at a time, plus the unit suite (**446 tests, 443 pass,
   3 skipped, 0 fail**) and `check-terminal-gate`, on node 24.15 / tmux 3.7c / claude 2.1.251 /
