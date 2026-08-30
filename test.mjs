@@ -4554,8 +4554,20 @@ test('v0.32 W1 secureWrite on Windows leaves an ACL with only the current user',
       `icacls said:\n${acl.text}`);
     // And the directory that holds it, with the inheritable form.
     const dacl = aclPrincipals(state);
-    assert.deepEqual(dacl.principals.map((p) => p.toLowerCase()), [me.toLowerCase()],
-      `icacls said:\n${dacl.text}`);
+    const got = dacl.principals.map((p) => p.toLowerCase());
+    if (got.length !== 1 || got[0] !== me.toLowerCase()) {
+      // Nobody on this project has a Windows machine, so this failure has to settle
+      // product-vs-test on its own rather than send somebody guessing at icacls from a Mac.
+      // It carries what was ASKED for and what a second, uncached attempt says: icacls
+      // SUCCEEDING here and still leaving SYSTEM/Administrators behind is a fact about Windows
+      // (and the assertion is then what is wrong); icacls FAILING, or a re-apply that works, is
+      // a fact about the call secureDir makes (and the product is then what is wrong).
+      const redo = restrictToUser(state, { dir: true, again: true });
+      assert.fail(`the state dir's ACL is not one entry.\nicacls said:\n${dacl.text}\n`
+        + `argv: ${JSON.stringify(aclArgs(state, me, { dir: true }))}\n`
+        + `re-applying said: ${JSON.stringify(redo)}\n`
+        + `and the ACL then read:\n${aclPrincipals(state).text}`);
+    }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
