@@ -4222,6 +4222,14 @@ test('v0.32 W1 aclUser: DOMAIN\\user in a domain, bare user otherwise, null when
   const none = restrictToUser('C:\\t\\x', { env: {} });
   assert.equal(none.ok, false);
   assert.match(none.why, /USERNAME/);
+  // Once per path per process. rememberInput() calls secureDir+secureWrite on EVERY submitted
+  // line, so an uncached ACL would put two synchronous spawns on the Windows input path — the
+  // second call must be the remembered answer, not a second icacls.
+  assert.deepEqual(restrictToUser('C:\\t\\x', { env: {} }), { ok: true, cached: true });
+  assert.deepEqual(restrictToUser('C:\\t\\x', { env: {}, dir: true }).cached, undefined,
+    'a directory is a different ACL from a file of the same name');
+  // `again` is the way past the memo, for a path that was deleted and recreated.
+  assert.equal(restrictToUser('C:\\t\\x', { env: {}, again: true }).ok, false);
 });
 
 test('v0.32 W1 aclArgs: one entry for a file, an inheritable one for a directory', () => {
