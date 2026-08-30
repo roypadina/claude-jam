@@ -986,18 +986,78 @@ export function sanitizeFrameRow(row, token = null, hostKey = null) {
 // because on the mirror's hot path (15 frames/s x ~40 rows) almost no row holds either value and
 // a miss must not allocate — two substring searches against short needles, measured nowhere near
 // a profile.
-// Ceiling, deliberate: a value WRAPPED across two captured rows matches in neither half, so a
-// key long enough to wrap (64 hex on an 80-column pane) is half-exposed on the pane path. The
-// transcript funnel and /export both see whole text and do catch it. Fixing the pane case needs
-// cross-row state on the hot path, and host authority needs locality as well as the key, so the
-// wrap is recorded rather than solved.
+// A value WRAPPED across two captured rows matches in neither half — this function sees one row
+// at a time. That was recorded as an accepted ceiling until 2026-08-30, when it was MEASURED and
+// turned out to be the majority case rather than an edge: the split probability for a needle of
+// length L on a W-column pane is (L-1)/W, so the 64-hex host key splits **79% of the time at 80
+// columns**, 63% at 100, and ALWAYS on a pane narrower than 64. A real jam, an 80-column pane and
+// a real mirror guest: `AAAA…3f6021a449ff8c43d60cbcd419ecbdbb` / `f0ba2044c0afab0a889c812ee69e4b80`
+// — the whole key, in two adjacent rows, unscrubbed. So it is closed by scrubRowJoins below;
+// what remains is only a value with an escape sequence INSIDE it, which is maskSecrets' own
+// documented ceiling too.
+export const TOKEN_MASK = '[token removed]';
+export const HOST_KEY_MASK = '[host key removed]';
 export function scrubSecrets(text, token = null, hostKey = null) {
   let out = String(text);
   if (typeof token === 'string' && token.length >= 8 && out.includes(token)) {
-    out = out.split(token).join('[token removed]');
+    out = out.split(token).join(TOKEN_MASK);
   }
   if (validHostKey(hostKey) && out.includes(hostKey)) {
-    out = out.split(hostKey).join('[host key removed]');
+    out = out.split(hostKey).join(HOST_KEY_MASK);
+  }
+  return out;
+}
+
+// The other half of the pane scrub: a secret split at a ROW BOUNDARY, which is what a terminal
+// wrap is. The whole shape of a wrap is "the row ends with a prefix of the value and the next row
+// begins with the rest", so that is exactly what is tested — no substring search, no cross-frame
+// state, and nothing that can mask a row a secret does not touch. Every candidate split has one
+// side at least half the needle long, so a false positive would need an innocent row pair to spell
+// a 64-hex key across the join; and if it ever did, masking it costs a row of somebody's screen.
+//
+// Runs on the RAW rows, BEFORE sanitizeFrameRow, for two measured reasons: sanitizeFrameRow
+// appends its own `\x1b[0m` to a row that carries an escape (which would sit between the halves),
+// and tmux emits SGR at attribute CHANGES only — measured 2026-08-30, a coloured wrapped line came
+// back as `AAAA…\x1b[32m<first 32>` / `<last 32>\x1b[39m`, so the halves are contiguous at the
+// boundary even in colour.
+//
+// Cost, because this is the 25-frames/s path: one Set lookup per row (the needle's own alphabet
+// against the row's last character). A TUI row ends in a space or punctuation, so the k-loop is
+// not reached at all on essentially every row of every frame. Measured on a 40-row, 100-column
+// coloured frame with both needles set: 1.7 µs per frame, against 10.3 µs for the per-row
+// sanitize it sits beside — and 11 µs in the contrived worst case where every row ends in a
+// character of the needle. 0.04 ms/s at 25 frames/s.
+export function scrubRowJoins(rows, token = null, hostKey = null) {
+  const out = Array.isArray(rows) ? rows.map((r) => String(r)) : [];
+  if (out.length < 2) return out;
+  const needles = [];
+  if (typeof token === 'string' && token.length >= 8) needles.push([token, TOKEN_MASK]);
+  if (validHostKey(hostKey)) needles.push([hostKey, HOST_KEY_MASK]);
+  for (const [needle, mask] of needles) {
+    const alphabet = new Set(needle);
+    for (let i = 0; i + 1 < out.length; i++) {
+      const a = out[i];
+      if (!a || !alphabet.has(a[a.length - 1])) continue;
+      for (let k = 1; k < needle.length; k++) {
+        if (!a.endsWith(needle.slice(0, k))) continue;
+        // A needle can span MORE than one boundary — on a pane narrower than the needle it always
+        // does, and (L-1)/W says a 64-hex key on a 40-column pane splits with certainty. So the
+        // tail is matched against the following rows joined, and the same number of characters is
+        // then taken back off them.
+        let rest = '';
+        let j = i + 1;
+        while (rest.length < needle.length - k && j < out.length) { rest += out[j]; j++; }
+        if (!rest.startsWith(needle.slice(k))) continue;
+        out[i] = a.slice(0, a.length - k) + mask;
+        let left = needle.length - k;
+        for (let n = i + 1; left > 0 && n < out.length; n++) {
+          const take = Math.min(left, out[n].length);
+          out[n] = out[n].slice(take);
+          left -= take;
+        }
+        break;
+      }
+    }
   }
   return out;
 }

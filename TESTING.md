@@ -467,6 +467,32 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   bytes at all, end to end, from another machine) remains unproven and `smoke-transport`'s T4
   still runs against a stub CLI. Prove: after Roy enables Funnel and installs the standalone
   build — the same condition as the 2026-08-29 entry above.
+- 2026-08-30 · **SECURITY REVIEW, NEW: `smoke-mirror` not re-run against a real claude after the
+  wrapped-row scrub.** The change touches both pane funnels. `screen-history` is covered —
+  `smoke-scroll` ran green, 13/13, and it asserts the rows are *row for row identical to
+  `capture-pane`*, so it would fail on any over-masking. The live frame path was exercised by a
+  purpose-built probe (a real daemon, a real mirror guest at 80 columns, the key printed on the
+  pane, scrubbed in both the whole-row and the wrapped case) and by the new unit lint that fails if
+  either funnel loses the join scrub. What was NOT run is `smoke-mirror` itself: it needs a real
+  claude to answer an injected prompt (three of its eight steps assert `ok` came back and one
+  asserts SGR the stand-in does not emit), and this review was instructed not to spend quota.
+  Driven against a `fake-tui` daemon it is 5/8, with the three failures attributable to the
+  stand-in by their own text. Prove: `smoke-mirror` in the next release gate's shared-daemon block,
+  where a real claude is up anyway.
+- 2026-08-30 · **SECURITY REVIEW, NEW: `smoke-xfer` not re-run after the upload write changed to
+  `flag: 'wx'`.** Same reason — it takes a live jam with a real claude (its last step reads the
+  pane for claude's reaction to an uploaded image). `smoke-nudge` covers the same
+  `onUpload → writeUpload` path end to end for free, and now runs 16/16 including the two new
+  steps. Prove: `smoke-xfer` in the next release gate.
+- 2026-08-30 · **SECURITY REVIEW, NEW: the pre-auth roster oracle is REPORTED, not decided.**
+  A hello with a name somebody already holds is refused `the name "X" is already taken here` and
+  closed 4409 **before** any admission, so a stranger with no token can enumerate who is in a jam,
+  unlimited (the close happens above `pending`, so `MAX_PENDING` does not apply). Invite-only mode
+  does not leak — its refusal is above that line. The two answers are both defensible (a joiner
+  who is told "that name is taken" can fix it in one go; a joiner who is not is left guessing why
+  they were refused), so it was left for Roy rather than picked. Prove/decide: either accept it in
+  `Security-Model` as the cost of name-based attribution, or move the name check below admission
+  and give a knocker a generic refusal.
 
 ## The 2026-08-30 campaign
 

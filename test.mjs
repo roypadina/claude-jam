@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
   exportFileName, resumeInstructions, scrubSecrets, stripTokenBlock, clientCommand,
+  scrubRowJoins,
   // v0.15 adaptive cadence, v0.16 approval bar.
   frameCadence, FRAME_FAST_GAP, FRAME_RATE_CAP, FRAME_ACTIVE_MS,
   countdownText, approvalBar, barKeyAction, APPROVAL_COMMANDS,
@@ -6462,6 +6463,51 @@ test('sanitizeFrameRow: a mirror row carrying this jam\'s key is scrubbed before
   assert.match(sanitizeFrameRow('\x1b[31mred', null, null), /^\x1b\[31mred\x1b\[0m$/);
 });
 
+// 2026-08-30 security review. The wrap was an ACCEPTED ceiling until it was measured: the split
+// probability for a needle of length L on a W-column pane is (L-1)/W, so the 64-hex host key
+// splits 79% of the time at 80 columns, 63% at 100, and ALWAYS below 64. A real jam and a real
+// mirror guest at 80 columns handed over the whole key in two adjacent rows before this.
+test('scrubRowJoins: a secret split at a row boundary is caught in the join', () => {
+  const pad = 'A'.repeat(48);
+  // The measured shape: 48 columns of something else, then the first 32 hex, then the rest.
+  let rows = scrubRowJoins([`${pad}${KEY_A.slice(0, 32)}`, KEY_A.slice(32)], null, KEY_A);
+  assert.equal(rows.join('').includes(KEY_A), false, 'not recoverable by joining the rows');
+  assert.equal(rows.join('').includes(KEY_A.slice(0, 20)), false, 'and no half of it survives');
+  assert.match(rows[0], /\[host key removed\]$/);
+  assert.equal(rows[1], '');
+  // Every split point, not just the tidy halves — that is what a real column offset gives you.
+  for (let k = 1; k < KEY_A.length; k++) {
+    const got = scrubRowJoins([`x ${KEY_A.slice(0, k)}`, `${KEY_A.slice(k)} y`], null, KEY_A);
+    assert.equal(got.join('').includes(KEY_A), false, `split at ${k}`);
+    assert.equal(got[1], ' y', `split at ${k} keeps what followed`);
+  }
+  // A pane NARROWER than the needle splits it over three rows, with certainty.
+  rows = scrubRowJoins([`pad ${KEY_A.slice(0, 20)}`, KEY_A.slice(20, 44), `${KEY_A.slice(44)} tail`], null, KEY_A);
+  assert.equal(rows.join('').includes(KEY_A), false, 'a three-row split');
+  assert.equal(rows.at(-1), ' tail');
+  // The join token gets the same treatment, and both needles in one frame.
+  const tok = 'joinTokenABCDEFG';
+  rows = scrubRowJoins([`a ${tok.slice(0, 9)}`, `${tok.slice(9)} b ${KEY_A.slice(0, 5)}`, KEY_A.slice(5)], tok, KEY_A);
+  assert.equal(rows.join('').includes(tok), false, 'the token, split');
+  assert.equal(rows.join('').includes(KEY_A), false, 'and the key, split, in the same frame');
+  // Colour at the boundary is the measured real case: tmux emits SGR at attribute CHANGES, so the
+  // halves stay contiguous — `AAA…\x1b[32m<first 32>` / `<last 32>\x1b[39m`.
+  rows = scrubRowJoins([`${pad}\x1b[32m${KEY_A.slice(0, 32)}`, `${KEY_A.slice(32)}\x1b[39m`], null, KEY_A);
+  assert.equal(rows.join('').includes(KEY_A), false, 'a coloured wrap');
+
+  // What must NOT change: nothing else in the frame, and no row a secret does not touch.
+  const plain = ['⎿ Read(lib.mjs)', '  40 hex is a sha: ' + 'a'.repeat(40), '  and 0123456789abcdef'];
+  assert.deepEqual(scrubRowJoins(plain, 'joinTokenABCDEFG', KEY_A), plain);
+  // A whole-row hit is sanitizeFrameRow's job and is left alone here.
+  assert.deepEqual(scrubRowJoins([`key ${KEY_A}`, 'next'], null, KEY_A), [`key ${KEY_A}`, 'next']);
+  // Malformed or absent needles are not needles, and one row cannot have a join.
+  assert.deepEqual(scrubRowJoins(['aa', 'bb'], null, 'aaa'), ['aa', 'bb']);
+  assert.deepEqual(scrubRowJoins(['shor', 't tok'], 'short', null), ['shor', 't tok']);
+  assert.deepEqual(scrubRowJoins([`${KEY_A.slice(0, 10)}`], null, KEY_A), [KEY_A.slice(0, 10)]);
+  assert.deepEqual(scrubRowJoins(null, null, null), []);
+  assert.deepEqual(scrubRowJoins(['', ''], null, KEY_A), ['', '']);
+});
+
 test('readHostKey: only a well-formed 0600 file is a key, everything else is null', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-hostkey-'));
   try {
@@ -6507,6 +6553,22 @@ test('the host key never rides in a frame the daemon sends, or in any log line',
   }
   // And it is used at all — a lint that passes because the symbol vanished proves nothing.
   assert.equal(uses.length >= 3, true, `expected the key to be read in host.mjs, saw ${uses.length}`);
+
+  // 2026-08-30: EVERY funnel out of the pane needs BOTH scrubs. `sanitizeFrameRow` only ever sees
+  // one row, so a secret wrapped at the right margin is in neither half — `scrubRowJoins` is the
+  // other half, and it has to run on the raw rows BEFORE the per-row pass. The same class as
+  // 0.22.0's own gate finding (`stripTokenBlock` had one call site while two funnels needed it),
+  // so it is linted rather than remembered: a third capture-pane funnel added later fails here.
+  const funnels = src.split('\n').map((l, i) => [i + 1, l])
+    .filter(([, l]) => /sanitizeFrameRow\(row,/.test(l));
+  assert.equal(funnels.length >= 2, true,
+    `expected both pane funnels to map sanitizeFrameRow, saw ${funnels.length}`);
+  for (const [n] of funnels) {
+    const near = src.split('\n').slice(Math.max(0, n - 8), n + 1).join('\n');
+    assert.match(near, /scrubRowJoins\(/,
+      `host.mjs:${n} sanitizes rows one at a time with no cross-row scrub above it — a wrapped `
+      + 'secret would go out in halves');
+  }
 });
 
 test('v0.34 every surface that opens the host\'s OWN client hands it the key file', () => {
