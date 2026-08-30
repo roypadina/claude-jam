@@ -91,10 +91,26 @@ funnel cannot be handed a hand-picked subset. Deregister a secret, register one 
 or hand-pick at a call site, and a test goes red instead of a secret appearing on somebody's
 screen.
 
-**Invite secrets are deliberately not registered**, and the comment says why: only
-`inviteHash(secret)` is persisted, so the plaintext exists in exactly one frame — the reply to the
-host who asked for it — and in no file, log line or pane. A needle for a value the daemon does not
-retain is a scrub that quietly never runs.
+**Invite secrets are deliberately not registered, and that was checked rather than assumed** —
+it is the obvious fourth candidate and the answer is counter-intuitive. Only `inviteHash(secret)`
+is persisted, so the plaintext exists in exactly one frame (the reply to the host who asked) and is
+then dropped. Measured on a real jam after minting a link: the plaintext was in **none** of the
+eight files in the state dir — `invites.json` holds id, hash, name, uses, maxUses, expires, revoked
+and createdAt, and no secret — nor in the daemon log, nor on the pane. So the route that leaked the
+hook secret cannot reach an invite secret at all. Registering one would make things *worse*: a
+needle only masks a value the daemon still holds, so the daemon would first have to start retaining
+every live invite's plaintext, creating the exposure in order to close it. A discarded secret
+cannot be printed.
+
+**Cost on the mirror's hot path, measured rather than asserted.** The needle list is now
+variable-length and `sanitizeFrameRow` runs per row at up to 15 frames a second, so the list is
+built once per secrets object and returned by identity after that — `captureFrame` hands the same
+object to `scrubRowJoins` and to every row, turning 40 builds into one build and 40 pointer
+comparisons. On a 40-row, 100-column coloured frame with all three needles set: **18.5 µs/frame
+before the cache, 13.0 µs after** (8.1 µs with an empty registry; 18.8 µs for a frame that actually
+carries all three secrets). That is 0.20 ms per second at 15 fps. A fresh object — the next frame,
+or a `/token` rotation — misses and rebuilds, so the cache cannot serve a stale secret, and a test
+pins exactly that by interleaving two rotations.
 
 The pattern masker also learns the **quoted-JSON** shape, case-insensitively, since that is the
 shape that hid #2. The unquoted `.env` rule stays upper-case-only on purpose, and a test pins it:

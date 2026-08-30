@@ -1081,11 +1081,21 @@ export const HOOK_SECRET_MASK = '[hook secret removed]';
 // the registry and asserts each entry is masked on every funnel. A fifth secret that is not
 // registered fails that test instead of surfacing on somebody's screen.
 //
-// NOT here, deliberately: the INVITE secret. `mintInvite` keeps only `inviteHash(secret)` in
-// `<state>/invites.json` (see inviteRecord) — the plaintext exists in exactly one frame, the
-// `/invite` reply to the host who asked for it, and in no log line, no file and no pane. There is
-// nothing for a needle to catch, and registering a value the daemon does not retain would be a
-// scrub that quietly never runs.
+// NOT here, and this was CHECKED rather than reasoned about, because it is the obvious fourth
+// candidate and the answer is counter-intuitive: the INVITE secret is not registrable.
+// `mintInvite` keeps only `inviteHash(secret)` (see inviteRecord), so the plaintext exists in
+// exactly one frame — the `/invite` reply to the host who asked for it — and is then dropped.
+// Measured 2026-08-30 on a real jam: after minting a link, the plaintext appeared in NONE of the
+// eight files in the 0700 state dir (`invites.json` holds `id`/`hash`/`name`/`uses`/`maxUses`/
+// `expires`/`revoked`/`createdAt` and no secret), not in the daemon log, and not on the pane. So
+// the "ask claude to read a file in the state dir" route that leaked the hook secret cannot reach
+// an invite secret at all.
+//
+// Registering it would therefore make things WORSE, not better: a needle only masks a value the
+// daemon still holds, so the daemon would first have to START retaining every live invite's
+// plaintext — creating exactly the exposure the scrub exists to close, in order to close it. A
+// discarded secret cannot be printed. That is the stronger property, and it is why this list has
+// three entries and not four.
 export const SECRET_MIN = 8; // shorter than this is not a credential, and would gut innocent rows
 const longEnough = (v) => typeof v === 'string' && v.length >= SECRET_MIN;
 export const SECRET_REGISTRY = [
@@ -1098,9 +1108,30 @@ export const SECRET_KEYS = SECRET_REGISTRY.map((s) => s.key);
 // `{token, hostKey, hookSecret}` → the [needle, mask] pairs worth searching for. An absent or
 // malformed value contributes nothing, so every funnel below can be called with whatever the
 // caller has — including nothing at all.
+//
+// COST, because sanitizeFrameRow calls this once per row at up to 15 frames/s (~600 calls a
+// second on a 40-row pane) and the old hand-written version allocated nothing on a miss. Building
+// the list per row cost 5.4 µs/frame — measured 2026-08-30 on a 40-row, 100-column coloured frame
+// with all three needles set, 20k iterations after a 2k warm-up: **18.5 µs/frame before this
+// cache, 13.0 µs after** (a frame that actually carries all three: 23.8 → 18.8), against 8.1 µs
+// for the same frame with an empty registry. 0.20 ms/s at 15 frames a second, so the whole scrub
+// is still four ten-thousandths of one core. So the list is built ONCE per secrets object and returned by
+// identity after that: `captureFrame` calls liveSecrets() once and hands the same object to
+// scrubRowJoins and to every sanitizeFrameRow, which turns 40 builds into 1 build + 40 pointer
+// comparisons. A fresh object (the next frame, or a `/token` rotation) misses and rebuilds, so
+// the cache can never serve a stale secret — it is scoped to one frame by construction.
+// ponytail: single slot, because there is exactly one live secrets object at a time. A Map keyed
+// by object would be needed only if two jams shared a process, which they do not.
+let needleCacheFor = null;
+let needleCacheVal = [];
 export function secretNeedles(secrets = {}) {
   const s = secrets && typeof secrets === 'object' ? secrets : {};
-  return SECRET_REGISTRY.filter((e) => e.valid(s[e.key])).map((e) => [s[e.key], e.mask]);
+  if (s === needleCacheFor) return needleCacheVal;
+  const out = [];
+  for (const e of SECRET_REGISTRY) if (e.valid(s[e.key])) out.push([s[e.key], e.mask]);
+  needleCacheFor = s;
+  needleCacheVal = out;
+  return out;
 }
 
 // Replaced by known literal rather than by pattern — see the note above scrubRowJoins for why

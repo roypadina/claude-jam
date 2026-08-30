@@ -7044,6 +7044,37 @@ test('the secret registry: every registered secret is scrubbed on every funnel',
   assert.deepEqual(secretNeedles(null), []);
 });
 
+test('the secret registry is LIVE, and its needle cache cannot serve a stale secret', () => {
+  // A secret that came into existence after boot has to be scrubbed too, so the enumeration reads
+  // current state rather than a value captured once. `/token new` is the case that exists today:
+  // host.mjs's liveSecrets() is a function called at each funnel invocation, not a constant.
+  const before = { token: 'oldTokenABCDEFGH', hostKey: null, hookSecret: null };
+  const after = { token: 'newTokenABCDEFGH', hostKey: null, hookSecret: null };
+  assert.equal(scrubSecrets(`saw ${before.token}`, before), 'saw [token removed]');
+  // The rotation: the NEW value is masked, and the old one is deliberately not — it admits nobody
+  // any more, and treating a dead credential as a needle would blank rows for no reason.
+  assert.equal(scrubSecrets(`saw ${after.token}`, after), 'saw [token removed]');
+  assert.equal(scrubSecrets(`saw ${before.token}`, after), `saw ${before.token}`);
+  // And that holds ACROSS the per-frame needle cache, which is keyed on object identity: a
+  // rotation hands the funnels a fresh object, so a cache hit is impossible by construction.
+  // Interleaved on purpose — a single-slot cache that ignored identity would fail here.
+  for (let i = 0; i < 3; i++) {
+    assert.equal(scrubSecrets(`x ${after.token}`, after).includes(after.token), false, 'new masked');
+    assert.equal(scrubSecrets(`x ${before.token}`, before).includes(before.token), false, 'old masked under its own object');
+    assert.equal(scrubSecrets(`x ${after.token}`, before).includes(after.token), true, 'no cross-contamination');
+  }
+  // Same object twice must give the same answer (the cache hit path) as the first time.
+  const secrets = { hookSecret: 'HOOKSECRETcanary1234abcd' };
+  const first = sanitizeFrameRow(`a ${secrets.hookSecret}`, secrets);
+  assert.equal(sanitizeFrameRow(`a ${secrets.hookSecret}`, secrets), first);
+  assert.equal(first.includes(secrets.hookSecret), false);
+  // A mutated-in-place object is the one thing identity caching cannot see. Nothing in the daemon
+  // does it (liveSecrets() returns a fresh literal), and this pins the reason rather than the
+  // behaviour: if somebody ever mutates instead of rebuilding, they get the stale list.
+  assert.match(fs.readFileSync(path.join(import.meta.dirname, 'host.mjs'), 'utf8'),
+    /const liveSecrets = \(\) => \(\{/, 'liveSecrets must RETURN a fresh object, not mutate one');
+});
+
 test('the secret registry: host.mjs names every registered key in ONE place', () => {
   // The other half of the forcing function. A funnel handed a hand-picked subset is exactly the
   // v0.34 bug, so there is one expression in host.mjs that builds the secrets object, every call
