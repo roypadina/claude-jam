@@ -107,6 +107,31 @@ rests on are `/tmp` being mode `1777` (universal) and `os.tmpdir()` returning `$
 directory and the attack does not apply at all. The *fix* is measured on macOS and is
 platform-independent (`lstat` + `st.uid` + `st.mode`). See the Deferred list.
 
+## The v0.34.2 protocol review — the frame pipeline, attacked from inside (2026-08-30)
+
+An adversarial pass over the one surface nothing had attacked: what an **already-admitted,
+correctly-authenticated participant** can do by sending unusual frames. Findings and what proves
+each are in the CHANGELOG's `Unreleased` section; this records what was RUN and what was not.
+
+| finding | unit | behavioural |
+| --- | --- | --- |
+| `null` on the websocket killed the daemon, admitted or not | `v0.34.2 parseFrame: only a JSON OBJECT is a frame…` plus a `host.mjs` lint for both guards | **`smoke-answer` step 11 is new** — eight raw shapes at a real daemon, the daemon's own pid asserted unchanged after each, and an unadmitted socket sending the same bytes |
+
+`smoke-answer` is 10 steps → **11**. Step 11 is there because the unit half can only say
+`parseFrame` returns the right verdict; whether the *daemon* survives is a question only a running
+daemon can answer, and this project has twice been bitten by a test that could not fail.
+
+**Canaried three ways, 2026-08-30**, all three run: `parseFrame`'s guard out → the unit test reds
+and step 11 reds on the refusal wording (`neverFatal` catches the throw, which is the defence in
+depth working); `neverFatal` out → the `host.mjs` lint reds; **both out, i.e. 0.24.0's shape** →
+step 11 reds with `timed out after 5000ms waiting for Dana: a refusal for "null"`, which is the
+daemon dying mid-step.
+
+**Run for this batch:** `node --test test.mjs` 474 tests / 0 fail (was 472), and
+`scripts/smoke-answer.mjs` 11/11. Nothing else was re-run — the change touches only the ws message
+listener's entry and one new pure function, and no other suite drives a frame the listener treats
+differently. That skip is the Deferred entry below.
+
 ## `--attach` on Linux — the question the CI leg opened, ANSWERED (0.23.4, 2026-08-30)
 
 `.github/workflows/tests.yml` wired `smoke-lifecycle` to the `ubuntu-latest` leg, watched it fail
@@ -1313,6 +1338,18 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   Prove: one person, one Windows+WSL2 machine, `node scripts/check-wsl.mjs` plus the nine-step
   checklist at the end of the wiki's `Windows-WSL2-Host`. Until then every W2 row in
   `docs/COMPATIBILITY.md` is 🟡 or ⚠️ and none is ✅.
+
+
+- 2026-08-30 · v0.34.2 frame-guard batch: only the unit suite and `smoke-answer` were run. The
+  other eighteen suites were judged unaffected (the diff is one new pure function plus the two
+  lines that wrap the ws `message` listener; every frame that was accepted before is accepted
+  now, byte for byte). Prove: the full sweep at the next release gate.
+- 2026-08-30 · `neverFatal` has no behavioural trigger of its own. It is defence in depth: after
+  `parseFrame`, the 2026-08-30 sweep found **no** frame an admitted guest can send that reaches a
+  handler and throws (41 frame types × 9 hostile payload shapes, plus eight raw non-object
+  shapes — 377 frames, zero deaths). So the lint is what holds it in place, and the honest
+  statement is "no live case exercises the catch". Prove: nothing to prove until a handler throws;
+  if one ever does, its stack is in the daemon log by design.
 
 ## The 2026-08-30 vacuity audit — every suite, for tests that cannot fail
 

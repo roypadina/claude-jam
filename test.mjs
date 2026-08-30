@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, VIEW_SH, buildTokenFile, classifyHello, resolveJoinName, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, VIEW_SH, buildTokenFile, classifyHello, parseFrame, resolveJoinName, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
   exportFileName, resumeInstructions, scrubSecrets, stripTokenBlock, clientCommand,
   scrubRowJoins, secretNeedles, SECRET_REGISTRY, SECRET_KEYS, FIND_SPOOF,
@@ -7986,4 +7986,47 @@ test('v0.32 W2 the WSL binaries are named in platform.mjs and nowhere else', () 
   for (const bin of ['powershell.exe', 'clip.exe', 'wslpath']) {
     assert.ok(PLATFORM_BINS.includes(bin), `${bin} is not in PLATFORM_BINS, so no lint guards it`);
   }
+});
+
+// ------------------------------------------------------------ v0.34.2: a frame is not a weapon ----
+
+test('v0.34.2 parseFrame: only a JSON OBJECT is a frame, and `null` is the one that killed the daemon', () => {
+  // The measurement this exists for (2026-08-30): the four bytes `null`, from an admitted guest
+  // OR from a socket that had not said hello, ended the jam for everybody — `null.t` is a
+  // TypeError, and an uncaught TypeError in a ws `message` listener exits the process.
+  assert.deepEqual(parseFrame('null'), { ok: false, error: 'a frame must be a JSON object' });
+  // The other four top-level JSON shapes, refused the same way rather than reaching a handler.
+  for (const raw of ['5', '"hello"', 'true', 'false', '[]', '[{"t":"say"}]', '-0.5']) {
+    assert.deepEqual(parseFrame(raw), { ok: false, error: 'a frame must be a JSON object' }, raw);
+  }
+  // Not JSON at all keeps its own, older wording — a broken client and a hostile one are
+  // different reports.
+  for (const raw of ['', '{', 'undefined', '{"t":]']) {
+    assert.deepEqual(parseFrame(raw), { ok: false, error: 'bad JSON' }, raw);
+  }
+  // And an object still gets through, unchanged, including the empty one and the odd keys.
+  assert.deepEqual(parseFrame('{"t":"say","text":"hi"}'), { ok: true, frame: { t: 'say', text: 'hi' } });
+  assert.deepEqual(parseFrame('{}'), { ok: true, frame: {} });
+  const proto = parseFrame('{"__proto__":{"pwned":1},"t":"say"}');
+  assert.equal(proto.ok, true);
+  assert.equal(proto.frame.t, 'say');
+  // JSON.parse defines `__proto__` as an own DATA property, so nothing was polluted — asserted
+  // rather than assumed, because the fix would be the wrong shape if it were not true.
+  assert.equal({}.pwned, undefined);
+  assert.equal(Object.getPrototypeOf(proto.frame), Object.prototype);
+});
+
+test('v0.34.2 host.mjs: no handler may reach `m.t` before the envelope and the guard', () => {
+  // The unit half can only say that host.mjs still routes every frame through both. The
+  // behavioural half is smoke-answer step 11, which sends the real bytes at a real daemon.
+  const src = fs.readFileSync(path.join(import.meta.dirname, 'host.mjs'), 'utf8');
+  assert.match(src, /ws\.on\('message', neverFatal\(ws, \(raw\) => \{\s*\n\s*const f = parseFrame\(raw\.toString\(\)\);/,
+    'the ws message listener no longer goes through parseFrame inside neverFatal');
+  // The listener may not go back to parsing for itself: a second JSON.parse of a frame is the
+  // bug returning under another name.
+  const listener = src.slice(src.indexOf("ws.on('message'"), src.indexOf("ws.on('close'"));
+  assert.equal(/JSON\.parse\(raw/.test(listener), false, 'the listener parses a frame itself again');
+  // And neverFatal must still LOG what it swallowed — a guard nobody can see hides real bugs.
+  assert.match(src, /const neverFatal = [\s\S]{0,600}?console\.error\([^)]*e\?\.stack/,
+    'neverFatal no longer logs the stack it caught');
 });

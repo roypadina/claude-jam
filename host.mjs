@@ -73,6 +73,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   HOOK_ERROR_FILE, hookErrorNote,
   // v0.32 W2: the WSL2 Windows host — the `\\wsl$` path boundary and the NAT'd-VM join note.
   wslTranslatePath,
+  // v0.34.2: the envelope every frame has to be before a handler is allowed to read `m.t`.
+  parseFrame,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -2626,6 +2628,25 @@ function revokeGrants(name, kind = null) {
   return gone;
 }
 
+// v0.34.2: the second half of the same rule, and the reason it is a wrapper rather than a guard
+// on one field. `parseFrame` above fixes the shape that was actually measured killing the daemon;
+// this makes the whole CLASS impossible. Node emits `message` synchronously out of the ws
+// receiver, so a throw anywhere in the ~270 lines of dispatch below — a field a handler assumed
+// was a string, a lookup that walked the prototype, a helper that never expected `undefined` —
+// reaches `uncaughtException` and takes the daemon down, and with it everybody else's session.
+// A frame is somebody else's input at a trust boundary: the worst it may cost is that frame.
+//
+// It logs the STACK, deliberately: a swallowed throw that nobody can see is how a real bug lives
+// forever behind a guard like this one. The socket is told, in the same words as any other
+// refusal, and stays open — one bad frame is not a reason to disconnect a person.
+const neverFatal = (ws, fn) => (...args) => {
+  try { return fn(...args); } catch (e) {
+    const who = clients.get(ws)?.name || pending.get(ws)?.name || 'an unadmitted socket';
+    console.error(`[frame] a frame from ${who} threw and was refused: ${e?.stack || e}`);
+    sendError(ws, 'that frame could not be handled');
+  }
+};
+
 function onSocket(ws, req) {
   const ip = String(req.socket.remoteAddress || '');
   // Decided ONCE, off the upgrade request, and carried on the socket: the headers that prove a
@@ -2646,9 +2667,10 @@ function onSocket(ws, req) {
     }
     ws.jamPingAt = 0;
   });
-  ws.on('message', (raw) => {
-    let m;
-    try { m = JSON.parse(raw.toString()); } catch { return sendError(ws, 'bad JSON'); }
+  ws.on('message', neverFatal(ws, (raw) => {
+    const f = parseFrame(raw.toString());
+    if (!f.ok) return sendError(ws, f.error);
+    const m = f.frame;
     const me = clients.get(ws); // set by admitSocket, on either admission path
     if (!me) {
       // A pending knocker can only wait: nothing it sends reaches claude, the roster or
@@ -2918,7 +2940,7 @@ function onSocket(ws, req) {
     } else {
       sendError(ws, `unknown message type: ${m.t}`);
     }
-  });
+  }));
   ws.on('close', () => {
     const p = pending.get(ws);
     if (p) { clearTimeout(p.timer); pending.delete(ws); pumpPopups(); }
