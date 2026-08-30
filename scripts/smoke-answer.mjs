@@ -458,6 +458,45 @@ try {
     ok(alive(), 'the daemon died on a `null` from a socket that had not said hello');
   });
 
+  // ------------------------------ 12: and neither can a request body (v0.34.2) ----
+  // The same class on the loopback+secret HTTP endpoints. Not guest-reachable — these need the
+  // 0700 state dir's hook secret, so the caller is already on the host's machine — but six bodies
+  // exited the daemon on 0.24.0, and four of them are the `ladders[k]` prototype walk AGENTS.md §2
+  // exists to forbid: `ladders['__proto__']` is `Object.prototype`, truthy, with no `requests`.
+  await step('12 a loopback request body cannot kill the daemon either', async () => {
+    const pidOf = () => JSON.parse(fs.readFileSync(path.join(STATE, 'session.json'), 'utf8')).pid;
+    const daemon = pidOf();
+    const alive = () => {
+      const st = (spawnSync('ps', ['-o', 'stat=', '-p', String(daemon)], { encoding: 'utf8' }).stdout || '').trim();
+      return st !== '' && !st.startsWith('Z');
+    };
+    const post = async (url, body) => {
+      const r = await fetch(`http://127.0.0.1:${PORT}${url}`, { method: 'POST',
+        headers: { 'x-jam-secret': 'answerhooksecret', 'content-type': 'application/json' }, body });
+      return { status: r.status, text: await r.text() };
+    };
+    for (const [url, body] of [
+      ['/admit', '{"kind":"__proto__","name":"x","ok":true}'],
+      ['/admit', '{"kind":"constructor","name":"x","ok":true}'],
+      ['/admit', '{"kind":"toString","name":"x","ok":true}'],
+      ['/admit', '{"kind":"valueOf","name":"x","ok":true}'],
+      ['/invite', 'null'],
+      ['/remote', 'null'],
+      ['/hook/notification', 'null'],
+      ['/hook/stop', 'null'],
+    ]) {
+      const r = await post(url, body);
+      ok(r.status === 200 || r.status === 400 || r.status === 404,
+        `POST ${url} ${body} answered ${r.status}: ${r.text.slice(0, 90)}`);
+      ok(alive(), `the daemon died on POST ${url} ${body}`);
+      eq(pidOf(), daemon, `the daemon pid changed after POST ${url} ${body}`);
+    }
+    // And the endpoints still WORK — a lint that passes because everything 400s proves nothing.
+    const good = await post('/remote', '{}');
+    eq(good.status, 200, `/remote with a real body answered ${good.status}: ${good.text.slice(0, 90)}`);
+    ok(/"mode"/.test(good.text), `/remote said ${good.text.slice(0, 90)}`);
+  });
+
   exitCode = failed ? 1 : 0;
 } catch (e) {
   console.error(`\nFATAL ${e.message}`);

@@ -116,8 +116,9 @@ each are in the CHANGELOG's `Unreleased` section; this records what was RUN and 
 | finding | unit | behavioural |
 | --- | --- | --- |
 | `null` on the websocket killed the daemon, admitted or not | `v0.34.2 parseFrame: only a JSON OBJECT is a frame…` plus a `host.mjs` lint for both guards | **`smoke-answer` step 11 is new** — eight raw shapes at a real daemon, the daemon's own pid asserted unchanged after each, and an unadmitted socket sending the same bytes |
+| six loopback HTTP bodies did the same, four of them by walking `ladders`'s prototype | a `host.mjs` lint: no bare `JSON.parse(body`, no unguarded `ladders[`, and the guard really is used | **`smoke-answer` step 12 is new** — all eight bodies at a real daemon, pid unchanged after each, and `/remote {}` still answering 200 |
 
-`smoke-answer` is 10 steps → **11**. Step 11 is there because the unit half can only say
+`smoke-answer` is 10 steps → **12**. Step 11 is there because the unit half can only say
 `parseFrame` returns the right verdict; whether the *daemon* survives is a question only a running
 daemon can answer, and this project has twice been bitten by a test that could not fail.
 
@@ -127,10 +128,10 @@ depth working); `neverFatal` out → the `host.mjs` lint reds; **both out, i.e. 
 step 11 reds with `timed out after 5000ms waiting for Dana: a refusal for "null"`, which is the
 daemon dying mid-step.
 
-**Run for this batch:** `node --test test.mjs` 474 tests / 0 fail (was 472), and
-`scripts/smoke-answer.mjs` 11/11. Nothing else was re-run — the change touches only the ws message
-listener's entry and one new pure function, and no other suite drives a frame the listener treats
-differently. That skip is the Deferred entry below.
+**Run for this batch:** `node --test test.mjs` **475** tests / 0 fail (was 472),
+`scripts/smoke-answer.mjs` **12/12**, and — because the second commit touches the HTTP endpoints
+those three drive — `smoke-invite` 11/11, `smoke-peer` 15/15 and `smoke-lifecycle` 19/19. Nothing
+else was re-run; that skip is the Deferred entry below.
 
 ## `--attach` on Linux — the question the CI leg opened, ANSWERED (0.23.4, 2026-08-30)
 
