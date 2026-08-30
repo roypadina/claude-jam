@@ -4377,6 +4377,11 @@ test('v0.32 W1 clipboardImage on Windows refuses cleanly when there is no image'
     assert.equal(got.data.subarray(1, 4).toString('latin1'), 'PNG');
   } else {
     assert.match(threw.message, /^no image on the clipboard \(/);
+    // …and the interpreter was actually FOUND and ran. Without this the test passes just as
+    // happily on a machine with no powershell.exe at all, which is the one thing about this path
+    // a CI run is uniquely able to check.
+    assert.ok(!/ENOENT|not recognized/i.test(threw.message),
+      `powershell.exe was never executed: ${threw.message}`);
   }
   const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('claude-jam-paste-')).length;
   assert.equal(after, before, 'the mkdtemp directory must be gone whether it worked or not');
