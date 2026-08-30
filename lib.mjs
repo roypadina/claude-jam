@@ -37,6 +37,35 @@ export function nameTaken(name, taken) {
   return taken.some((t) => String(t).toLowerCase() === n);
 }
 
+// v0.22.1: what a KNOCKER joins as, decided at admission rather than at hello.
+//
+// Answering "that name is already taken here" to an unauthenticated hello is an oracle: it let
+// anybody who could reach the port enumerate the roster name by name, unlimited, with no token and
+// no approval (measured 2026-08-30). The rule is now that nothing about the roster is answered
+// before the caller has authenticated — so a token or invite holder is still told about a clash
+// immediately (they are a legitimate guest, and being told is the whole point), and a knocker,
+// who has nothing to authenticate with yet, is not asked about it at all: the collision is settled
+// when the host lets them in, and they are told the name they ended up with.
+//
+// A suffix rather than a refusal, because by admission time the host has already said yes and
+// bouncing them for a name clash would waste that decision. Starts at -2, because the person
+// already here is the unnumbered one. Not `uniqueName`: that is filename-shaped (it splits on the
+// last dot, which no name can contain) and has no idea about NAME_RE's 24-character cap, which is
+// why the BASE is trimmed to make room for the suffix rather than the suffix being dropped.
+// `name: null` means genuinely exhausted, and the caller must refuse — failing open here would put
+// two people in the roster under one `[Name]:`, which is the one thing attribution cannot survive.
+export const JOIN_NAME_TRIES = 99;
+export function resolveJoinName(wanted, taken = [], max = JOIN_NAME_TRIES) {
+  const base = String(wanted ?? '');
+  if (!nameTaken(base, taken)) return { name: base, renamed: false };
+  for (let i = 2; i <= max; i++) {
+    const suffix = `-${i}`;
+    const name = `${base.slice(0, 24 - suffix.length).trimEnd()}${suffix}`;
+    if (validName(name) && !nameTaken(name, taken)) return { name, renamed: true };
+  }
+  return { name: null, renamed: false };
+}
+
 // ------------------------------------- v0.15: source vs installed client command ----
 
 // What a friend types to run the client: `claude-jam join …` when the daemon itself is running out of
@@ -685,7 +714,10 @@ export function popupPrompt(kind, name, ip, detail) {
   // v0.17 P2: the fourth kind. `detail` is already "answer 2: Yes, and don't ask again", built
   // from the options the daemon read off the real screen — never from anything the guest typed.
   if (kind === 'permission') return `⏎ ${name} wants to ${detail}`;
-  return `⚑ ${name} wants to join${ip ? ` (${ip})` : ''}`;
+  // v0.22.1: a knock's `detail` is the name-clash note, and it exists because the clash is no
+  // longer refused at hello (resolveJoinName says why). Without it an unauthenticated stranger
+  // could make this line read the HOST's own name with nothing saying so.
+  return `⚑ ${name} wants to join${ip ? ` (${ip})` : ''}${detail ? ` — ${detail}` : ''}`;
 }
 
 // The jam session's status line while knocks are pending; null means "put the host's own

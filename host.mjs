@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, scrubRowJoins, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, scrubSecrets, clientCommand,
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, nameTaken, resolveJoinName, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, scrubRowJoins, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, scrubSecrets, clientCommand,
   // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
   respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
   // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
@@ -1844,7 +1844,10 @@ function pendingFrame() {
   return {
     t: 'pending',
     items: [
-      ...[...pending.values()].map((p) => ({ kind: 'knock', name: p.name, ip: p.ip, expires: p.expires })),
+      // `detail` carries the v0.22.1 name-clash note, so the approval bar shows it (approvalBar
+      // passes detail straight to popupPrompt) as well as the tmux popup.
+      ...[...pending.values()].map((p) => ({ kind: 'knock', name: p.name, ip: p.ip,
+        detail: p.detail || '', expires: p.expires })),
       ...Object.entries(ladders).flatMap(([kind, L]) => [...L.requests.values()].map((r) => ({
         kind, name: r.name, detail: r.detail || '', size: r.size, expires: r.expires,
       }))),
@@ -2301,11 +2304,26 @@ function admit(name, ok) {
   clearTimeout(p.timer);
   pending.delete(sock);
   if (ok) {
-    admitSocket(sock, p.name, false, p.local === true, 'knock');
+    // v0.22.1: the name clash is settled HERE, not at hello — telling an unauthenticated caller
+    // "that name is taken" was a roster oracle (see onSocket). The host has already said yes, so a
+    // clash is disambiguated rather than bounced, and the person is told the name they got.
+    const r = resolveJoinName(p.name, names());
+    if (!r.name) {
+      send(sock, { t: 'knock', id: nextId++, ts: Date.now(), state: 'denied' });
+      sock.close(4409, 'name taken');
+      pumpPopups();
+      return `too many people here are already called ${p.name} — they could not be given a name`;
+    }
+    admitSocket(sock, r.name, false, p.local === true, 'knock');
+    if (r.renamed) {
+      send(sock, { t: 'sys', id: nextId++, ts: Date.now(),
+        text: `"${p.name}" was already taken here, so you joined as ${r.name} — that is the name `
+          + 'your messages are attributed to' });
+    }
     // The mirror wish rode in on the hello that knocked; a client whose default view is the
     // mirror (v0.14) must not have to ask again after being let in.
     if (p.mirror) setMirror(sock, true);
-    console.log(`[admit] ${p.name} accepted`);
+    console.log(`[admit] ${p.name} accepted${r.renamed ? ` as ${r.name}` : ''}`);
   } else {
     send(sock, { t: 'knock', id: nextId++, ts: Date.now(), state: 'denied' });
     sock.close(4403, 'denied');
@@ -2590,14 +2608,29 @@ function onSocket(ws, req) {
         console.log(`[knock] ${c.name} from ${ip} refused: invite-only`);
         return ws.close(4405, 'invite only');
       }
-      // Attribution is by name, and a knocker's name is reserved while it waits.
-      if (nameTaken(c.name, [...names(), ...[...pending.values()].map((p) => p.name)])) {
-        sendError(ws, `the name "${c.name}" is already taken here`);
-        return ws.close(4409, 'name taken');
-      }
+      // v0.22.1: AUTHENTICATE FIRST, THEN ANSWER ANYTHING ABOUT THE ROSTER.
+      //
+      // The name check used to run here, above the admission decision, so an unauthenticated
+      // hello naming somebody already present was refused `the name "X" is already taken here`
+      // and closed 4409. That is an oracle: measured 2026-08-30, a stranger with no token and no
+      // invite could enumerate the whole roster name by name, unlimited — the close happens above
+      // `pending`, so MAX_PENDING never applies and every attempt is a fresh socket. It
+      // contradicted what v0.34 and the knock design both promise, and what is otherwise true: a
+      // waiting knocker holds exactly one `{state:'pending'}` frame and learns nothing else.
+      //
+      // So the clash is answered only to somebody who has proved they belong here. A token or
+      // invite holder is told at once — the join UX is unchanged for every legitimate guest. A
+      // knocker has nothing to authenticate with yet, so the collision is settled at ADMISSION
+      // instead (see admit(), which auto-disambiguates and tells them the name they got).
+      //
       // `hello {mirror:true}` starts a client straight in mirror mode; the runtime
       // {t:'mirror'} frame (F2 / `/mirror`) is the same switch.
       if (c.admit === 'token') {
+        // Attribution is by name, and two live participants cannot share one.
+        if (nameTaken(c.name, heldNames())) {
+          sendError(ws, `the name "${c.name}" is already taken here`);
+          return ws.close(4409, 'name taken');
+        }
         admitSocket(ws, c.name, c.host, local, c.host ? 'host' : 'token');
         if (m.mirror === true) setMirror(ws, true);
         return;
@@ -2612,10 +2645,16 @@ function onSocket(ws, req) {
         ws.close(4408, 'knock expired');
         pumpPopups();
       }, KNOCK_TTL);
-      pending.set(ws, { name: c.name, ip, local, timer, expires: Date.now() + KNOCK_TTL, mirror: m.mirror === true });
+      // The clash is not refused any more, so it has to be SAID — to the host, on the frame they
+      // approve from. Otherwise a stranger could make the approval bar read the host's own name
+      // with nothing to show it was not them. The knocker is told nothing either way.
+      const clash = nameTaken(c.name, heldNames())
+        ? `"${c.name}" is already here, so they will join under another name` : '';
+      pending.set(ws, { name: c.name, ip, local, timer, expires: Date.now() + KNOCK_TTL,
+        mirror: m.mirror === true, detail: clash });
       send(ws, { t: 'knock', id: nextId++, ts: Date.now(), state: 'pending' });
-      sendHosts({ t: 'knock', name: c.name, ip });
-      console.log(`[knock] ${c.name} from ${ip} — /accept ${c.name} | /deny ${c.name}`);
+      sendHosts({ t: 'knock', name: c.name, ip, detail: clash });
+      console.log(`[knock] ${c.name} from ${ip}${clash ? ` (${clash})` : ''} — /accept ${c.name} | /deny ${c.name}`);
       pumpPopups();
       return;
     }

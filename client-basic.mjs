@@ -364,7 +364,7 @@ function render(ev) {
       if (ev.state === 'denied') { emit({ glyph: '!', glyphColor: C.err, text: 'the host denied your request', textColor: C.err }); return process.exit(1); }
       if (ev.state === 'expired') { emit({ glyph: '!', glyphColor: C.err, text: 'nobody approved your request in time', textColor: C.err }); return process.exit(1); }
       armKnock(ev.name); // v0.25: the slow low sound, and one repeat if nobody answers
-      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
+      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''}${ev.detail ? ` — ${ev.detail}` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
     }
     // v0.14: a guest wants to run one of claude's commands (host clients only).
     case 'cmdreq':

@@ -401,7 +401,12 @@ mint fresh ones, or use `--funnel`, whose hostname never changes.
 Rotating a token (`/token new` / `set` / `off`) never disconnects anyone already in — the token
 is checked at join time only. A *wrong* token knocks, so rotating strands nobody. Knocks expire
 after 2 minutes, at most 10 wait at once, and two live participants can never share a name
-(attribution is by name). A knock — and every other request on the ladder — raises a one-row
+(attribution is by name) — but **when you are told about a clash depends on whether you have
+authenticated**. A token or invite holder is refused at once, by name. A knocker is not told at
+all: nothing about the roster is answered before the caller has proved they belong here, because
+that refusal was a way to enumerate who is in a jam. Their clash is settled when the host lets
+them in — they join as `Dana-2` and are told so, and the host's approval bar says the name was
+already in use. A knock — and every other request on the ladder — raises a one-row
 **approval bar** just above the host's status row: `⚑ Dana wants to join (100.86.8.97) ·
 [a]ccept [d]eny [i]gnore · 2:00`, counting down to that request's own expiry, with `+N more`
 when several wait. One key answers it, and only while the input line is empty: the first
