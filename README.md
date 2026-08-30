@@ -348,8 +348,12 @@ claude-jam host --no-announce    # run normally, say nothing on the network
 `/menu → Access → Announce on the network` flips it while the jam runs, and the row shows
 whether the LAN is actually being told — not merely whether it was asked for. Tunnels are
 never advertised: mDNS is link-local by design, and a tunnel exists for people who are not
-here. A machine with no mDNS tool skips discovery with one line naming the fix; everything
-else works exactly as before.
+here. A machine with no mDNS tool still **hosts** normally — one line names the fix and nothing
+else about the jam changes — while `claude-jam find` **refuses** rather than reporting an empty
+network, because "nobody is hosting" and "this machine cannot look" are different answers. On
+**Linux** there is normally no `dns-sd` (it is Apple's CLI; the avahi-native path was deliberately
+not built), so discovery is unsupported there unless `avahi-utils` is installed, which provides a
+compatible one. Everything else about hosting and joining from Linux is unaffected.
 
 ## Access: token, knock, invite-only, tunnel, funnel
 
