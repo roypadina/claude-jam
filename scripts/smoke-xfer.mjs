@@ -179,7 +179,7 @@ await step('approved: the guest gets the real JSONL byte for byte, minus our tok
     await host.want('exportreq', (f) => f.t === 'exportreq' && f.name === GUEST);
     host.send({ t: 'exportok', op: 'allow', name: GUEST });
     const got = await until('the transfer to land', () => guest.saved[had], 30000);
-    const want = Buffer.from(stripTokenBlock(fs.readFileSync(jsonl, 'utf8'), token, HOST_KEY), 'utf8');
+    const want = Buffer.from(stripTokenBlock(fs.readFileSync(jsonl, 'utf8'), { token, hostKey: HOST_KEY }), 'utf8');
     ok = sha(got.data) === sha(want);
     console.log(`      attempt ${attempt}: ${got.file} ${humanBytes(got.data.length)} sha ${sha(got.data).slice(0, 16)} vs ${sha(want).slice(0, 16)}${ok ? ' ✓' : ' (file grew mid-export, retrying)'}`);
     if (!ok) continue;
