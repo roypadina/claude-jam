@@ -108,6 +108,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, PS_PLAY_WAV,
   WIN_MEDIA_SOUNDS, WIN_BEEPS, winBeepScript, winSoundPlan,
   terminalSupport, WINDOWS_TERMINAL_HINT, canAttachTmux, NO_TMUX_ATTACH,
+  windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -4452,6 +4453,71 @@ test('v0.32 W1 the keys Windows Terminal sends decode to the actions they mean',
   assert.deepEqual(extractKeys('\r'), { keys: [], text: '\r', hold: '' });
   // A chunk that arrives split mid-sequence is held, not typed — the same rule as everywhere.
   assert.deepEqual(extractKeys('\x1b[1;2'), { keys: [], text: '', hold: '\x1b[1;2' });
+});
+
+test('v0.32 W1 windowsCli: join runs, everything host-side is refused WITH the reason', () => {
+  // A link, or a URL plus flags, is the whole Windows command line — and the arguments after
+  // `join` reach the client untouched, because the renderers parse them themselves.
+  assert.deepEqual(windowsCli(['join', 'cjam1_abc']), { action: 'join', code: 0, argv: ['cjam1_abc'] });
+  assert.deepEqual(windowsCli(['join', 'ws://10.0.0.2:7777', '--name', 'Dana', '--basic']),
+    { action: 'join', code: 0, argv: ['ws://10.0.0.2:7777', '--name', 'Dana', '--basic'] });
+  // Bare `claude-jam` is the launcher MENU on POSIX; here it is the usage, and it exits 0
+  // because asking is not a mistake.
+  assert.deepEqual(windowsCli([]), { action: 'usage', code: 0 });
+  for (const h of WIN_HELP_CMDS) assert.deepEqual(windowsCli([h]), { action: 'usage', code: 0 }, h);
+  // An unknown word exits 2, exactly as the launcher's `*) usage 2` does.
+  assert.equal(windowsCli(['nonsense']).code, 2);
+  assert.equal(windowsCli(['nonsense']).action, 'usage');
+  // Every host-side command is refused, names ITSELF, and carries the route out (WSL2) — a bare
+  // "not supported" would leave somebody with a Windows machine and no idea what to do next.
+  for (const cmd of WIN_HOST_SIDE_CMDS) {
+    const r = windowsCli([cmd, '--port', '7777']);
+    assert.equal(r.action, 'refuse', cmd);
+    assert.equal(r.code, 2, cmd);
+    assert.ok(r.why.includes(`claude-jam ${cmd}`), r.why);
+    assert.match(r.why, /WSL2/);
+    assert.match(r.why, /tmux/);
+  }
+  // `claude-jam join` with nothing after it is the network picker on POSIX. It is refused rather
+  // than half-built, and the refusal says what to type instead.
+  const bare = windowsCli(['join']);
+  assert.equal(bare.action, 'refuse');
+  assert.match(bare.why, /invite link/);
+  assert.ok(!/WSL2/.test(bare.why), 'a guest joining does not need to hear about WSL2');
+  // The usage text is TRUE about this platform: client only, Windows Terminal, no F3 — and it
+  // never promises a menu, a host or a session list.
+  const usage = WIN_USAGE.join('\n');
+  assert.match(usage, /claude-jam join <invite-link>/);
+  assert.match(usage, /CLIENT/);
+  assert.match(usage, /Windows Terminal/);
+  assert.match(usage, /WSL2/);
+  assert.match(usage, /F3/);
+  assert.match(usage, /\/paste/);
+  for (const gone of ['claude-jam host ', 'claude-jam sessions', 'claude-jam invite ', 'the launcher menu:']) {
+    assert.ok(!usage.includes(gone), `the Windows usage offers ${gone}`);
+  }
+});
+
+// A lint, not a behaviour test: the launcher is the one dispatcher, and this file must not fall
+// behind it. When somebody adds `claude-jam mirror` to the bash `case`, a Windows user typing it
+// would otherwise get the generic usage instead of a sentence saying why it is not there.
+test('v0.32 W1 windowsCli classifies every subcommand the launcher dispatches', () => {
+  const launcher = fs.readFileSync(new URL('./claude-jam', import.meta.url), 'utf8');
+  const body = launcher.slice(launcher.indexOf('case "$cmd" in'));
+  // The label alphabet only — a `[^)]*` here matches across newlines and swallows the comment
+  // block above each case, which is how the first run of this lint "found" a subcommand called
+  // "host # v0.33: share the session…".
+  const labels = [...body.matchAll(/^ {2}([a-z|_-]+)\)/gm)].map((m) => m[1]);
+  const cmds = labels.flatMap((l) => l.split('|')).map((c) => c.trim()).filter((c) => c && c !== '*');
+  assert.ok(cmds.length >= 14, cmds.join(' ')); // it had 16 at v0.34; a parse that finds none must fail
+  assert.ok(cmds.includes('host') && cmds.includes('join'), cmds.join(' '));
+  const known = new Set([WIN_JOIN_CMD, ...WIN_HOST_SIDE_CMDS, ...WIN_HELP_CMDS]);
+  for (const c of cmds) {
+    assert.ok(known.has(c), `the launcher dispatches \`${c}\` and windowsCli has never heard of it`);
+    // And it must not answer with the generic "unknown word" usage for something that exists.
+    const r = windowsCli([c, 'x']);
+    assert.ok(r.action !== 'usage' || r.code === 0, `\`${c}\` falls through to usage 2`);
+  }
 });
 
 // The one Windows-ONLY test in the suite, and it is here because it is the only way this
