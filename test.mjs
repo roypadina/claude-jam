@@ -6955,7 +6955,11 @@ test('readHostKey: only a well-formed 0600 file is a key, everything else is nul
     const good = path.join(dir, HOST_KEY_FILE);
     secureWrite(good, `${KEY_A}\n`); // exactly what the daemon writes: hex plus a newline
     assert.equal(readHostKey(good), KEY_A);
-    assert.equal(fs.statSync(good).mode & 0o777, 0o600); // a credential, not a config file
+    // A credential, not a config file — POSIX only. NTFS has no mode bit that means this, so on
+    // the Windows leg secureWrite's port is an ACL and `mode & 0o777` reads 0o666 for any writable
+    // file; asserting 0o600 there tests the emulation, not the product. The Windows guarantee is
+    // the win32-only ACL test above, which reads the real icacls back.
+    if (process.platform !== 'win32') assert.equal(fs.statSync(good).mode & 0o777, 0o600);
     const short = path.join(dir, 'short.key');
     secureWrite(short, 'a'.repeat(30));
     assert.equal(readHostKey(short), null); // a half-written file is not a key
@@ -6971,7 +6975,10 @@ test('readHostKey: only a well-formed 0600 file is a key, everything else is nul
 test('reattachLines: the raw host command carries the key FILE, never the key', () => {
   const lines = reattachLines({ tmux: 'jamtest', port: 7799, name: 'Roy', token: 'tok',
     clientCmd: 'claude-jam join', state: '/tmp/claude-jam-7799' }).join('\n');
-  assert.match(lines, /--host --host-key-file \/tmp\/claude-jam-7799\/host\.key/);
+  // Through path.join, never a POSIX literal: hostKeyPath() joins, so on the Windows leg this
+  // reads `\tmp\claude-jam-7799\host.key` and a literal would fail for the separator alone —
+  // which teaches everybody to ignore the red (AGENTS.md §2).
+  assert.ok(lines.includes(`--host --host-key-file ${path.join('/tmp/claude-jam-7799', HOST_KEY_FILE)}`), lines);
   assert.equal(lines.includes(KEY_A), false);
   // No state to name (a row off `claude-jam sessions` that never had one): the flag is left off
   // rather than pointed at a path that is not there.
