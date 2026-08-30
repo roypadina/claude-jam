@@ -106,6 +106,16 @@ Two consequences for anything you write for either:
   first run.
 - **A path assertion must go through `path.join`**, never a POSIX literal, or it fails on the
   Windows leg for the separator alone and teaches everyone to ignore the red.
+- **A check has THREE outcomes, and they must be impossible to confuse.** PASS = exercised and
+  right. FAIL = exercised and **wrong**, and the only one that exits non-zero. NOT EXERCISED = a
+  precondition was unmet, *named*, and never an exit code. The vacuity audit's lesson inverted: a
+  check that fails for the wrong reason trains everyone to ignore a red gate, exactly as a check
+  that passes for the wrong reason buys false confidence. Both `scripts/check-*.mjs` that can skip
+  use one `Skip` error for this, so a precondition discovered mid-setup still reports honestly.
+  Check preconditions *before* the attempt rather than reading them out of somebody's error text —
+  the first Linux-leg CI run went red on macOS and Windows for two of these: a plant guarded on
+  "sudo works" when the real precondition was "sudo works AND the second uid can traverse the
+  parent", and an `exit 2` asserted on a platform whose gate cannot produce one.
 - **Never index a plain object with a caller's string.** `Object.hasOwn(MAP, k) ? MAP[k] : null`.
   A bare index walks the prototype, so `MAP['__proto__']` is `Object.prototype` — truthy, so a
   `?? null` does not save you — and the junk throws further down. Four lookups in the sound path had

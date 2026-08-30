@@ -33,14 +33,84 @@ const HOST = path.join(ROOT, 'host.mjs');
 const IS_WINDOWS = process.platform === 'win32';
 const UID = typeof process.getuid === 'function' ? process.getuid() : null;
 const KEY = 'a'.repeat(64); // a well-formed key, so `readHostKey` would have accepted it
+// Never hardcode the version in a check — it drifts the moment a release does not happen, and a
+// wrong version in a security check's own banner is the least trustworthy thing it could print.
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+
+// THREE OUTCOMES, and they are structurally distinct because confusing them is this file's whole
+// failure mode. The vacuity audit's lesson was that a check passing for the wrong reason buys false
+// confidence; a check FAILING for the wrong reason is just as bad, because it teaches everyone to
+// ignore a red gate. So:
+//
+//   PASS           the gate was exercised and got it right.
+//   FAIL           the gate was exercised and got it WRONG. The only outcome that exits non-zero.
+//   NOT EXERCISED  a precondition was unmet, and it is named. Never an exit code.
+//
+// `skip()` is how a check declares an unmet precondition, and it works from anywhere in the body —
+// including the middle of setup, which is the second bug the first CI run found: the two-uid plant
+// failed on the macOS runner (`nobody` cannot create inside a per-user 0700 `$TMPDIR`) and was
+// reported as the GATE failing. Setup that cannot be built is a missing precondition, not a defect.
+class Skip extends Error {}
+const skip = (why) => { throw new Skip(why); };
 
 let failed = 0;
 let skipped = 0;
 const check = (name, fn) => {
-  try { fn(); console.log(`PASS  ${name}`); } catch (e) { failed++; console.log(`FAIL  ${name}: ${e.message}`); }
+  try {
+    fn();
+    console.log(`PASS  ${name}`);
+  } catch (e) {
+    if (e instanceof Skip) { skipped++; console.log(`NOT EXERCISED  ${name} — ${e.message}`); return; }
+    failed++;
+    console.log(`FAIL  ${name}: ${e.message}`);
+  }
 };
-const notExercised = (name, why) => { skipped++; console.log(`NOT EXERCISED  ${name} — ${why}`); };
 const ok = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+// --------------------------------------------------------------------------- preconditions ----
+// Each one is a QUESTION asked before the attempt, so an unmet precondition is reported as itself
+// rather than discovered from somebody's error text.
+
+// Does this platform honour POSIX owner and mode at all? Windows has no getuid() and a synthesised
+// `Stats.mode` (every writable file reads 0o666), so `pathPrivacy` skips both questions there by
+// design and only its TYPE check runs — restrictToUser's NTFS ACL is the mechanism instead. A 0777
+// directory is therefore NOT refused on Windows, host.mjs runs on past the gate, and asserting
+// exit 2 there asserts something the platform cannot do.
+const POSIX_MODES = !IS_WINDOWS && UID !== null;
+const NO_POSIX_MODES = 'this platform has no POSIX owner/mode semantics — pathPrivacy skips both '
+  + 'questions here by design (only its type check runs) and restrictToUser\'s NTFS ACL is the '
+  + 'mechanism, so there is no mode for the gate to refuse';
+
+// A directory a DIFFERENT uid can both create in and traverse into. `/tmp` is mode 1777 on Linux
+// and on macOS (where it is a symlink to /private/tmp, and /private is 0755, so the whole path is
+// searchable). `os.tmpdir()` is NOT usable for this on macOS: it is a per-user 0700 directory, so a
+// second uid cannot even enter it — which is exactly what broke on the macOS CI runner.
+const sharedBase = () => {
+  for (const d of [os.tmpdir(), '/tmp']) {
+    try { if (fs.statSync(d).mode & 0o002) return d; } catch { /* not there, or not ours to ask */ }
+  }
+  return null;
+};
+
+// Passwordless sudo, and `-n` so this can NEVER sit at a password prompt. A CI runner has it; a
+// developer's machine should not.
+let sudoAnswer = null;
+const sudoOk = () => {
+  if (sudoAnswer === null) {
+    try {
+      sudoAnswer = spawnSync('sudo', ['-n', 'true'], { encoding: 'utf8', timeout: 10_000 }).status === 0;
+    } catch { sudoAnswer = false; }
+  }
+  return sudoAnswer;
+};
+
+// Can this process make a DIRECTORY symlink? Windows needs SeCreateSymbolicLinkPrivilege (Developer
+// Mode, or an elevated shell) and refuses with EPERM otherwise. That is a missing precondition, not
+// a gate that failed to refuse — and the type check it would exercise runs on every platform.
+const canSymlinkDir = (parent) => {
+  const at = path.join(parent, 'symlink-probe');
+  try { fs.symlinkSync(parent, at, 'dir'); fs.unlinkSync(at); return null; } catch (e) { return e.code || e.message; }
+};
 
 // The real `host.mjs`, with a state dir of our choosing and nothing else.
 //
@@ -71,28 +141,30 @@ const nothingWritten = (dir, allowed) => {
   for (const f of STATE_FILES) ok(!fs.existsSync(path.join(dir, f)), `${f} landed in a refused state dir`);
 };
 
-console.log(`--- 0.23.3 state-dir privacy gate, on ${process.platform} (uid ${UID ?? 'n/a'}) ---`);
+console.log(`--- claude-jam ${VERSION} state-dir privacy gate, on ${process.platform} `
+  + `(uid ${UID ?? 'n/a — no POSIX identity'}) ---`);
 
 // ---------------------------------------------------------------------------------------------
 // 0. The fact the finding rests on, measured rather than cited. TESTING.md named `os.tmpdir()`
 //    returning `$TMPDIR || '/tmp'` and `/tmp` being mode 1777 as the two facts nobody had checked.
+// The banner must not be able to become a FOURTH outcome. A bare `statSync` here would take the
+// whole script down with a stack trace on any machine whose `os.tmpdir()` cannot be inspected —
+// neither a PASS, a FAIL nor a NOT EXERCISED, and no line saying which check never ran.
 const TMP = os.tmpdir();
-const tmpSt = fs.statSync(TMP);
-const tmpMode = (tmpSt.mode & 0o7777).toString(8);
-const worldWritable = !IS_WINDOWS && !!(tmpSt.mode & 0o002);
-console.log(`      os.tmpdir() = ${TMP} · mode ${tmpMode} · uid ${tmpSt.uid} · `
+const tmpSt = (() => { try { return fs.statSync(TMP); } catch (e) { return { err: e.code || e.message }; } })();
+const tmpMode = tmpSt.err ? `unknown (${tmpSt.err})` : (tmpSt.mode & 0o7777).toString(8);
+const worldWritable = !IS_WINDOWS && !tmpSt.err && !!(tmpSt.mode & 0o002);
+console.log(`      os.tmpdir() = ${TMP} · mode ${tmpMode} · uid ${tmpSt.err ? 'unknown' : tmpSt.uid} · `
   + `world-writable: ${worldWritable} · TMPDIR${process.env.TMPDIR ? `=${process.env.TMPDIR}` : ' unset'}`);
 console.log(`      a default jam's state dir here would be ${stateDirFor(TMP, 7777)}`);
-if (process.platform === 'linux') {
-  if (process.env.TMPDIR) {
-    notExercised('the /tmp 1777 exposure', `$TMPDIR is set to ${process.env.TMPDIR}, so this run is not the default shape`);
-  } else {
-    check('Linux: os.tmpdir() really is /tmp, and /tmp really is world-writable — the exposure, measured', () => {
-      ok(TMP === '/tmp', `os.tmpdir() is ${TMP}, not /tmp`);
-      ok(worldWritable, `/tmp is mode ${tmpMode} on this box, so the finding's premise does not hold here`);
-    });
-  }
-}
+check('Linux: os.tmpdir() really is /tmp, and /tmp really is world-writable — the exposure, measured', () => {
+  if (process.platform !== 'linux') skip(`this is ${process.platform}; the exposure is Linux's (and WSL2's) `
+    + `$TMPDIR, and here os.tmpdir() is ${TMP} at mode ${tmpMode}`);
+  if (process.env.TMPDIR) skip(`$TMPDIR is set to ${process.env.TMPDIR}, so this run is not the default shape `
+    + 'the finding is about');
+  ok(TMP === '/tmp', `os.tmpdir() is ${TMP}, not /tmp`);
+  ok(worldWritable, `/tmp is mode ${tmpMode} on this box, so the finding's premise does not hold here`);
+});
 
 // ---------------------------------------------------------------------------------------------
 // 1. THE FALSE POSITIVE, which is the one nobody runs. A gate that refuses every Linux host is a
@@ -119,28 +191,35 @@ check('the false positive: an ordinary jam under a world-writable parent is NOT 
 //    exactly as a second uid would have left them, which is how 0.23.2 was reproduced. Check 4
 //    is the two-uid version.
 check('a world-writable state dir with a planted host.key is refused, and nothing is written into it', () => {
+  if (!POSIX_MODES) skip(NO_POSIX_MODES);
   const parent = fs.mkdtempSync(path.join(TMP, 'jam-attack-'));
   try {
     const state = stateDirFor(parent, 7999);
     fs.mkdirSync(state, { mode: 0o777 });
-    if (!IS_WINDOWS) fs.chmodSync(state, 0o777); // mkdirSync honours the umask; the plant does not
+    fs.chmodSync(state, 0o777); // mkdirSync honours the umask; the plant does not
     fs.writeFileSync(path.join(state, HOST_KEY_FILE), `${KEY}\n`);
     const { status, out } = launch(state, 7999);
     ok(status === 2, `exit status ${status}, wanted 2\n${out}`);
     ok(/refusing to use this jam's state dir/.test(out), `the refusal is not the privacy one:\n${out}`);
-    if (!IS_WINDOWS) ok(/mode is 777/.test(out), `the refusal did not name the condition that failed:\n${out}`);
+    ok(/mode is 777/.test(out), `the refusal did not name the condition that failed:\n${out}`);
     ok(!out.includes(KEY), 'the refusal quoted the planted key');
     nothingWritten(state, [HOST_KEY_FILE]);
   } finally { fs.rmSync(parent, { recursive: true, force: true }); }
 });
 
+// The TYPE check is the one branch of pathPrivacy that runs on every platform, Windows included —
+// a symlink is a symlink — so this is not gated on POSIX modes. It IS gated on being able to make
+// one, which Windows only allows with SeCreateSymbolicLinkPrivilege.
 check('a symlink where the state dir belongs is refused, and its target is untouched', () => {
   const parent = fs.mkdtempSync(path.join(TMP, 'jam-link-'));
   try {
+    const why = canSymlinkDir(parent);
+    if (why) skip(`this process cannot create a directory symlink (${why}) — on Windows that needs `
+      + 'SeCreateSymbolicLinkPrivilege (Developer Mode or an elevated shell)');
     const real = path.join(parent, 'somebody-elses');
     fs.mkdirSync(real, { mode: 0o700 });
     const state = stateDirFor(parent, 7998);
-    try { fs.symlinkSync(real, state, 'dir'); } catch (e) { throw new Error(`no symlinks here (${e.code})`); }
+    fs.symlinkSync(real, state, 'dir');
     const { status, out } = launch(state, 7998);
     ok(status === 2, `exit status ${status}, wanted 2\n${out}`);
     ok(/not a directory/.test(out), `the refusal did not name the type condition:\n${out}`);
@@ -154,12 +233,10 @@ check('a symlink where the state dir belongs is refused, and its target is untou
 //    unreachable and this says so instead of reporting a pass it did not earn. A GitHub
 //    `ubuntu-latest` runner is the user `runner`, not root, so this DOES run there; inside a
 //    container it usually does not.
-if (IS_WINDOWS) {
-  notExercised('EACCES on an unsearchable parent', 'no POSIX mode bits to take a search right away with');
-} else if (UID === 0) {
-  notExercised('EACCES on an unsearchable parent', 'running as root, so every mode is searchable and the branch cannot be reached');
-} else {
-  check('a parent directory that cannot be stat\'ed is refused, not assumed private', () => {
+check('a parent directory that cannot be stat\'ed is refused, not assumed private', () => {
+    if (!POSIX_MODES) skip('no POSIX mode bits, so a search right cannot be taken away here');
+    if (UID === 0) skip('running as ROOT, so every mode is searchable and this branch cannot be '
+      + 'reached at all — a GitHub ubuntu-latest runner is the non-root user `runner`, where it does run');
     const parent = fs.mkdtempSync(path.join(TMP, 'jam-eacces-'));
     const locked = path.join(parent, 'locked');
     try {
@@ -172,49 +249,58 @@ if (IS_WINDOWS) {
       try { fs.chmodSync(locked, 0o700); } catch { /* it may never have been made */ }
       fs.rmSync(parent, { recursive: true, force: true });
     }
-  });
-}
+});
 
 // ---------------------------------------------------------------------------------------------
 // 4. THE ONE macOS CANNOT REACH: a state dir belonging to a SECOND REAL UID. Everything above
 //    plants as one uid, which is how the finding was reproduced and is not the same thing.
 //
-//    It needs a second uid, so it needs passwordless sudo — a CI runner has it, a developer's
-//    machine should not, and this must never prompt for a password. `sudo -n` is the whole test.
+//    THE PRECONDITIONS, and getting these wrong is what turned the first CI run red on macOS:
+//      - POSIX uids at all (Windows has none);
+//      - passwordless sudo, probed with `sudo -n` so this can never sit at a password prompt;
+//      - **a parent the second uid can create in AND traverse into.** This is the one that bit.
+//        `os.tmpdir()` on macOS is a per-user `0700` directory, so `nobody` cannot enter it however
+//        the leaf is chmod'ed — the plant failed with `mkdir: Permission denied` and was reported as
+//        the GATE failing. Docker passed only because there `os.tmpdir()` IS `/tmp` at 1777. So the
+//        base is `sharedBase()`, and `/tmp` is 1777 on macOS too (via /private/tmp), which means
+//        this branch now actually RUNS on the macOS runner rather than being skipped there.
+//
 //    The mode is 0700 on purpose: the OWNER branch is the one an attacker with a tidy umask
 //    reaches, and a 0777 directory would be refused by the mode branch before owner is asked.
 const HELPER = 'nobody';
-const sudoOk = !IS_WINDOWS && UID !== null
-  && spawnSync('sudo', ['-n', 'true'], { encoding: 'utf8', timeout: 10_000 }).status === 0;
-if (IS_WINDOWS) {
-  notExercised('a state dir owned by another uid', 'no POSIX uids; restrictToUser\'s ACL is the mechanism there');
-} else if (!sudoOk) {
-  notExercised('a state dir owned by another uid',
-    'no passwordless sudo, so this run could not become a second user — the plant above is one uid, '
-    + 'which is exactly the gap TESTING.md names');
-} else {
-  check(`a state dir created by ANOTHER UID (${HELPER}) is refused even at mode 0700`, () => {
-    // Under a sticky /tmp only the owner may unlink, so the cleanup needs sudo too — and it is by
-    // exact path, one command, never a pattern (AGENTS.md §0).
-    const parent = fs.mkdtempSync(path.join(TMP, 'jam-twouid-'));
-    const state = stateDirFor(parent, 7997);
-    try {
-      fs.chmodSync(parent, 0o777); // so the helper uid can create inside it at all
-      const mk = spawnSync('sudo', ['-n', '-u', HELPER, 'mkdir', '-m', '700', state], { encoding: 'utf8', timeout: 10_000 });
-      ok(mk.status === 0, `could not create the directory as ${HELPER}: ${(mk.stderr || '').trim()}`);
-      const st = fs.lstatSync(state);
-      ok(st.uid !== UID, `the directory is uid ${st.uid} and we are ${UID} — the plant did not change owner`);
-      ok((st.mode & 0o777) === 0o700, `it is mode ${(st.mode & 0o777).toString(8)}, so the MODE branch would fire, not the owner one`);
-      const { status, out } = launch(state, 7997);
-      ok(status === 2, `exit status ${status}, wanted 2\n${out}`);
-      ok(new RegExp(`owned by uid ${st.uid}`).test(out), `the refusal did not name the owner condition:\n${out}`);
-      console.log(`      two real uids: ${HELPER} is uid ${st.uid}, this process is uid ${UID}`);
-    } finally {
-      spawnSync('sudo', ['-n', 'rm', '-rf', state], { encoding: 'utf8', timeout: 10_000 });
-      fs.rmSync(parent, { recursive: true, force: true });
-    }
-  });
-}
+check(`a state dir created by ANOTHER UID (${HELPER}) is refused even at mode 0700`, () => {
+  if (!POSIX_MODES) skip('no POSIX uids here, so there is no second uid to be — restrictToUser\'s '
+    + 'NTFS ACL is the mechanism that replaces this');
+  if (!sudoOk()) skip('no passwordless sudo, so this run cannot become a second user. The one-uid '
+    + 'plant above is NOT the same experiment — see TESTING.md');
+  const base = sharedBase();
+  if (!base) skip('no world-writable directory another uid could create in and traverse into, so '
+    + 'the plant cannot be built where this process can also reach it');
+
+  // Under a sticky /tmp only the owner may unlink, so the cleanup needs sudo too — and it is by
+  // exact path, one command, never a pattern (AGENTS.md §0).
+  const parent = fs.mkdtempSync(path.join(base, 'jam-twouid-'));
+  const state = stateDirFor(parent, 7997);
+  try {
+    fs.chmodSync(parent, 0o777); // so the helper uid can create inside it at all
+    const mk = spawnSync('sudo', ['-n', '-u', HELPER, 'mkdir', '-m', '700', state], { encoding: 'utf8', timeout: 10_000 });
+    // Still a SKIP and not a FAIL: a plant that cannot be built has not asked the gate anything.
+    if (mk.status !== 0) skip(`could not create the directory as ${HELPER} under ${base} `
+      + `(${(mk.stderr || '').trim() || `exit ${mk.status}`}), so the gate was never asked`);
+    const st = fs.lstatSync(state);
+    if (st.uid === UID) skip(`the plant landed as uid ${UID}, this process's own — sudo did not `
+      + `change user, so this would test the same thing as the one-uid check above`);
+    ok((st.mode & 0o777) === 0o700, `it is mode ${(st.mode & 0o777).toString(8)}, so the MODE branch would fire, not the owner one`);
+    // Everything above was setup. From here a wrong answer is the GATE being wrong.
+    const { status, out } = launch(state, 7997);
+    ok(status === 2, `exit status ${status}, wanted 2\n${out}`);
+    ok(new RegExp(`owned by uid ${st.uid}`).test(out), `the refusal did not name the owner condition:\n${out}`);
+    console.log(`      two real uids: ${HELPER} is uid ${st.uid}, this process is uid ${UID}, under ${base}`);
+  } finally {
+    spawnSync('sudo', ['-n', 'rm', '-rf', state], { encoding: 'utf8', timeout: 10_000 });
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
 
 console.log(`\n--- RESULT --- ${failed ? `${failed} check(s) FAILED` : 'all checks passed'}`
   + `${skipped ? `, ${skipped} branch(es) NOT EXERCISED (see above)` : ''}`);

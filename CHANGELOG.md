@@ -30,6 +30,44 @@ test cannot see whether the caller *asks* correctly.
   reason and exit non-zero, in both the table and the `--json` shape. *Nobody is hosting* and *this
   machine cannot look* are different answers. On Linux that is not a branch, it is the only branch.
 
+**The first CI run went red on macOS and Windows, and both reds were bugs in the check rather than
+in the gate** — the inverse of the vacuity audit's lesson, and worth naming because it is the same
+mistake: a check that **fails** for the wrong reason trains everyone to ignore a red gate exactly as
+a check that **passes** for the wrong reason buys false confidence. Both are fixed by making the
+three outcomes structurally distinct — PASS (exercised, right), FAIL (exercised, **wrong**, and the
+only one that exits non-zero), NOT EXERCISED (a precondition unmet, and named) — with one `Skip`
+error so a precondition discovered mid-setup still reports as itself.
+
+- **macOS: a setup failure reported as a gate failure.** The two-uid plant was guarded on "does
+  passwordless sudo work", and the runner has it — but the real precondition is *sudo works **and**
+  the second uid can traverse the parent*. `os.tmpdir()` on macOS is a per-user `0700` directory, so
+  `nobody` could not enter it however the leaf was chmod'ed, and `mkdir: Permission denied` was
+  printed as the privacy gate failing. Docker had passed only because there `os.tmpdir()` **is**
+  `/tmp` at `1777`. The plant now goes under a base that is world-writable and traversable, which is
+  `/tmp` on both — so this branch should now **run on the macOS runner** rather than be skipped
+  there (verified: every component of `/private/tmp/…` is `o+x`; the old base was blocked at exactly
+  the `0700` `$TMPDIR`).
+- **Windows: an assertion the platform cannot satisfy.** With no POSIX uid or mode, `pathPrivacy`
+  skips the owner and mode questions by design and only its type check runs — so a `0777` directory
+  is not refused, `host.mjs` runs on to tmux, which does not exist there, and exits 1. The check
+  asserted `exit 2` regardless. It is now gated on POSIX mode semantics and says so, naming
+  `restrictToUser`'s NTFS ACL as the mechanism that replaces it; the symlink check is gated on being
+  able to create a directory symlink (Windows needs `SeCreateSymbolicLinkPrivilege`) while keeping
+  its assertion, because the type branch genuinely does run on every platform.
+- Also: the banner read a hardcoded `0.23.3` while `package.json` said `0.23.2`. Both checks read
+  the version now — a hardcoded version in a security check's own banner is the least trustworthy
+  thing it could print. And the banner's `statSync` is guarded, so an un-inspectable `os.tmpdir()`
+  cannot take the script down with a stack trace, which would be a fourth outcome and no outcome at
+  all.
+
+Re-verified after the fix, 2026-08-30: Linux (non-root + sudo, the runner's shape) **six PASS, zero
+NOT EXERCISED**, the two-uid branch still genuinely asserting; a simulated win32 (no `getuid`,
+`platform` forced) **two PASS, four NOT EXERCISED, zero FAIL, exit 0**; macOS five PASS with the
+two-uid branch skipped for want of passwordless sudo. And the canary re-run on Linux: neutering the
+gate turns **three checks FAIL and none of them into a skip**, script exit 1 — which is the property
+that mattered most about this refactor, since a `skip()` that swallowed a real failure would have
+been a worse bug than either of the two it fixed.
+
 **And it was all RUN on real Linux, not merely committed** — the CI leg cannot be pushed from here,
 so the same thing was run locally: a Debian bookworm container, node 22.23.2, as a **non-root user
 with passwordless sudo**, which is the shape of a GitHub runner and which root would have made two

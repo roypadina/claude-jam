@@ -15,6 +15,7 @@
 // does not exist, so nothing is ever spawned. On the `ubuntu-latest` leg it also runs the NATIVE
 // case, where there genuinely is no dns-sd, and prints what came back.
 //   usage: node scripts/check-discovery-refusal.mjs
+import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -23,10 +24,27 @@ import { DNSSD_MISSING, resolveDnssd } from '../platform.mjs';
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SESSIONS = path.join(ROOT, 'sessions.mjs');
 const NO_TOOL = { ...process.env, JAM_DNSSD: '/nonexistent/claude-jam-check-has-no-dns-sd' };
+// Never hardcode a version in a check: it drifts the moment a release does not happen.
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+
+// Same three outcomes, same words, as check-state-privacy.mjs — these are read side by side in one
+// CI log, so PASS / FAIL / NOT EXERCISED must mean the same thing in both. FAIL is the only one
+// that exits non-zero, and a check that FAILS for the wrong reason trains people to ignore a red
+// gate just as surely as one that PASSES for the wrong reason buys false confidence.
+class Skip extends Error {}
+const skip = (why) => { throw new Skip(why); };
 
 let failed = 0;
+let skipped = 0;
 const check = (name, fn) => {
-  try { fn(); console.log(`PASS  ${name}`); } catch (e) { failed++; console.log(`FAIL  ${name}: ${e.message}`); }
+  try {
+    fn();
+    console.log(`PASS  ${name}`);
+  } catch (e) {
+    if (e instanceof Skip) { skipped++; console.log(`NOT EXERCISED  ${name} — ${e.message}`); return; }
+    failed++;
+    console.log(`FAIL  ${name}: ${e.message}`);
+  }
 };
 const ok = (cond, msg) => { if (!cond) throw new Error(msg); };
 
@@ -36,7 +54,7 @@ const find = (args, env) => {
   return { status: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
 };
 
-console.log(`--- 0.23.3 discovery refusal with no mDNS tool, on ${process.platform} ---`);
+console.log(`--- claude-jam ${VERSION} discovery refusal with no mDNS tool, on ${process.platform} ---`);
 console.log(`      this machine natively: ${JSON.stringify(resolveDnssd())}`);
 
 check('`find` with no dns-sd refuses non-zero, and the refusal says why and how to fix it', () => {
@@ -64,6 +82,10 @@ check('`find --json` refuses in JSON too — ok:false with the reason, never an 
 // a mac has /usr/bin/dns-sd and must keep working, which is the false positive for this check.
 if (process.platform === 'darwin') {
   check('macOS still finds its own dns-sd — the refusal must not fire on a machine that has one', () => {
+    // A mac with no /usr/bin/dns-sd is a machine this check has nothing to say about, not a gate
+    // that got something wrong. Report it as the precondition it is.
+    if (!fs.existsSync('/usr/bin/dns-sd')) skip('this mac has no /usr/bin/dns-sd, so there is no '
+      + '"a machine that HAS one" for the refusal to wrongly fire on');
     const r = resolveDnssd();
     ok(r.ok === true, `resolveDnssd refused on macOS: ${r.why}`);
     ok(r.bin === '/usr/bin/dns-sd', `it resolved to ${r.bin}, not the system one`);
@@ -86,5 +108,6 @@ if (process.platform === 'darwin') {
   }
 }
 
-console.log(`\n--- RESULT --- ${failed ? `${failed} check(s) FAILED` : 'all checks passed'}`);
+console.log(`\n--- RESULT --- ${failed ? `${failed} check(s) FAILED` : 'all checks passed'}`
+  + `${skipped ? `, ${skipped} branch(es) NOT EXERCISED (see above)` : ''}`);
 process.exit(failed ? 1 : 0);
