@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.23.0
+
+**The Windows client is implemented, it is now unit-tested on real Windows in CI, and no human has
+ever run it.** All three of those are true at once and the release notes are not going to blur
+them. There is still **no Windows host**: hosting is macOS, Linux, or Windows via WSL2. Nothing
+here says "Windows supported".
+
+**If you install claude-jam with npm on Windows, this release is the one that makes that work at
+all.** `bin` pointed at the bash launcher, and npm builds its Windows `.cmd` shim by reading the
+target's shebang — so the shim it generated called `bash`. On a Windows machine without Git Bash
+the first thing the tool ever said was `'bash' is not recognized`. `npm i -g claude-jam` was
+therefore **broken on Windows in every version before this one**, on the exact path that is the
+documented Windows install. `bin` now points at `cli.mjs`, a node entry point.
 
 ### v0.32 W1 — a native Windows CLIENT, implemented and CI-tested, never run by a human
 
@@ -40,10 +52,11 @@ disk and a `core.autocrlf` checkout would break lints for a reason unrelated to 
   environment, never inside a script string.
 - **Paths** are `%TEMP%` and `%APPDATA%\claude-jam` through the platform seam.
 - **There is no `0600` on Windows** and this release does not pretend there is. `{ mode: 0o600 }`
-  is reinterpreted there as the read-only attribute, so private files get an NTFS **ACL granting
-  only the current user** (`icacls /inheritance:r /grant:r <DOMAIN\user>:F`, plus `(OI)(CI)` on a
-  directory). A failure returns its reason instead of throwing — the file keeps profile
-  inheritance, which is a degradation and not a hole — and the docs say ACL, in those words.
+  is reinterpreted there as the read-only attribute, so private **files** get an NTFS **ACL
+  granting only the current user** (`icacls /inheritance:r /grant:r <DOMAIN\user>:F`). A failure
+  returns its reason instead of throwing — the file keeps profile inheritance, which is a
+  degradation and not a hole — and the docs say ACL, in those words. A **directory** gets the same
+  call plus `(OI)(CI)`, and it does **not** reduce to one entry: see the measurement below.
 - **F3 is not offered on Windows.** It attaches tmux on the client's own machine; there is none,
   and a Windows client is always a guest anyway. It now says where claude's screen actually is.
 - **Shift+Enter is honestly documented**: Windows Terminal sends a bare CR for it, so `\` at the
@@ -57,6 +70,52 @@ One real bug was found by all this and it was on the macOS side of a seam: `clie
 so the gate would have refused **every** Windows terminal there is. A unit test could not see it —
 the function was right and the caller was wrong — which is why `scripts/check-terminal-gate.mjs`
 spawns the real entry point and is in CI on both legs.
+
+### What the Windows CI leg actually proved — and what it found
+
+Run 33291176434 on `roypadina/claude-jam`, both legs green: **windows-latest 441/441 with 0
+skipped** (the three win32-only tests execute only there), **macos-latest 438/441 with 3 skipped**,
+plus `scripts/check-terminal-gate.mjs` and `npm pack --dry-run` on both. That run is the first time
+any Windows machine has executed a line of this code.
+
+**It went red first, three runs in a row, and every red was real.** That is the point of adding it:
+
+- **A directory's ACL does not reduce to one entry.** Measured, twice, on `windows-latest`:
+  `icacls <dir> /inheritance:r /grant:r <user>:(OI)(CI)F` exits **0** and leaves three principals —
+  the owner, `NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators` — none marked inherited, with a second
+  uncached apply changing nothing. A **file** does reduce to one entry, and that is the credential
+  case. Not an exposure: SYSTEM and Administrators read anything on the machine whatever a DACL
+  says, no wider principal is granted (which is now what the test asserts), and with no Windows
+  host there is no state directory on Windows at all. The claim was corrected in the README, the
+  wiki's Security-Model, `docs/COMPATIBILITY.md` and the code comment that asserted it. Whether
+  splitting the call would do better is unmeasured and recorded in TESTING.md.
+- **A test was flaky on both platforms and only CI was slow enough to say so.** `pumpFrames` slept
+  a flat 50 ms and asserted 20 frames had gone out; the pump needs two more turns of the event
+  loop, and a loaded runner stalls past any fixed sleep. It failed on windows-latest twice and
+  macos-latest once, always at the same 8 of 20. It waits on a deadline now.
+- **Two assertions were POSIX facts wearing test clothes** — a `/tmp/...` literal matched against a
+  `path.join` result, and `mode & 0o777 === 0o600` on NTFS, which has no such bit. Both are the
+  class AGENTS.md warns about: a red that says nothing about the product teaches everyone to
+  ignore reds.
+- **A bonus discharge:** the `%WINDIR%\Media` sound table was a guess, and the runner says the
+  guess was right — `{"knock":"wav","join":"wav","nudge":"wav"}` on 10.0.26100, no beep fallback.
+
+**What CI does NOT prove, and what still needs one person at a Windows machine.** None of the
+following has happened even once, and `docs/COMPATIBILITY.md` carries them row by row with the
+experiment that would settle each:
+
+| still unverified | the experiment |
+| --- | --- |
+| the install | `npm i -g claude-jam` on Windows 11, then `claude-jam` |
+| joining a jam | `claude-jam join <invite-link>` from Windows Terminal against a mac host |
+| a toast appearing | knock on a jam, watch the notification centre — with BurntToast and without |
+| a sound being heard | a knock and a join, confirmed distinguishable by ear |
+| a key being pressed | F2, PgUp/PgDn, Shift+/Ctrl+arrows in Windows Terminal, captured to a fixture |
+| Shift+Enter | apply the `sendInput` recipe to a real `settings.json` and see a newline |
+| a real image pasted | copy a screenshot, `/paste`, check the host's `jam-uploads/` |
+
+`npm pack --dry-run` proving the tarball holds every module a client imports is not the same as a
+shim that runs, and **the package has still never been published**.
 
 ## 0.22.1
 
