@@ -91,6 +91,13 @@ Not yet run as part of a release gate; the gate record below is 0.23.0's, which 
   After the tap bump, the same two probes are the acceptance check on the upgraded binary: the
   host window must not move, and that row must come back masked.
 
+  **Re-gated after the registry's hot-path cache.** The needle list is built per secrets object
+  rather than per row, which changes every mirror frame, so the whole gate ran again rather than a
+  subset: **19/19, exit 0, 241 PASS, 0 FAIL** a second time, 447 unit tests 0 fail. Frame cost
+  measured either side of the cache on a 40-row, 100-column coloured frame with all three needles
+  set (20k iterations after a 2k warm-up): **18.5 → 13.0 µs/frame** clean, 23.8 → 18.8 µs carrying
+  all three secrets, against 8.1 µs with an empty registry — 0.20 ms/s at 15 fps.
+
 - **0.23.0 — 2026-08-30. The first gate with a Windows leg, and the leg is what it was for.**
   All eighteen suites in the documented order plus the unit suite (**441 tests, 438 pass, 3 skipped,
   0 fail**), on node 24.15 / tmux 3.7c / claude 2.1.251 / cloudflared 2026.8.2 / ttyd 1.7.7, from a
