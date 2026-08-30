@@ -254,6 +254,14 @@ try {
     console.log(`      \\x07 at byte ${at}, next: ${JSON.stringify(out.slice(at, at + 40))}`);
     if (!/Dana can you take a look/.test(out)) throw new Error('the mention itself never rendered');
   });
+} catch (e) {
+  // 2026-08-30 suite audit: without this, an exception BETWEEN steps was swallowed by the
+  // finally below and the suite printed "all steps passed" having run none of them — measured on
+  // smoke-nudge, which had been doing exactly that through every release gate. A suite may fail;
+  // it may never report a pass it did not earn.
+  failed++;
+  console.log(`FAIL  setup or teardown threw — no step below it ran: ${e.message}`);
+  console.log(String(e.stack || "").split("\n").slice(1, 4).join("\n"));
 } finally {
   bell?.kill('SIGTERM');
   host.close();

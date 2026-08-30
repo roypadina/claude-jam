@@ -494,6 +494,45 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   `Security-Model` as the cost of name-based attribution, or move the name check below admission
   and give a knocker a generic refusal.
 
+## The 2026-08-30 vacuity audit — every suite, for tests that cannot fail
+
+Ordered by the 0.22.1 review after `smoke-nudge` was found printing **"all steps passed" having
+run none of its steps**, through every release gate including the 0.22.0 one. A suite that cannot
+fail is worse than a missing suite: it buys false confidence at every gate. So all eighteen were
+swept for the class, statically and by running them and counting what they actually printed.
+
+**One class was real, and it was structural.** Seven of the eighteen wrap their whole body in
+`try { … } finally { … process.exit(failed ? 1 : 0) }` with **no `catch`**. An exception anywhere
+between steps — a setup gate, a fixture, a teardown — is swallowed by the `finally`, whose exit sees
+`failed === 0` and reports success. `smoke-nudge` was the one where it had actually fired; the other
+six were sound in practice and one string-drift away from the same silence.
+
+| suite | verdict |
+| --- | --- |
+| `smoke-nudge` | **WAS VACUOUS — repaired.** Setup waited for `host Roy` in the host client's pane; that moved behind F2 when the ink client began opening on the live TUI (`grep -c "host Roy"` over 400 rows of a real client: **0**). Threw every run, reported green, ran 0 of 16 steps. Verified pre-existing against `git archive v0.22.0`. Also step 6c navigated `/menu` by counting four Downs, and v0.29 inserted a section in front of the target. Fixed: a `catch`, a gate on the roster line that IS on screen, and navigation by row name off the `Select`'s own `❯`. Now 16/16 in 18 s. |
+| `smoke.mjs` | **WAS VACUOUS (partly) — repaired.** It PRINTS five checks and exited on **two** of them, so it could print `agent event : MISSING` and `status busy:false: MISSING` and still exit **0** — and `results.tsv` is exit-code driven, so a regression in either path passed the gate in silence. Every check it prints now decides the exit, and a failing one is named on a `FAILING CHECKS` line. `sysprompt` stays non-fatal, for the reason already in the code. |
+| `smoke-adopt`, `smoke-ink`, `smoke-invite`, `smoke-lifecycle`, `smoke-perm`, `smoke-replay` | **LATENTLY VACUOUS — repaired.** Same missing `catch`; each verified to really run its steps (`smoke-invite` 15, `smoke-replay` 17, `smoke-adopt` 16, `smoke-lifecycle` 17 PASS lines), so nothing was being hidden today. A `catch` added to each. |
+| `smoke-answer`, `smoke-discover`, `smoke-peer`, `smoke-scroll` | **SOUND.** Top-level `catch` already present. (`smoke-answer` had the other shape — one assertion was `ok(… \|\| … \|\| true)`, a tautology that can never fail; repaired in the same release.) |
+| `smoke-knock`, `smoke-mirror`, `smoke-popup`, `smoke-slash`, `smoke-transport`, `smoke-xfer` | **SOUND.** No top-level `try` at all, so an exception between steps crashes with a stack and a non-zero exit — the failure mode this audit exists to prevent cannot occur. |
+
+**The other axes, checked and clean.**
+
+- *Tautological assertions.* One, in `smoke-answer` step 9 (`ok(… || … || true)`), already repaired.
+  A sweep for `|| true`, `ok(true`, `!== false`, and `=== true` over all eighteen found nothing else
+  (`f.waiting === true` in `smoke-perm` is a deliberate strict comparison, not a tautology).
+- *Assertion-free steps.* A scan for step bodies with no assertion helper returned 13 candidates,
+  every one a false positive: they assert through `want` / `wantFrom` / `wantClose` / `none` /
+  `never`, which throw on timeout.
+- *Unconditional PASS.* `PASS` is printed only inside each suite's `step()` helper, after `await
+  fn()` returned — correct in all eighteen. Every `all steps passed` line is `failed ? … : …`, so
+  with the `catch` in place the wording now follows the truth.
+- *Positional navigation.* One instance, `smoke-nudge`'s counted Downs, repaired. No other suite
+  navigates a list by count.
+- *Step counts vs. what runs.* `await step(` calls match the PASS lines in every suite that was run
+  (`smoke-scroll` is 12 calls / 13 steps because one runs for two roles — correct).
+- *Swallowed awaits.* Every `.catch(() => {})` / `catch { }` outside teardown was read; all are
+  best-effort `fs.rmSync` cleanups or a `fetch` whose result is then asserted.
+
 ## The 2026-08-30 campaign
 
 The end-game campaign of the section above, run overnight on 2026-08-30. Node 24.15 / tmux 3.7c /
