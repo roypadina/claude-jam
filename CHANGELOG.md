@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.23.2
+
+**A security patch, and the second one in a row found by attacking a surface nothing had attacked
+before.** Three findings, all in already-shipped code: the `--resume`/`--replay` transcript seed,
+which was a scrub funnel the 0.23.1 registry did not know existed; attribution on that same replay
+path; and the jam's state directory, whose privacy the entire host-key argument rests on and which
+nothing had ever checked. Upgrade and restart the jam; no config change picks any of this up.
+
+Reported as classes, not recipes.
+
+**Who should be on this release, in order of urgency.** If you host on **Linux or WSL2** — finding 3
+is a local-user path to being the host of your jam, and `/tmp` is where it lives. If you use
+**`--resume`** on a jam with guests — finding 1 hands a joiner every secret the jam holds that
+happens to appear in the transcript. If you host on **macOS**, finding 3 does not reach you at all:
+`$TMPDIR` there is a per-user `0700` directory, which is exactly why this survived five reviews.
+
+**Two commits landed after the `v0.23.1` tag and ride this release rather than that one:** `eea1099`
+(the mirror's per-frame needle cache, and the check that invite secrets are deliberately *not*
+registered — the counter-intuitive half of 0.23.1's root-cause fix, verified rather than assumed)
+and two `AGENTS.md` corrections to the release procedure itself (`f2cfee3`, `00be50a`: the tap push
+does not follow `gh`'s account, and a push check has to ask the server rather than a tracking ref —
+both found by a release that looked green and had not pushed).
 
 ### Security
 
@@ -56,6 +77,20 @@ own machine — so the guard is not resuming a transcript somebody else can writ
 another local user could become the host.** Affects **every released version with a host key**
 (v0.34 shipped it, so 0.22.0 through 0.23.1); the weaker half of it — every state file landing in
 somebody else's directory — goes back to the first version that had a state dir.
+
+**Scoped honestly, because the precondition is narrow and it decides whether this reaches you.** The
+takeover needs the state directory to *already exist and be writable by somebody else* when the jam
+starts — so it turns entirely on where `$TMPDIR` points and what its mode is:
+
+| host platform | `os.tmpdir()` | exposed? |
+| --- | --- | --- |
+| **macOS** | `/var/folders/…/T`, per-user, `0700` | **No.** No other local user can create anything there. |
+| **Linux** | `$TMPDIR`, else `/tmp` — mode `1777` | **Yes**, whenever no jam is holding that port, which is most of the time. Port 7777 is the default and the path is derived from it. |
+| **WSL2** (the documented Windows host path) | same as Linux | **Yes**, and see the fail-closed note below for `/mnt/…` too. |
+| a Linux host with `$TMPDIR` set to something private | that directory | No, if it really is private. |
+
+That macOS is not exposed is not a mitigation — it is the reason this went five adversarial reviews
+without being seen. Every one of them ran on macOS, where the assumption happens to hold.
 
 The state dir is `$TMPDIR/claude-jam-<port>`, which with the defaults on Linux and WSL2 is
 `/tmp/claude-jam-7777`: a name any other local user can compute, and `/tmp` is mode `1777`, so they

@@ -49,7 +49,7 @@ So: worth trying, not yet worth trusting. If you try it —
 # Not on npm yet, so `npm i -g @roypadina/claude-jam` 404s. Build the tarball first:
 git clone https://github.com/roypadina/claude-jam; cd claude-jam
 npm install; npm pack
-npm i -g .\roypadina-claude-jam-0.23.1.tgz
+npm i -g .\roypadina-claude-jam-0.23.2.tgz
 claude-jam join <invite-link>          # from Windows Terminal, not the legacy cmd.exe console
 ```
 
@@ -80,7 +80,7 @@ brew install roypadina/tap/claude-jam
 ```
 
 npm installs the same thing anywhere node ≥ 22 runs, and it is the only path on Windows — **but the
-package is not on the registry yet**, so as of 0.23.1 this command 404s:
+package is not on the registry yet**, so as of 0.23.2 this command 404s:
 
 ```sh
 npm i -g @roypadina/claude-jam   # NOT YET PUBLISHED — 404 until it is
@@ -91,8 +91,8 @@ also how the Windows client would be tried today:
 
 ```sh
 git clone https://github.com/roypadina/claude-jam && cd claude-jam
-npm install && npm pack        # → roypadina-claude-jam-0.23.1.tgz
-npm i -g ./roypadina-claude-jam-0.23.1.tgz
+npm install && npm pack        # → roypadina-claude-jam-0.23.2.tgz
+npm i -g ./roypadina-claude-jam-0.23.2.tgz
 ```
 
 Or from source:
