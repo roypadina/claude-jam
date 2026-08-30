@@ -551,9 +551,11 @@ per file:
 
 **None of the real protections move with the policy.** Under `auto` exactly as under `ask`: the
 basename is sanitized and a traversal name is refused, the 20 MB per-file cap holds, one
-transfer at a time per person, writes go only into `<cwd>/jam-uploads/`, nothing is executed or
-opened, and an announced-vs-actual byte mismatch drops the upload. The policy only decides
-whether the host is *asked*.
+transfer at a time per person, writes go only into `<cwd>/jam-uploads/` — **exclusively created,
+so a symlink planted under that name is refused rather than followed** — nothing is executed or
+opened, and an announced-vs-actual byte mismatch drops the upload. The session quota counts what
+is already granted as well as what has landed, so several people sending at once cannot overshoot
+it. The policy only decides whether the host is *asked*.
 
 Sanitizing can **rename** a file, and if somebody asks why, this is the answer: anything outside
 `[A-Za-z0-9._-]` becomes `_`, a leading dot goes (no dotfiles), a very long name is cut but keeps

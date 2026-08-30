@@ -51,6 +51,50 @@ no longer the delimiter. JSON is untouched (no line of a JSON object starts with
 `schema` path is unaffected. Reverting the fix makes the unit test fail with the forged string
 quoted in full.
 
+### Security — an upload could leave `jam-uploads/` through a symlink (0.13–0.22.0)
+
+The confinement was a **name** filter, and a name filter cannot see a filesystem. `writeUpload`
+picked a free name with `uniqueName(…, (n) => fs.existsSync(…))`, and `existsSync` **follows**
+symlinks — so a *dangling* link at `jam-uploads/notes.txt` read as "that name is free", and
+`writeFileSync` then opened it **through the link** and wrote to the target. Measured: a guest's
+bytes landed in a directory outside `jam-uploads/`, with no error to anybody.
+
+Planting the link needs local access or the agent's cooperation (any participant can ask claude to
+make a symlink), so it is a two-step chain — but the second step is the shipped upload path, and
+the confinement claim in the docs was unqualified.
+
+Fixed with `flag: 'wx'`. `O_CREAT|O_EXCL` refuses a symlink whether or not its target exists, and
+`uniqueName` has already proved the plain-file case is free, so the flag can only ever fire on this
+attack — and it fires closed, with the errno told to the uploader. `smoke-nudge` **7d** plants the
+link and asserts nothing was written through it; reverting the flag makes it fail.
+
+### The upload quota was checked before it was spent, so several senders could overshoot it
+
+`onUpload` read the quota from what had **landed** (`uploadUsed`, incremented in `writeUpload`),
+and the "one transfer at a time" guard is per **socket** — so clients firing in the same tick were
+all granted. Measured: four clients against a 2-file quota, four files written, no approval and no
+error. `uploadCommitted()` now counts the grants in flight as well, which closes it with no
+reservation to refund: a dropped upload leaves `uploads` and its share of the budget goes with it.
+A single client sending files one after another is unaffected. `smoke-nudge` **8b** races three
+clients; reverting the fix makes it grant three instead of one.
+
+### smoke-nudge reported "all steps passed" having run none of them
+
+Found while adding the two upload regression tests above, and it is the reason both of the bugs
+they cover survived: the suite's setup gate waited for `host Roy` in the host client's pane, and
+that string stopped being on the pane when the ink client began opening on the **live TUI** — the
+welcome block moved behind F2. The gate therefore timed out every run; the exception fell through
+to a `finally` whose `process.exit(failed ? 1 : 0)` saw `failed === 0` and printed *all steps
+passed*, exit 0. Every sweep since, the release gates included, recorded suite 15 as green having
+executed zero steps.
+
+Three repairs: a `catch` that counts a setup throw as a failure and says what threw; the gate now
+waits for the roster line `Roy joined (host)`, which really is on the live screen; and step 6c
+walks the `/menu` tree **by row name** using the `Select`'s own `❯` marker instead of counting four
+Down keypresses — v0.29 inserted a *Peer tasks* section in front of *Notifications*, so the count
+had been landing on the wrong section. The suite now runs 16 steps in 18 s, all green, with the
+PASS lines to show it.
+
 ## 0.22.0
 
 **A security release, and the release the end-game campaign paid for.** The headline is that host

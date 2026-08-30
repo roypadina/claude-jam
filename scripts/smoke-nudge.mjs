@@ -12,7 +12,11 @@
 //   6   `--no-sound` and the `/menu → Notifications` toggles suppress each tier independently
 //   7   under `uploads auto` a transfer lands with NO prompt — while the caps that actually
 //       protect the disk still refuse a traversal name and an oversized file
+//   7d  a DANGLING symlink planted in jam-uploads/ cannot carry an upload out of it — the name
+//       filter cannot see a filesystem, so O_CREAT|O_EXCL is what confines the write
 //   8   the session quota falls back to `ask` and says so out loud
+//   8b  and it holds under a RACE: the quota counts what is already granted, not only what has
+//       been written, so three clients firing at once cannot overshoot it
 //   9   `uploads off` refuses everybody, standing grants and the host included; `export` is a
 //       separate toggle with its own default
 //
@@ -184,7 +188,12 @@ try {
     // itself to a guest, out loud, which is what makes this a live check of the client half.
     '--host-key-file', hostKeyPath(STATE));
   if (royBorn.status !== 0) throw new Error(`could not start Roy's client: ${royBorn.stderr}`);
-  await until("Roy's client to connect", () => /host Roy/.test(pane(S.roy)));
+  // `Roy joined (host)` — the ROSTER line, which is on the live screen. It used to wait for
+  // `host Roy` out of the welcome block, and that stopped being visible when the ink client
+  // started opening on the live TUI: the welcome block moved behind F2, so the gate could never
+  // pass and every step below it stopped running. (The pipe-fed clients below still match
+  // `host Roy`, because a readline client prints the whole welcome to stdout — measured.)
+  await until("Roy's client to connect as the host", () => /Roy joined \(host\)/.test(pane(S.roy)));
 
   // A second trusted client, raw, for driving the policy frames and watching what the daemon
   // sends. Loopback + host:true is exactly what makes a client trusted (see classifyHello).
@@ -321,14 +330,28 @@ try {
     const type = (s) => tmux('send-keys', '-t', S.roy, '-l', s);
     type('/menu'); send('Enter');
     await until('the control panel', () => /control panel/.test(now(S.roy)));
-    // people · invites · access · session · NOTIFICATIONS · help
-    for (let i = 0; i < 4; i++) { send('Down'); await sleep(120); }
-    await until('the Notifications row', () => /Notifications/.test(now(S.roy)));
+    // Walk to a row BY NAME, checking the Select's own `❯` marker — not by a count of Downs.
+    // The count was 4 (people · invites · access · session · NOTIFICATIONS), and v0.29 inserted
+    // `Peer tasks` in front of it, so the Downs landed on the wrong section and this step could
+    // never pass. A row's position is not a fact a test may hold; its name is.
+    // The Select's marked row: `❯` plus a label. The client's own input row is a bare `❯`, so
+    // "starts with the marker" is not enough to tell the two apart.
+    const selected = () => (now(S.roy).split('\n').map((l) => l.trimStart())
+      .find((l) => /^❯\s+\S/.test(l)) || '');
+    const walkTo = async (label) => {
+      for (let i = 0; i < 12; i++) {
+        if (new RegExp(`^❯\\s+${label}`).test(selected())) return;
+        send('Down');
+        await sleep(140);
+      }
+      throw new Error(`could not select "${label}" — the marker sat on ${JSON.stringify(selected().trim().slice(0, 60))}`);
+    };
+    await walkTo('Notifications');
     send('Enter');
     await until('the tier rows', () => /Desktop notification/.test(now(S.roy)));
     console.log(`      ${now(S.roy).split('\n').filter((l) => /Sound |Desktop notification|Terminal bell|Phone \(ntfy\)/.test(l)).map((l) => l.trim().slice(0, 96)).join('\n      ')}`);
     // Nudge somebody · Sound · DESKTOP NOTIFICATION · Terminal bell · Phone · Who is idle
-    for (let i = 0; i < 2; i++) { send('Down'); await sleep(120); }
+    await walkTo('Desktop notification');
     send('Enter');
     await until('the toggle to be reported', () => /desktop notification off/.test(pane(S.roy)));
     const before = { s: roy.sounds().length, n: roy.notifies().length };
@@ -395,6 +418,34 @@ try {
     await up.none('an oversized upload was granted', (f) => f.t === 'xfergrant' && f.name === 'huge.bin');
   });
 
+  // 2026-08-30 security review. `existsSync` FOLLOWS symlinks, so a DANGLING link in
+  // jam-uploads/ read as "the name is free" and the write went THROUGH it: measured, a guest's
+  // bytes landed outside jam-uploads/ with nobody told. The name filter cannot see this — it is
+  // the filesystem, not the string — so the guard is O_CREAT|O_EXCL on the write.
+  await step('7d a dangling symlink in jam-uploads/ cannot carry an upload out of it', async () => {
+    const outside = path.join(CWD, 'not-uploads');
+    fs.mkdirSync(outside, { recursive: true });
+    const target = path.join(outside, 'authorized_keys');
+    const link = path.join(CWD, 'jam-uploads', 'trap.txt');
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(target, link); // dangling ON PURPOSE: the target does not exist yet
+    eq(fs.existsSync(link), false, 'existsSync follows the link, so the name looks free');
+    const at = up.since();
+    up.send({ t: 'upload', name: 'trap.txt', size: 5 });
+    const g = await up.wantFrom(at, 'the grant (the NAME is fine — that is the point)',
+      (f) => f.t === 'xfergrant' && f.name === 'trap.txt');
+    up.send({ t: 'file', xfer: g.xfer, seq: 0, b64: Buffer.from('pwned').toString('base64'), done: true });
+    const e = await up.wantFrom(at, 'the write refusal', (f) => f.t === 'error' && /could not write/.test(f.text));
+    console.log(`      ${e.text.slice(0, 110)}`);
+    eq(fs.existsSync(target), false, 'nothing was written through the link');
+    eq(fs.lstatSync(link).isSymbolicLink(), true, 'the link is still a link, not a file');
+    // And the budget was not spent on a file that never landed.
+    await up.none('the room was told about a file that does not exist',
+      (f) => f.t === 'say' && /trap\.txt/.test(String(f.text)), 500);
+    fs.rmSync(link, { force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
   await step('8 the session quota falls back to `ask`, and says so once', async () => {
     await sendFile('auto2.txt', Buffer.from('two under auto\n'));
     await until('the second file', () => fs.existsSync(path.join(CWD, 'jam-uploads', 'auto2.txt')));
@@ -415,6 +466,38 @@ try {
     await ops.want('the reset line', (f) => f.t === 'sys' && /quota was reset/.test(f.text));
     await sendFile('auto4.txt', Buffer.from('after the reset\n'));
     await until('the fourth file', () => fs.existsSync(path.join(CWD, 'jam-uploads', 'auto4.txt')));
+  });
+
+  // 2026-08-30 security review. The quota was read from what had LANDED and spent in writeUpload,
+  // and "one at a time" is per SOCKET — so several clients firing in the same tick were all
+  // granted. Measured before the fix: four clients, a 2-file quota, four files written, no
+  // approval and no error anywhere. `uploadCommitted` counts the grants in flight too.
+  await step('8b the quota holds under a race: three clients at once cannot overshoot it', async () => {
+    const before = fs.readdirSync(path.join(CWD, 'jam-uploads')).length;
+    const racers = ['Rac1', 'Rac2', 'Rac3'].map((n) => peer({ name: n, token: TOKEN }));
+    for (const r of racers) await r.want(`${r === racers[0] ? 'the first' : 'a'} welcome`, (f) => f.t === 'welcome');
+    const body = Buffer.from('race\n');
+    // The same tick: three requests before any of them can be written.
+    for (const [i, r] of racers.entries()) r.send({ t: 'upload', name: `race${i}.bin`, size: body.length });
+    await sleep(1200);
+    const grants = racers.map((r) => r.frames.find((f) => f.t === 'xfergrant'));
+    const granted = grants.filter(Boolean).length;
+    eq(granted, 1, `grants issued against a quota with 1 file left (used ${before} of 2)`);
+    for (const [i, r] of racers.entries()) if (grants[i]) r.send({ t: 'file', xfer: grants[i].xfer, seq: 0, b64: body.toString('base64'), done: true });
+    await sleep(1200);
+    const now = fs.readdirSync(path.join(CWD, 'jam-uploads'));
+    eq(now.length, before + 1, `files in jam-uploads/ (${now.join(', ')})`);
+    // The two that were refused are on the LADDER, which is the documented fallback — not dropped.
+    const asked = racers.filter((r, i) => !grants[i]).map((r, i) => r);
+    for (const r of asked) await r.want('the request going to the host', (f) => f.t === 'error' || f.t === 'knock' || f.t === 'sys', 3000).catch(() => {});
+    const reqs = ops.frames.filter((f) => f.t === 'filereq' && /^race\d\.bin$/.test(String(f.file)));
+    eq(reqs.length, 2, `the other two went to the host's ladder (${reqs.map((r) => r.file).join(', ')})`);
+    console.log(`      1 granted, ${reqs.length} asked — quota ${before}+1 of 2, nothing overshot`);
+    // Clear the ladder so step 9 starts clean.
+    for (const r of reqs) ops.send({ t: 'fileok', op: 'deny', name: r.name });
+    await sleep(500);
+    for (const r of racers) r.bye();
+    await sleep(300);
   });
 
   await step('9 `off` refuses everybody — the host included — and export is its own toggle', async () => {
@@ -447,6 +530,13 @@ try {
       + `used=${tok.uploadUsed.files} file(s)/${tok.uploadUsed.bytes}B of ${tok.uploadQuota.files}/${tok.uploadQuota.bytes}`);
     if (JSON.stringify(tok).includes('ntfy')) throw new Error('the protocol carried something about a phone');
   });
+} catch (e) {
+  // Without this, an exception BETWEEN steps was swallowed by the finally's own `process.exit`
+  // and the suite printed "all steps passed" having run none of them — which is exactly what it
+  // had been doing. A suite may fail; it may never report a pass it did not earn.
+  failed++;
+  console.log(`FAIL  setup or teardown threw — no step below it ran: ${e.message}`);
+  console.log(String(e.stack || '').split('\n').slice(1, 4).join('\n'));
 } finally {
   ops?.bye();
   dana?.bye();
