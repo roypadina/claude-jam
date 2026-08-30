@@ -80,5 +80,10 @@ jobs:
       # step rather than retrying it — a suite that needs a retry in CI is telling you something.
       - if: runner.os == 'Linux'
         run: sudo apt-get install -y tmux
+      # Run it under `script`, which allocates a pty. Steps 5 and 6 drive `--attach`, which opens
+      # the host client in the INVOKING terminal — a runner has no tty, so without this they time
+      # out waiting for a client that cannot draw. Everything the suite runs inside tmux has a pty
+      # already; this is only for the one path that does not. `-e` propagates the real exit code,
+      # without which `script` always succeeds and the step becomes decoration.
       - if: runner.os == 'Linux'
-        run: node scripts/smoke-lifecycle.mjs
+        run: script -e -q -c "node scripts/smoke-lifecycle.mjs" /dev/null
