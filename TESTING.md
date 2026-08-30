@@ -1202,6 +1202,40 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   daemon dies before the poll never prints the line. That is deliberate (the daemon is the only
   reader there can be), and the file is still on disk for whoever looks.
 
+- 2026-08-30 · **0.23.6, W2 (the WSL2 Windows host): the WSL-specific half is unverified, and no
+  machine on this project can change that.** What DID run, and the numbers: the unit suite (**471
+  tests, 468 pass, 3 skipped, 0 fail**) on macOS and in a Debian bookworm container (node 22.23.2,
+  tmux 3.3a), with and without `CI=true`; `smoke-lifecycle` **19/19** in that container both with
+  WSL detection standing in (`JAM_WSL_OSRELEASE`) and with it off, which is the control; the real
+  `host.mjs` given a real `0777` state dir at `/mnt/c/tmp/claude-jam-7777` → **exit 2**, the DrvFs
+  refusal printed whole, **nothing written into the directory and no tmux session built**; and a
+  real daemon printing the WSL join block under `Send this to a friend:`. `scripts/check-wsl.mjs`
+  is new and runs on every CI leg, where it is NOT EXERCISED by construction.
+
+  **`/proc` cannot be bind-mounted over** — measured 2026-08-30, runc refuses it with *"cannot be
+  mounted because it is inside /proc"* — so `JAM_WSL_OSRELEASE` is the only way any machine here
+  executes those branches at all. It stands in for the one string detection reads and nothing else.
+
+  **The five things a real WSL2 install has to settle, all of them in `check-wsl.mjs`:**
+  1. `wslpath` vs `wslTranslatePath`, both directions. This is the one most likely to find
+     something, and nothing here can ask it.
+  2. **TESTING experiment 3, still open**: a `--state` on a real DrvFs mount — WHICH refusal fires
+     (the 0777 mode branch, or the fail-closed "no usable metadata" one), and whether `chmod` there
+     really is the no-op the refusal tells the user it is. The container stood in the shape, not
+     the filesystem.
+  3. Windows-binary interop, and therefore `/paste`. Its two halves are proven separately (the
+     PowerShell script on `windows-latest`; `wslpath` is WSL's own tool) and the join between them
+     is not.
+  4. `localhost` forwarding from Windows into the VM. A CLAIM, from Microsoft's documentation.
+     Settled by `curl.exe -s -m 3 http://localhost:7777/health` in Windows Terminal.
+  5. LAN reachability (mirrored networking / portproxy), `--tunnel` and `--funnel` and the ttyd
+     view from inside WSL. `--tunnel` is an outbound connection from a Linux process, which is a
+     reason to expect it and not a reason to write it down as verified.
+
+  Prove: one person, one Windows+WSL2 machine, `node scripts/check-wsl.mjs` plus the nine-step
+  checklist at the end of the wiki's `Windows-WSL2-Host`. Until then every W2 row in
+  `docs/COMPATIBILITY.md` is 🟡 or ⚠️ and none is ✅.
+
 ## The 2026-08-30 vacuity audit — every suite, for tests that cannot fail
 
 Ordered by the 0.22.1 review after `smoke-nudge` was found printing **"all steps passed" having

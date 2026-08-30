@@ -21,10 +21,14 @@ message**. Humans also get a side channel the agent never sees.
 - node ≥ 22, tmux, and the `claude` CLI on PATH
 - optional: `ttyd` for the browser view (`--view`), `cloudflared` for `--tunnel`,
   `tailscale` for `--funnel`, `git` for `/diff`,
-  `pngpaste` for `/paste` (macOS falls back to `osascript`)
+  `pngpaste` for `/paste` (macOS falls back to `osascript`; Windows and WSL2 use PowerShell)
 
 **Hosting** a jam is macOS and Linux, because the host is tmux. Windows can host through WSL2
-(tmux and `claude` both run inside the distribution, and so does claude-jam).
+(tmux and `claude` both run inside the distribution, and so does claude-jam) — the wiki's
+[Windows (WSL2) Host](https://github.com/roypadina/claude-jam/wiki/Windows-WSL2-Host) page is the
+whole of it: setup, where the state directory may live, `C:\` and `\\wsl$` paths, and who can
+actually reach a jam inside a NAT'd VM. **Nobody on this project has a Windows machine**, so that
+page and `docs/COMPATIBILITY.md` say row by row what has been run and what has not.
 
 **Joining** is macOS, Linux and — as of v0.32 W1 — Windows, natively: node ≥ 22 and Windows
 Terminal, no WSL and no tmux. Read the honest state of that below before you rely on it.

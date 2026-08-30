@@ -53,7 +53,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
 | `peer-mcp.mjs` | v0.29: `list_peers` / `dispatch_to_peer` as a stdio MCP server for the HOST's own claude. A PIPE, not a brain — every decision is the daemon's, reached over the same loopback+secret endpoint `hooks.sh` uses. |
 | `peer.mjs` | v0.29: running ONE peer task on this machine — the scratch dir, the generated settings, the spawn, the caps and the killing. Imported by both clients so there is one place a peer task is built and stopped. |
-| `test.mjs` | the unit suite. `scripts/` holds the nineteen end-to-end smokes, **four** free non-smoke checks that spawn a real entry point and are in CI on **all three** legs — `check-terminal-gate.mjs` (the client, and the Windows terminal refusal), `check-state-privacy.mjs` (`host.mjs`, and the state-dir gate, including a second real uid where one is reachable), `check-discovery-refusal.mjs` (`sessions.mjs find` with no `dns-sd`) and `check-hook-post.mjs` (the real `hooks.sh`, an empty `PATH`, and a bare `--daemon` logging a hook that never arrived) — and `fixtures/pane/` the real `capture-pane` corpus. |
+| `test.mjs` | the unit suite. `scripts/` holds the nineteen end-to-end smokes, **five** free non-smoke checks that spawn a real entry point and are in CI on **all three** legs — `check-terminal-gate.mjs` (the client, and the Windows terminal refusal), `check-state-privacy.mjs` (`host.mjs`, and the state-dir gate, including a second real uid where one is reachable), `check-discovery-refusal.mjs` (`sessions.mjs find` with no `dns-sd`), `check-hook-post.mjs` (the real `hooks.sh`, an empty `PATH`, and a bare `--daemon` logging a hook that never arrived) and `check-wsl.mjs` (v0.32 W2 — every WSL2 fact, PASS/FAIL/NOT EXERCISED, and the one command to run on a real Windows box) — and `fixtures/pane/` the real `capture-pane` corpus. |
 | `docs/COMPATIBILITY.md` | what has actually been RUN, per platform and per capability, with the date and the build. No "should work" rows. A capability is verified or it is listed as unverified with the experiment that would settle it. |
 | `integrations/claude-plugin/` | the OPTIONAL `/jam` Claude Code plugin: a command, a skill, a manifest. **No code** — everything it does, it does by running the `claude-jam` on `PATH`. `.claude-plugin/marketplace.json` at the repo root points at it; a test asserts the two manifests agree. |
 
@@ -83,9 +83,9 @@ the Windows leg will say" — not "verified".
 
 ### CI, and why it is not optional here (v0.32 W1, Linux added 0.23.3)
 
-`.github/workflows/tests.yml` runs the unit suite, three `scripts/check-*.mjs` and
-`npm pack --dry-run` on **macos-latest, ubuntu-latest and windows-latest**, on node 22 (the
-`engines` floor). Nobody on this project has a Windows machine OR a Linux machine, so CI is the only
+`.github/workflows/tests.yml` runs the unit suite, five `scripts/check-*.mjs`,
+`npm pack --dry-run` and (on Linux) `smoke-lifecycle` on **macos-latest, ubuntu-latest and
+windows-latest**, on node 22 (the `engines` floor). Nobody on this project has a Windows machine OR a Linux machine, so CI is the only
 thing that ever runs either platform's code at all.
 
 The two legs are there for different reasons, and the difference matters when you decide what to put
@@ -293,8 +293,12 @@ another session's, and Roy's own look identical from the outside, and the rule h
 - Secrets go on **stdin or in a 0700 directory**, never on an argv (an argv is in `ps`).
 - Injection into the pane goes through a **file and `paste-buffer`**, never a shell string.
 - The `JAM_*` environment variables (`JAM_CLAUDE`, `JAM_TMUX_BIN`, `JAM_TAILSCALE`,
-  `JAM_INSTALLED`, `JAM_HOOK_SECRET`), the `x-jam-secret` header and the `--jam-addresses` flag
-  are **internal** and keep their names. Everything a human reads says `claude-jam`.
+  `JAM_INSTALLED`, `JAM_HOOK_SECRET`, `JAM_NODE`, `JAM_DNSSD`, `JAM_BRIEF_MIN_GAP`,
+  `JAM_WSL_OSRELEASE`), the `x-jam-secret` header and the `--jam-addresses` flag are **internal**
+  and keep their names — none of them is a flag and none appears in `--help` or `/menu`.
+  Everything a human reads says `claude-jam`. `JAM_WSL_OSRELEASE` (v0.32 W2) stands in for the one
+  string WSL detection reads, so a Linux container can execute the WSL branches: `/proc` cannot be
+  bind-mounted over, measured 2026-08-30, and no machine on this project is WSL.
 
 ---
 

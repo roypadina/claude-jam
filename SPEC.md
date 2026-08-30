@@ -2177,6 +2177,40 @@ uses Windows Terminal. Work is integration, not rewrite: WSL-aware paths for the
 WSL (verify `--tunnel`/`--funnel` and the ttyd view reach the outside), the browser view URL, and
 a documented setup page. Tested on Roy's Windows machine before it is claimed to work.
 
+**What shipped (0.23.6), and what it is worth.** All five items, built the way W1 was: every
+decision is a pure function in `lib.mjs` asserted on all three CI legs, and the spawning stays in
+`platform.mjs`. Nine unit tests, plus `scripts/check-wsl.mjs`.
+
+- **The state dir.** The gate is UNCHANGED — a Windows drive under WSL reports mode 0777 and
+  `pathPrivacy` already refuses it. What W2 adds is the message, because the generic advice
+  ("chmod it, or use another --port") is actively wrong on DrvFs: `chmod` there reports success
+  and changes nothing, and another port lands on the same mount. `privacyRefusal` names DrvFs and
+  points at the Linux filesystem. Measured in a container with a real `0777` dir and the real
+  `host.mjs`: exit 2, nothing written, no tmux session.
+- **The `\\wsl$` boundary.** `wslTranslatePath` accepts `C:\…`, `\\wsl$\<distro>\…` and
+  `\\wsl.localhost\…` at `/send` on both sides, and **refuses** another distribution's path and
+  any other UNC path rather than guessing. `windowsUncPath` is the other direction, for a line a
+  human pastes into Explorer. `jam-uploads/` needed nothing: it is written 0644 with no mode
+  verification, so a Windows drive is fine.
+- **`/paste`.** The Windows clipboard through interop — the same PowerShell script W1 ships, run
+  as `powershell.exe`, with the temp file named to Windows by `wslpath -w`. Before this it was a
+  flat refusal, so the failure mode is unchanged.
+- **The addresses, including the view URL.** `os.networkInterfaces()` inside WSL2 reports the
+  **VM's** NAT address, which nobody can reach. `inviteLines` adds a `localhost` line for Windows
+  on the same PC (rewritten from the real join line, never from a relay hostname) and one sentence
+  saying the rest needs mirrored networking, a portproxy or `--tunnel`.
+- **The setup page.** Wiki: `Windows-WSL2-Host`, linked from Home, Install, Files-and-Export and
+  Troubleshooting, ending in a nine-step checklist where each step is a command and an expected
+  observation.
+
+**Not done, and named.** Nobody has run any of it on a real WSL2 install: `wslpath` has never been
+asked whether it agrees with the translation, DrvFs's 0777 shape has never been observed, interop
+has never been reached, and localhost forwarding and the LAN/mirrored-networking claims are
+Microsoft's documentation rather than measurements. The Linux half IS measured (`smoke-lifecycle`
+19/19 in a Debian bookworm container, tmux 3.3a, with WSL detection standing in and with it off),
+because WSL2's platform is Linux. `docs/COMPATIBILITY.md` has the row-by-row version and
+`scripts/check-wsl.mjs` is the one command that converts it.
+
 ### W3 — native Windows host: investigated, and dropped (2026-08-29)
 Research pass done; report at `~/ClaudWork/2026-08-29-jam-windows-host-research/RESEARCH.md`.
 **Decision: there is no native Windows host. W2 (WSL2) is the Windows host path.**

@@ -582,8 +582,9 @@ claude-jam owns the tmux sessions it creates, so nobody has to remember a `tmux 
 A guest cannot put a file on the host's disk by themselves — the host has to accept it, once
 per file:
 
-- Guest runs `/send <path>` (or `/paste`, which grabs an **image off their clipboard** — macOS and
-  Windows; `/paste <caption>` adds a note). They see "waiting for the host to accept it".
+- Guest runs `/send <path>` (or `/paste`, which grabs an **image off their clipboard** — macOS,
+  Windows, and inside WSL2, where the clipboard is the Windows one; `/paste <caption>` adds a
+  note). They see "waiting for the host to accept it".
 - The host sees `⇪ Dana wants to send photo.png (2.1 MB) — /accept-file Dana ·
   /accept-file Dana always · /deny-file Dana`, gets the approval bar (`⇪ … [a]ccept [d]eny`,
   one key), plus a tmux popup if they are attached.
@@ -935,8 +936,18 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   `/allow-export`, or it expired after 2 minutes, or the daemon refused it: a name with a path
   in it, over 20 MB (files) / 50 MB (transcript, offers), or a second one while the first is
   still in flight. The exact reason went to that person's own client as a `!` line.
-- `/paste` says it is macOS-only → it is: it reads a PNG off the mac clipboard (pngpaste if
-  installed, otherwise osascript). Elsewhere, save the image and use `/send <path>`.
+- `/paste` refuses → which clipboard it can read depends on the machine that person is on: macOS
+  (pngpaste if installed, otherwise osascript), Windows (PowerShell), and inside WSL2 the Windows
+  clipboard through interop. On plain Linux there is none, and it says so — save the image and use
+  `/send <path>`. Under WSL2 a refusal naming interop means Windows binaries cannot be run from
+  that distribution; `/send` is unaffected.
+- A host inside **WSL2** can type either spelling of a path: `/send C:\Users\you\shot.png` and
+  `/send \\wsl$\Ubuntu\home\you\x` are translated. Another distribution's `\\wsl$` path, and any
+  other UNC path, are refused by name rather than guessed at. The jam's own state directory may
+  **not** live on a Windows drive — jam refuses at startup and says why.
+- A jam hosted in WSL2 prints an extra join line: the addresses are the VM's, `localhost` is how
+  Windows on the same PC reaches it, and anybody else needs mirrored networking, a portproxy or
+  `--tunnel`.
 - F3 does nothing → they are a guest (see "who is the host" below), or their terminal sends a
   different F3 sequence; the host can `tmux attach -t claude-jam` instead — that is exactly what F3
   does for them. A guest who only needs to answer a permission prompt wants `/answer`.

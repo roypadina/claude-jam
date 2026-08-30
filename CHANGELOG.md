@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Added — hosting from Windows, through WSL2 (SPEC v0.32 **W2**)
+
+Windows hosts a jam by running claude-jam **inside** WSL2: tmux, `claude` and the daemon all live
+in the distribution, and you sit in Windows Terminal. From claude-jam's side that is a Linux host
+and always was — what W2 adds is the four places Windows is still visible. New wiki page:
+**[Windows (WSL2) Host](https://github.com/roypadina/claude-jam/wiki/Windows-WSL2-Host)**.
+
+- **The state directory may not live on a Windows drive, and the refusal now says why.** The gate
+  is unchanged: a `/mnt/c` path under DrvFs reports mode `0777` for everything, and `pathPrivacy`
+  has refused that since 0.23.2 — the state dir holds `host.key`, which is host authority. What
+  changed is the advice, because the generic version is *actively wrong* there: `chmod` on a
+  metadata-less DrvFs mount reports success and changes nothing, and another `--port` lands on the
+  same mount. The refusal names DrvFs and points at the Linux filesystem instead.
+- **Windows paths work where you would type them.** `/send C:\Users\you\shot.png` and
+  `/send \\wsl$\Ubuntu\home\you\x` are translated (they used to resolve to a file of that literal
+  name and fail with a path nobody typed). Another distribution's `\\wsl$` path and any other UNC
+  path are **refused by name** rather than guessed at — dropping the prefix would hand back a path
+  that exists here and is a different file.
+- **`/paste` reads the Windows clipboard** through Windows-binary interop, using the same
+  PowerShell script the native Windows client ships. Interop off → a refusal that says so, and
+  `/send` is unaffected. It was a flat refusal before this.
+- **The join block tells you the address is a VM's.** WSL2 is behind NAT, so
+  `os.networkInterfaces()` reports an address nobody can reach. The block now carries a
+  `localhost` line that Windows on the same PC can use, and one sentence saying a LAN guest needs
+  mirrored networking, a portproxy, or `--tunnel` (which needs none of it, because it dials out).
+
+**What this is worth, said plainly: nobody on this project has a Windows machine, and no line of
+the WSL-specific half has run on a real install.** It is built the way the Windows client was —
+every decision is a pure function asserted on macOS, `ubuntu-latest` and `windows-latest` — and the
+Linux half IS measured, because WSL2's platform is Linux: `smoke-lifecycle` is 19/19 in a Debian
+bookworm container (tmux 3.3a) both with WSL detection standing in and with it off, and a real
+`host.mjs` given a real `0777` state dir on a `/mnt/c` path exits 2, prints the DrvFs refusal in
+full, writes nothing into the directory and builds no tmux session.
+
+What is NOT measured: `wslpath` has never been asked whether it agrees with the translation, DrvFs
+itself has never been observed, interop has never been reached, and localhost forwarding and the
+mirrored-networking claim are Microsoft's documentation rather than measurements.
+`docs/COMPATIBILITY.md` has it row by row, and **`node scripts/check-wsl.mjs`** answers most of it
+on the machine it runs on — PASS / FAIL / NOT EXERCISED, exiting 0 with a reason on anything that
+is not WSL. That command is the checklist.
+
 ### Fixed — a jam without `curl` dropped EVERY stop and notification hook, in silence
 
 0.23.5 took `curl` out of `waitForHealth()`, so a box without one could start a jam. It could not

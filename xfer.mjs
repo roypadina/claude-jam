@@ -8,7 +8,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { UPLOAD_MAX, safeBaseName, humanBytes, exportFileName } from './lib.mjs';
+import { UPLOAD_MAX, safeBaseName, humanBytes, exportFileName, wslTranslatePath } from './lib.mjs';
+import { wslInfo } from './platform.mjs';
 
 export const DOWNLOAD_DIR = 'jam-downloads';
 
@@ -53,7 +54,12 @@ export function saveXfer(rec, cwd = process.cwd()) {
 export function readForUpload(p) {
   const raw = String(p ?? '').trim();
   if (!raw) throw new Error('usage: /send <path>');
-  const abs = path.resolve(raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw);
+  // v0.32 W2: a guest inside WSL2 pastes the Windows spelling of a path as readily as the host
+  // does. This reads the TYPER's own filesystem either way, so translating the spelling reaches
+  // nothing typing `/mnt/c/...` would not have reached; an untranslatable one is refused by name.
+  const win = wslInfo().wsl ? wslTranslatePath(raw, wslInfo()) : { path: raw };
+  if (win.refuse) throw new Error(win.refuse);
+  const abs = path.resolve(win.path.startsWith('~/') ? path.join(os.homedir(), win.path.slice(2)) : win.path);
   let st;
   try { st = fs.statSync(abs); } catch { throw new Error(`no such file: ${abs}`); }
   if (!st.isFile()) throw new Error(`${abs} is not a file`);

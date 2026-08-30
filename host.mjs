@@ -71,6 +71,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   peerQuote, peerWhyText, peerResultForAgent, peerStructured, PEER_PROGRESS_MAX,
   // A hook that could not reach this daemon, which is the one failure the hook cannot report.
   HOOK_ERROR_FILE, hookErrorNote,
+  // v0.32 W2: the WSL2 Windows host — the `\\wsl$` path boundary and the NAT'd-VM join note.
+  wslTranslatePath,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -78,7 +80,7 @@ import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHeal
 // v0.32 W0: $TMPDIR, and every file that must be readable by its owner and nobody else, come
 // from the one module that knows what operating system this is.
 // v0.23: and so does mDNS — advertising is a platform binary, browsing is a platform binary.
-import { stateDir, secureDir, secureWrite, advertiseSpawn, readHostKey, assumePrivate } from './platform.mjs';
+import { stateDir, secureDir, secureWrite, advertiseSpawn, readHostKey, assumePrivate, wslInfo } from './platform.mjs';
 
 // `fileURLToPath`, NOT `new URL(...).pathname` (0.23.3). On Windows the pathname of a file: URL is
 // `/C:/dir/file.mjs` — with a leading slash — so `path.dirname` and `path.resolve` both build a path
@@ -193,7 +195,11 @@ opts.state ||= stateDir(opts.port);
 // key out of it and grant host authority on the strength of it.
 {
   const why = assumePrivate(opts.state);
-  if (why) { console.error(privacyRefusal("this jam's state dir", opts.state, why)); process.exit(2); }
+  // v0.32 W2: the same refusal, with WSL's own reason when the path is on a mounted Windows drive.
+  // Generic advice ("chmod it, or use another --port") is ACTIVELY WRONG on DrvFs — chmod there
+  // reports success and changes nothing — so the message has to know where it is. The GATE does
+  // not change: a state dir reporting 0777 is refused on WSL exactly as it is anywhere else.
+  if (why) { console.error(privacyRefusal("this jam's state dir", opts.state, why, { wsl: wslInfo() })); process.exit(2); }
 }
 // v0.20: the tmux server this jam lives on. Named per port, so two jams never share one, and
 // `--tmux-socket default` puts jam back on the user's own server (F3's bare-key binding is then
@@ -856,6 +862,9 @@ function joinInfo() {
     // The lines carry the address with or without a token; `token` only decides whether the
     // "friends knock" hint rides along with them.
     token: currentToken,
+    // v0.32 W2: inside WSL2 the address above is a NAT'd VM's, so inviteLines() adds the
+    // localhost line Windows can actually use. `{wsl:false}` off WSL, and nothing renders.
+    wsl: wslInfo(),
     // v0.24: everything `/menu` shows as state, on the frame that already carries the rest of it.
     inviteOnly,
     remote: relayMode,
@@ -3645,7 +3654,13 @@ function onOffer(ws, me, m) {
   if (!trusted(me)) return sendError(ws, 'only the host offers files — /send <path> uploads yours instead');
   const raw = typeof m.path === 'string' ? m.path.trim() : '';
   if (!raw) return sendError(ws, 'usage: /send <path>');
-  const abs = path.resolve(opts.cwd, raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw);
+  // v0.32 W2: `C:\Users\roy\shot.png` is what Windows hands you when you copy a path out of
+  // Explorer, and under WSL it resolved to a file of that literal name in the cwd — "no such
+  // file", naming a path nobody typed. Translated, never widened: every path this can produce is
+  // one the same person could have typed as /mnt/c/..., and this branch is host-only either way.
+  const win = wslInfo().wsl ? wslTranslatePath(raw, wslInfo()) : { path: raw };
+  if (win.refuse) return sendError(ws, win.refuse);
+  const abs = path.resolve(opts.cwd, win.path.startsWith('~/') ? path.join(os.homedir(), win.path.slice(2)) : win.path);
   let st;
   try { st = fs.statSync(abs); } catch { return sendError(ws, `no such file: ${abs}`); }
   if (!st.isFile()) return sendError(ws, `${abs} is not a file`);
