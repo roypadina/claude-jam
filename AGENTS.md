@@ -67,7 +67,7 @@ the tool's dependencies, spelled the same everywhere, and they stay where they a
 node --test test.mjs      # the whole unit suite; must be green before every commit
 ```
 
-441 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
+451 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
 framework. Add tests to `test.mjs` next to the ones for the same version heading.
 
 Three of them are **skipped off Windows** (`{ skip: process.platform !== 'win32' }`) — the real
@@ -131,9 +131,15 @@ Then, in any order, the ones that bring their own everything:
 10. `smoke-perm.mjs` — no arguments, own port 7831, but **needs a real claude** and costs a
     haiku turn. Runs the claude window with `--permission-mode manual`, because a machine whose
     `settings.json` says `bypassPermissions` never asks and there is no prompt to relay.
-11. `smoke-lifecycle.mjs` — no arguments, own `$TMPDIR`, ports 7851/7853/7855, sessions
-    `jamlife*`. ~20 s. Starts with the refusals, including a read-only proof about the live jam
-    on :7777.
+11. `smoke-lifecycle.mjs` — no arguments, own `$TMPDIR`, ports 7845/7847/7849/7851/7853/7855,
+    sessions `jamlife*`. ~23 s, 19 steps. Starts with the refusals, including a read-only proof
+    about the live jam on :7777 — and, since v0.34.1, **S4/S4b: a state dir another local user
+    could have created first.** The launcher must refuse a group/world-writable state dir and a
+    symlink where one belongs, write NOTHING into either and build no tmux session; and a planted
+    `host.key` in an otherwise-private dir must be refused rather than reused, so presenting it
+    over loopback yields a welcome with no host-only fields. Those two steps are the ONLY
+    behavioural proof of that gate — the unit half can only lint that `host.mjs` calls
+    `assumePrivate`, which is the shape of test this project has twice been bitten by.
 12. `smoke-invite.mjs` — no arguments, own `$TMPDIR`, port 7861, session `jaminvite`. ~10 s.
 13. `smoke-answer.mjs` — no arguments, no real claude at all (the pane is
     `scripts/fake-tui.mjs`, painted with the real captures from `fixtures/pane/`). Own `$TMPDIR`,
