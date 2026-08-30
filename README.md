@@ -295,21 +295,39 @@ claude-jam join                  # the launcher menu's Join screen: pick one, or
 ```
 
 ```
-# jam             host access view address
-1 reeco debugging Roy  knock  no   roys-mac.local:7777
-2 the other one   Dana token  no   roys-mac.local:7779
+# address              jam             host access view
+1 roys-mac.local:7777  reeco debugging Roy  knock  no
+2 roys-mac.local:7779  the other one   Dana token  no
 
-  reeco debugging: claude-jam join ws://roys-mac.local:7777 --name <you>
-  the other one: claude-jam join ws://roys-mac.local:7779 --name <you> --token <token>
+  roys-mac.local:7777: claude-jam join ws://roys-mac.local:7777 --name <you>
+  roys-mac.local:7779: claude-jam join ws://roys-mac.local:7779 --name <you>   (token jam: ask
+    the host for an invite link, or confirm this address with them first)
 
 finding a jam is not being let into it: a knock still waits for the host, a token jam
 still wants its token, and an invite-only jam still wants a link.
+and a jam you found may not be the jam you think: an advertisement is unauthenticated —
+anybody on this network can publish one — so the address above is the only field that cannot
+be faked. Confirm it with the host before you type a token into it, or ask for an invite link
+(cjam1_…), which is bound to the host's own address and is useless to anybody else.
 ```
 
 **Finding is not entering.** Discovery tells you a jam exists and where; every door in the
 table above is exactly as shut as it was. Picking a jam in the Join screen fills in the
 address and nothing else — a knock jam still waits for the host to accept you, a token jam
 still asks you for the token, and an invite-only jam says so and sends you to the paste row.
+
+**And `find` locates an address; it does not authenticate anybody.** An mDNS advertisement is
+unauthenticated by construction — no signature, no identity, nothing to check — so **anybody on
+your network can publish a jam that looks exactly like somebody else's.** Reproduced 2026-08-30:
+an advertisement claiming another jam's name, another host's name, `access=token` and `view=yes`
+listed beside the real one and was identical in every column except the address. That is why the
+**address leads every row** (it is the one field an attacker cannot forge into a match) and why
+the listing **no longer prints `--token <token>` for anybody** — a printed command is an
+instruction, and no tool should instruct you to send your shared token to an address it learned
+from a broadcast. For a token jam, the safe path is an **invite link**: `cjam1_…` carries a
+per-invite secret bound to the host's own addresses, so a look-alike host cannot use one. If you
+do join by URL and type a token, confirm the address with the host out of band first — and note
+that the launcher tells you which address the token is about to be sent to.
 
 **What the advertisement contains, and what it deliberately does not.** Six fields: the jam
 name, the host's display name, eight characters of the session id, which kind of door it is
@@ -599,7 +617,7 @@ claude-jam creates the tmux session, so claude-jam cleans it up — no `tmux kil
 | command | what it does |
 | --- | --- |
 | `claude-jam sessions`, `claude-jam ls` | claude-jam's own sessions: tmux name, jam name, port, state, uptime, session id, who is here, which relays are on, cwd. `--json` for scripting. A `!` marks an `orphan` state dir (its tmux session is gone), a `no-daemon` session (nothing answers on its port), or an `incomplete` state dir (no `session.json` — a start that died before it claimed a session) |
-| `claude-jam find`, `claude-jam discover` | jams announcing themselves on **this network**: name, host, access mode, view, address, and the exact join command per row. `--json` for scripting. Talks to no daemon and holds no credential — and finding a jam is not being let into one |
+| `claude-jam find`, `claude-jam discover` | jams announcing themselves on **this network**: address first, then name, host, access mode, view, plus a join command per row. `--json` for scripting. Talks to no daemon and holds no credential — finding a jam is not being let into one, and an advertisement is unauthenticated, so it never prints `--token` |
 | `claude-jam end [name]`, `claude-jam kill` | end one jam: every client is told and exits 0, the daemon stops its children (ttyd, tunnel, popups), the tmux session is killed and its state dir removed. No name and one jam → that one; several → a numbered picker; `--all` after an explicit confirmation |
 | `claude-jam clean` | remove state dirs whose session is gone, and only those, after listing exactly what will go |
 | `claude-jam host --attach` | reopen your client on a jam that is already running |

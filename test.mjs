@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, VIEW_SH, buildTokenFile, classifyHello, resolveJoinName, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
   exportFileName, resumeInstructions, scrubSecrets, stripTokenBlock, clientCommand,
-  scrubRowJoins, secretNeedles, SECRET_REGISTRY, SECRET_KEYS,
+  scrubRowJoins, secretNeedles, SECRET_REGISTRY, SECRET_KEYS, FIND_SPOOF,
   // v0.15 adaptive cadence, v0.16 approval bar.
   frameCadence, FRAME_FAST_GAP, FRAME_RATE_CAP, FRAME_ACTIVE_MS,
   countdownText, approvalBar, barKeyAction, APPROVAL_COMMANDS,
@@ -4874,17 +4874,26 @@ test('v0.23 findTable: a row per jam, the join command per row, and the gate eve
   const table = findTable(rows);
   const lines = table.split('\n');
   assert.deepEqual(lines[0].trim().split(/\s+/), FIND_COLS);
-  assert.match(lines[1], /^1 probe two\s+Someone Else\s+token\s+no\s+Roys-MacBook-Pro-4\.local:7902$/);
-  assert.match(lines[2], /^2 probe one\s+Roy\s+knock\s+yes\s+Roys-MacBook-Pro-4\.local:7901$/);
+  // v0.23.1: the ADDRESS leads — it is the only column an attacker's advertisement cannot forge
+  // into a match, so it is not the last thing on the line.
+  assert.match(lines[1], /^1 Roys-MacBook-Pro-4\.local:7902\s+probe two\s+Someone Else\s+token\s+no$/);
+  assert.match(lines[2], /^2 Roys-MacBook-Pro-4\.local:7901\s+probe one\s+Roy\s+knock\s+yes$/);
   // Two jams on one machine are both listed and told apart by their address.
   assert.equal(rows.length, 2);
   assert.notEqual(rows[0].address, rows[1].address);
   assert.notEqual(rows[0].id, rows[1].id);
-  // The listing teaches the join, and a token jam's line says a token is wanted.
-  assert.match(table, /probe one: claude-jam join ws:\/\/Roys-MacBook-Pro-4\.local:7901 --name <you>$/m);
-  assert.match(table, /probe two: .* --name <you> --token <token>$/m);
-  // DISCOVERY IS NOT A KEY, said on every listing.
-  assert.ok(table.endsWith(FIND_GATE));
+  // The listing teaches the join, keyed by the address rather than by the forgeable name.
+  assert.match(table, /Roys-MacBook-Pro-4\.local:7901: claude-jam join ws:\/\/Roys-MacBook-Pro-4\.local:7901 --name <you>$/m);
+  // v0.23.1: and it NEVER teaches `--token <token>`. A printed command is an instruction, and
+  // instructing somebody to send their shared token to an address that came out of an
+  // unauthenticated broadcast is the vulnerability, whatever the human does next.
+  assert.equal(/--token/.test(table), false, 'the listing still teaches a token join');
+  assert.match(table, /token jam: ask the host for an invite link/);
+  // DISCOVERY IS NOT A KEY, and a found jam may not be the jam you think — both, every listing.
+  assert.ok(table.includes(FIND_GATE));
+  assert.ok(table.endsWith(FIND_SPOOF));
+  assert.match(FIND_SPOOF, /unauthenticated/);
+  assert.match(FIND_SPOOF, /invite link/);
   // The empty answer is an explanation, not a blank.
   assert.equal(findTable([]), FIND_EMPTY);
   assert.match(FIND_EMPTY, /--no-announce/);
@@ -4923,9 +4932,10 @@ test('v0.23 joinRows: the discovered jams first, "paste a link or URL" LAST', ()
   assert.match(rows.at(-1).label, /paste a link or URL/);
   assert.deepEqual(rows.slice(0, -1).map((r) => r.value), ['found:0', 'found:1']);
   assert.equal(rows[0].row, found[0]);
-  // The label carries what tells two jams apart: the host, the access mode and the address.
-  assert.match(rows[0].label, /probe two.*Someone Else.*token.*7902/);
-  assert.match(rows[1].label, /probe one.*Roy.*knock.*view.*7901/);
+  // The label carries what tells two jams apart, ADDRESS FIRST (v0.23.1): two advertisements can
+  // carry the same jam name and the same host name, and only one of them has to be genuine.
+  assert.match(rows[0].label, /^Roys-MacBook-Pro-4\.local:7902\s+— probe two · Someone Else · token/);
+  assert.match(rows[1].label, /^Roys-MacBook-Pro-4\.local:7901\s+— probe one · Roy · knock · view/);
   // With nothing found, the paste row is still there — the fallback never disappears.
   assert.deepEqual(joinRows([]).map((r) => r.value), [JOIN_PASTE_VALUE]);
 });
@@ -4944,10 +4954,19 @@ test('v0.23 joinPlanFor: discovery never bypasses a gate', () => {
   assert.equal(noTok.ok, false);
   assert.equal(noTok.needs, 'token');
   assert.match(noTok.error, /probe two wants its shared token/);
+  // v0.23.1: and it says WHERE the token is about to go, because that address came out of an
+  // unauthenticated broadcast and is the only part of a discovered row that cannot be forged.
+  assert.match(noTok.error, /Roys-MacBook-Pro-4\.local:7902/);
+  assert.match(noTok.error, /broadcast on the network rather than proved/);
+  assert.match(noTok.error, /invite link/);
   assert.equal(joinPlanFor(tokenJam, { name: 'Dana', token: 'short' }).ok, false);
   const withTok = joinPlanFor(tokenJam, { name: 'Dana', token: 'goodtoken123' });
   assert.equal(withTok.ok, true);
   assert.deepEqual(withTok.argv.slice(-2), ['--token', 'goodtoken123']);
+  // v0.23.1: `argv` carries the real token because that is what runs; `command` is what the
+  // launcher PRINTS, and a terminal is read over shoulders and scrolled back to.
+  assert.equal(withTok.command.includes('goodtoken123'), false, 'the shown command echoes the token');
+  assert.match(withTok.command, /--token '?<your token>'?/);
   // An invite-only jam cannot be joined by URL at all, and says so instead of being refused later.
   const inv = discoveredJams(parseDnssdZone(DNSSD_Z_TRICKY))[0];
   const plan = joinPlanFor(inv, { name: 'Dana', token: 'goodtoken123' });
