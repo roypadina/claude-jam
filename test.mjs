@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
-  exportFileName, resumeInstructions, stripTokenBlock, clientCommand,
+  exportFileName, resumeInstructions, scrubSecrets, stripTokenBlock, clientCommand,
   // v0.15 adaptive cadence, v0.16 approval bar.
   frameCadence, FRAME_FAST_GAP, FRAME_RATE_CAP, FRAME_ACTIVE_MS,
   countdownText, approvalBar, barKeyAction, APPROVAL_COMMANDS,
@@ -6367,6 +6367,45 @@ test('stripTokenBlock: the host key is scrubbed like the join token', () => {
   assert.equal(stripTokenBlock('aaa bbb', null, 'aaa'), 'aaa bbb');
   assert.equal(stripTokenBlock('aaa bbb', null, null), 'aaa bbb');
   assert.equal(stripTokenBlock('aaa bbb', null), 'aaa bbb'); // the pre-v0.34 arity still works
+});
+
+// 0.22.0 gate: smoke-adopt S7c went red once in six runs, because /export was the ONLY scrub and
+// the transcript funnel plus the mirror rows broadcast whatever claude printed. Both now call
+// scrubSecrets, so these pin the shared helper and the two funnels that were missing it.
+test('scrubSecrets: both of the daemon\'s own secrets go, by literal and not by pattern', () => {
+  const text = `key ${KEY_A} and token smoketoken`;
+  const out = scrubSecrets(text, 'smoketoken', KEY_A);
+  assert.equal(out.includes(KEY_A), false);
+  assert.equal(out.includes('smoketoken'), false);
+  assert.match(out, /\[host key removed\]/);
+  assert.match(out, /\[token removed\]/);
+  // Every occurrence, not just the first: claude quoting a file back can repeat it.
+  assert.equal(scrubSecrets(`${KEY_A} ${KEY_A}`, null, KEY_A), '[host key removed] [host key removed]');
+  // A malformed key is NOT a scrub needle — a short one would gut every row it appeared in.
+  assert.equal(scrubSecrets('aaa bbb', null, 'aaa'), 'aaa bbb');
+  assert.equal(scrubSecrets('short tok', 'short', null), 'short tok'); // under the 8-char floor
+  assert.equal(scrubSecrets('nothing to do', null, null), 'nothing to do');
+  // The whole point of literal-over-pattern: a commit sha keeps its shape. 40 hex, and a 64-hex
+  // checksum that is not THIS jam's key, both survive untouched.
+  const sha = 'a'.repeat(40);
+  const other = 'b'.repeat(64);
+  assert.equal(scrubSecrets(`sha ${sha} sum ${other}`, null, KEY_A), `sha ${sha} sum ${other}`);
+});
+
+test('sanitizeFrameRow: a mirror row carrying this jam\'s key is scrubbed before the cut', () => {
+  // The realistic route: a participant asks claude to read host.key, so it lands on the PANE.
+  const row = sanitizeFrameRow(`⎿ ${KEY_A}`, 'smoketoken', KEY_A);
+  assert.equal(row.includes(KEY_A), false);
+  assert.match(row, /\[host key removed\]/);
+  assert.equal(sanitizeFrameRow(`tok smoketoken`, 'smoketoken', KEY_A).includes('smoketoken'), false);
+  // Scrubbed BEFORE the 2000-char truncation, or a straddling secret keeps its tail.
+  const straddle = sanitizeFrameRow(`${'x'.repeat(FRAME_ROW_MAX - 10)}${KEY_A}`, null, KEY_A);
+  assert.equal(straddle.includes(KEY_A.slice(0, 20)), false);
+  // The pre-existing behaviour is untouched: no secrets passed, and the old arity still works.
+  assert.equal(sanitizeFrameRow('plain row'), 'plain row');
+  assert.equal(sanitizeFrameRow(`${KEY_A} with no key argument`), `${KEY_A} with no key argument`);
+  // SGR still survives, with the reset the mirror depends on.
+  assert.match(sanitizeFrameRow('\x1b[31mred', null, null), /^\x1b\[31mred\x1b\[0m$/);
 });
 
 test('readHostKey: only a well-formed 0600 file is a key, everything else is null', () => {

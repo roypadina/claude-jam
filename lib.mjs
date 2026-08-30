@@ -968,14 +968,38 @@ export function nextBlock(kind, current) {
 // single hint scan when a row cannot contain any of the shapes, which is nearly every row —
 // see the cost note there. Best effort only: a value split across SGR sequences will not match.
 export const FRAME_ROW_MAX = 2000;
-export function sanitizeFrameRow(row) {
-  const s = maskSecrets(String(row)
+export function sanitizeFrameRow(row, token = null, hostKey = null) {
+  const s = scrubSecrets(maskSecrets(String(row)
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '') // OSC (title, clipboard)
     .replace(/\x1b[P^_X][^\x1b]*(?:\x1b\\)?/g, '') // DCS / PM / APC / SOS
     // C0 except ESC (0x1b) and TAB (0x09), DEL, and the 8-bit C1 range.
-    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, ''))
+    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, '')), token, hostKey)
+    // Scrub before the cut, or a secret straddling character 2000 keeps its tail.
     .slice(0, FRAME_ROW_MAX);
   return s.includes('\x1b') ? `${s}\x1b[0m` : s;
+}
+
+// The two values THIS daemon holds that must never reach another terminal, replaced by known
+// literal rather than by pattern. Deliberately not taught to maskSecrets: a pattern wide enough
+// to catch a bare 64-hex key also eats commit shas and checksums out of somebody's screen, and
+// the daemon knows the actual strings, so it searches for those instead. `includes` first,
+// because on the mirror's hot path (15 frames/s x ~40 rows) almost no row holds either value and
+// a miss must not allocate — two substring searches against short needles, measured nowhere near
+// a profile.
+// Ceiling, deliberate: a value WRAPPED across two captured rows matches in neither half, so a
+// key long enough to wrap (64 hex on an 80-column pane) is half-exposed on the pane path. The
+// transcript funnel and /export both see whole text and do catch it. Fixing the pane case needs
+// cross-row state on the hot path, and host authority needs locality as well as the key, so the
+// wrap is recorded rather than solved.
+export function scrubSecrets(text, token = null, hostKey = null) {
+  let out = String(text);
+  if (typeof token === 'string' && token.length >= 8 && out.includes(token)) {
+    out = out.split(token).join('[token removed]');
+  }
+  if (validHostKey(hostKey) && out.includes(hostKey)) {
+    out = out.split(hostKey).join('[host key removed]');
+  }
+  return out;
 }
 
 // Bandwidth guard, all of it in one decision: nothing to send while the screen has not
@@ -1479,13 +1503,20 @@ export function resumeInstructions(sessionId, file, cwd) {
 // documented as such: a transcript is everything claude saw, and only the join credential is
 // worth trying to keep out of a copy that leaves the host.
 export const TOKEN_BLOCK_RE = /Join token: [^"\n]{0,800}?tell them to ask the host\./g;
-// v0.34: the host key gets the same scrub. It is never put in a frame and never told to claude,
-// so it has no route into a transcript — this is the belt to that braces, and it costs one split.
+// v0.34: the host key gets the same scrub.
+// The v0.34 version of this comment claimed the key "is never put in a frame and never told to
+// claude, so it has no route into a transcript", and that assumption is what the gap below rested
+// on: the release gate's smoke-adopt S7c went red once in six runs because a route exists.
+// claude runs as the host user with file tools, so ANY participant can ask it to read
+// <state>/host.key; the answer lands on the pane and in the transcript, and both of those are
+// broadcast. So this is no longer the only scrub — scrubSecrets also guards the transcript funnel
+// (host.mjs onTranscript) and the mirror rows (sanitizeFrameRow). Export still needs its own
+// pass, because a transcript on disk predates all of them.
 export function stripTokenBlock(text, token = null, hostKey = null) {
-  let out = String(text).replace(TOKEN_BLOCK_RE, '[claude-jam join-token block removed on export]');
-  if (typeof token === 'string' && token.length >= 8) out = out.split(token).join('[token removed]');
-  if (validHostKey(hostKey)) out = out.split(hostKey).join('[host key removed]');
-  return out;
+  return scrubSecrets(
+    String(text).replace(TOKEN_BLOCK_RE, '[claude-jam join-token block removed on export]'),
+    token, hostKey,
+  );
 }
 
 // ------------------------------- v0.17 T1: relay respawn backoff ----
