@@ -120,6 +120,14 @@ legitimate `0600` key still makes a host.
   `/hook/../end`, `/../end`, `/hook/%2e%2e/end`, `/end%00`, `/./end`, `/end?x=1`, `//end`, `/END`,
   `/end/` and `GET /end` are all 404. No route reads a query string or a cookie, and the secret in
   either is refused. `/health` without the token says only `{"ok":"ok"}`.
+- **A browser cannot reach a control route, LAN or local.** The daemon listens on `0.0.0.0`, so this
+  was checked rather than assumed. From another machine the socket is not loopback and every route
+  is 403 before anything is parsed. From a browser *on the host* the socket IS loopback, so the
+  secret is the whole gate: a `<form>` POST cannot set `x-jam-secret`, and a `fetch` that sets it
+  needs a preflight — measured, `OPTIONS /end` carrying `Origin` and
+  `Access-Control-Request-Headers: x-jam-secret` answers **404**, and **no response the daemon sends
+  carries any `Access-Control-*` header at all** (checked on `OPTIONS`, `/health`, a secret-less
+  `POST /end` and an authorised one). So the request a page would need is never dispatched.
 - **Control bytes on the replay path.** CSI colour, OSC 8 hyperlink, OSC 52 clipboard write, an
   OSC 0 title set, the alternate-screen switch and bracketed-paste markers planted in a resumed
   transcript were all stripped — no ESC byte reached a client frame.
