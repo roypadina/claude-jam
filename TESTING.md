@@ -40,6 +40,48 @@ Run when the feature list is done. Not a smoke re-run — an adversarial pass ov
 
 ## Release gates that have actually run
 
+- **0.23.0 — 2026-08-30. The first gate with a Windows leg, and the leg is what it was for.**
+  All eighteen suites in the documented order plus the unit suite (**441 tests, 438 pass, 3 skipped,
+  0 fail**), on node 24.15 / tmux 3.7c / claude 2.1.251 / cloudflared 2026.8.2 / ttyd 1.7.7, from a
+  verified-clean machine state (no live tmux server on any socket, no jam process, the only state
+  dirs Roy's two dormant ones at 7777 and 7873). Suites 1–6 shared one `--model haiku` daemon on
+  :7799, suite 7 its own knock-only daemon, suites 8–18 self-contained. **18/18, exit 0 on every
+  suite, 235 PASS lines, 0 FAIL** — the same 235 as the 0.22.1 gate, so the repaired suites are
+  still running the steps they claim. `$TMPDIR` held 100 `jam-*` directories before and 100 after
+  (F10 holds). `smoke.mjs`'s field report had every field present, `system prompt IN EFFECT`, and
+  the 121-line paste WHOLE in the transcript.
+
+  **The CI gate, which is the new half.** Run
+  [33291176434](https://github.com/roypadina/claude-jam/actions/runs/33291176434), both legs green:
+
+  | leg | tests | pass | fail | skipped |
+  | --- | --- | --- | --- | --- |
+  | `windows-latest` | 441 | **441** | 0 | **0** |
+  | `macos-latest` | 441 | 438 | 0 | 3 |
+
+  Zero skipped on Windows is the point: the three `{ skip: process.platform !== 'win32' }` tests —
+  the real `icacls` ACL, the real `%WINDIR%\Media` lookup, `/paste`'s failure path through real
+  PowerShell — execute only there, and this is the first time they have executed at all. Both legs
+  also ran `scripts/check-terminal-gate.mjs` and `npm pack --dry-run`.
+
+  **It went red three runs running, and all four reds were real.** Two were tests asserting POSIX
+  facts (a `/tmp/…` literal against a `path.join` result; `mode & 0o777 === 0o600` on NTFS) —
+  exactly the class AGENTS.md §2 warns about. One was **flaky on both platforms**: `pumpFrames`
+  slept a flat 50 ms for progress needing two event-loop turns, and failed on windows-latest twice
+  AND macos-latest once, always at the same 8 of 20; it waits on a deadline now. The fourth is the
+  one TESTING.md had said would matter — the directory ACL — and it is its own deferral above:
+  a FILE reduces to one entry, a directory does not, measured with `icacls` exiting 0 twice.
+
+  **What this gate does and does not discharge.** It converts "the Windows client is unverified"
+  into a measurement *for the parts a program can decide* — every argv, path, principal, `.wav`
+  choice, refusal and key-sequence decode. It discharges **nothing** that a person has to see, hear
+  or type; the nine W1 deferrals below stand except where noted, and the sound-mode table's *file
+  list* half is now measured (`{"knock":"wav","join":"wav","nudge":"wav"}` on 10.0.26100, no beep
+  fallback) while the "a human heard it" half is not.
+
+  No product code changed between the 18-suite sweep and the shipped tag: the diff is tests, docs
+  and one comment block, verified with `git diff 68bb69d..HEAD`.
+
 - **0.22.1 — 2026-08-30.** All eighteen suites, in the documented order, plus the unit suite
   (**427/0**), on node 24.15 / tmux 3.7c / claude 2.1.251, from a verified-clean machine state (no
   tmux server on any socket, no jam process, the only state dirs the two dormant ones that pre-date
