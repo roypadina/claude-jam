@@ -1,0 +1,36 @@
+name: tests
+
+# Why this exists (v0.32 W1): the Windows client was written on a Mac, by an agent, with no
+# Windows machine anywhere in the loop. CI is therefore not a nicety here — it is the ONLY thing
+# that ever executes the win32 branches. Everything a pure function can decide (which argv a
+# PowerShell clipboard read is, which .wav a knock resolves to, where %APPDATA% puts the config,
+# whether a Windows Terminal key sequence decodes) is proven on a real `windows-latest` runner on
+# every push. Everything that needs a human at a Windows keyboard — a toast being seen, a sound
+# being heard, F2 in Windows Terminal — is NOT proven here and is recorded in TESTING.md instead.
+#
+# The end-to-end smokes stay out on purpose: they need a real tmux, a real terminal and (six of
+# them) a real `claude` that costs tokens. They are the release gate, run by hand.
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    name: node --test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both legs always run: "it broke on Windows" and "it broke everywhere" are different
+      # bug reports, and cancelling the other leg hides which one this is.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22' # package.json engines says >=22; this is the floor, so test the floor
+      - run: npm ci
+      - run: node --test test.mjs
+      # A client is the whole Windows story, and `npm i -g claude-jam` is how it gets there — so
+      # the tarball is built on both platforms too. It must not need tmux or claude to pack.
+      - run: npm pack --dry-run

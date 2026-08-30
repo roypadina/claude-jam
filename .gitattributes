@@ -1,0 +1,11 @@
+# v0.32 W1: the unit suite READS files out of this repo — MANUAL.md, the `claude-jam` launcher,
+# every module (three lints scan their string literals) and the `capture-pane` corpus. A Windows
+# checkout with git's default `core.autocrlf=true` would hand those files back with `\r\n`, and a
+# lint that matches a line ending would fail on Windows for a reason that has nothing to do with
+# Windows. LF everywhere, in the working tree as well as in the object store.
+* text=auto eol=lf
+
+# The pane fixtures are VERBATIM terminal captures — ANSI, box drawing, cursor moves. They are
+# the corpus the frame parsers are tested against, so not one byte of them may be normalised by
+# anybody, on any platform.
+fixtures/pane/*.txt -text
