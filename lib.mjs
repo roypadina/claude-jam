@@ -5707,3 +5707,64 @@ export const NO_TMUX_ATTACH = 'F3 attaches the real TUI through tmux, on the mac
   + 'and this one is Windows, which has no tmux and cannot host a jam. claude\'s screen is on the '
   + 'host\'s machine: F2 shows it live, /answer answers it, and a /command goes to the host for '
   + 'approval.';
+
+// ------------------------------------------------------- v0.32 W1: the Windows command line --
+// `npm i -g claude-jam` puts a shim on PATH for every name in package.json's `bin`. On POSIX the
+// shim runs the file, and the file is the bash launcher. On Windows npm writes a `.cmd` that
+// reads the shebang and calls `bash` — so a machine without Git Bash gets
+// "'bash' is not recognized" from the very first command, and the whole W1 client is unreachable
+// on the install path W1 was approved for. That is why cli.mjs exists: `bin` points at a NODE
+// entry point, which forwards to the bash launcher on POSIX (one dispatcher, no drift) and
+// answers here on Windows.
+//
+// What a Windows machine can actually do is JOIN. Hosting needs tmux and the claude CLI, and the
+// launcher menu exists to build a host command line — so every other subcommand is refused with
+// the reason and the route (WSL2), rather than half-working.
+export const WIN_HOST_WHY = 'hosting a jam needs tmux and the claude CLI, which Windows does not '
+  + 'have natively. Host from macOS or Linux — or from Windows through WSL2, where claude-jam '
+  + 'runs whole: install it inside the WSL distribution and run it there.';
+export const WIN_USAGE = [
+  'usage: claude-jam join <invite-link>',
+  '       claude-jam join <ws-url> --name X [--token Y] [--basic] [--no-sound]',
+  '',
+  'On Windows claude-jam is a CLIENT — it joins a jam somebody else is hosting.',
+  `Hosting, the launcher menu, sessions, invites and \`find\` are not here: ${WIN_HOST_WHY}`,
+  '',
+  'Needs Windows Terminal (ANSI + an alternate screen buffer); the legacy cmd.exe console is',
+  'refused with a message rather than a garbled screen. /paste, desktop toasts and the join and',
+  'knock sounds go through PowerShell. F3 (attach the real TUI) is the host\'s key on the host\'s',
+  'machine, so it is not offered here — F2 shows claude\'s screen live, /answer answers it, and a',
+  '/command goes to the host for approval.',
+];
+
+// Every subcommand the launcher dispatches, so this file can be checked against it rather than
+// drifting behind it. A test parses the launcher's own `case` labels and fails if one of them is
+// missing here — which is what stops a new subcommand from silently vanishing on Windows.
+export const WIN_JOIN_CMD = 'join';
+export const WIN_HOST_SIDE_CMDS = ['host', 'adopt', 'sessions', 'ls', 'find', 'discover',
+  'end', 'kill', 'clean', 'invite', 'invites', 'remote'];
+export const WIN_HELP_CMDS = ['-h', '--help', 'help', '--no-menu'];
+
+export function windowsCli(argv = []) {
+  const list = (Array.isArray(argv) ? argv : []).map((a) => String(a ?? ''));
+  const cmd = list[0] || '';
+  const rest = list.slice(1);
+  // No arguments is the launcher MENU on POSIX. The menu is a host-command builder, so on
+  // Windows the same keystroke gets the usage — with the reason at the top of it, not hidden.
+  if (!cmd) return { action: 'usage', code: 0 };
+  if (WIN_HELP_CMDS.includes(cmd)) return { action: 'usage', code: 0 };
+  if (cmd === WIN_JOIN_CMD) {
+    // `claude-jam join` with nothing after it opens the menu's Join screen on POSIX, which is
+    // the network picker. Same reason: no menu here, so say what to type instead.
+    if (!rest.length) {
+      return { action: 'refuse', code: 2, why: 'claude-jam join needs the invite link, or a '
+        + 'ws:// URL and --name: the picker that lists the jams on this network is part of the '
+        + 'launcher menu, which is not on Windows. Paste the link somebody sent you.' };
+    }
+    return { action: 'join', code: 0, argv: rest };
+  }
+  if (WIN_HOST_SIDE_CMDS.includes(cmd)) {
+    return { action: 'refuse', code: 2, why: `claude-jam ${cmd} is not available on Windows: ${WIN_HOST_WHY}` };
+  }
+  return { action: 'usage', code: 2 }; // an unknown word is a mistake, and exits like one
+}
