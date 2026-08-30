@@ -43,7 +43,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parsePeerLog, PEER_TOOLS_DEFAULT } from '../lib.mjs';
+import { parsePeerLog, PEER_TOOLS_DEFAULT, hostKeyPath } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -105,6 +106,9 @@ fs.writeFileSync(FAKE_PEER, `#!/bin/sh\nexec ${process.execPath} ${path.join(HER
 
 const ENV = { ...process.env, TMPDIR: TMP, JAM_CLAUDE: FAKE_TUI, FAKE_TUI_W: '100' };
 const STATE = path.join(TMP, `claude-jam-${PORT}`);
+// v0.34: the daemon writes `<state>/host.key` at start, so this is read at CALL time — a host
+// peer proves itself with the key exactly the way the real client does.
+const hostKey = (port = PORT) => readHostKey(hostKeyPath(path.join(TMP, `claude-jam-${port}`)));
 const TOKEN = 'peersmoketoken';
 
 const setMode = (m) => fs.writeFileSync(MODE, m);
@@ -119,11 +123,14 @@ const peerLog = () => { try { return parsePeerLog(fs.readFileSync(path.join(STAT
 // ------------------------------------------------------------------- the host ----
 // A raw socket for the host's client (this smoke is about the daemon's decisions and the guest's
 // machine, and a raw socket can assert on the exact frames).
-function connect(port, name, { host = false } = {}) {
+function connect(port, name, { host = false, hostKey = null } = {}) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   const c = { ws, name, events: [] };
   c.ready = new Promise((res, rej) => {
-    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name, token: TOKEN, ...(host ? { host: true } : {}) })));
+    // v0.34: a host claim carries the key out of that jam's own 0600 host.key — the claim
+    // alone is a guest now, deliberately.
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name, token: TOKEN,
+      ...(host ? { host: true, hostKey } : {}) })));
     ws.addEventListener('message', (m) => { const ev = JSON.parse(m.data); c.events.push(ev); if (ev.t === 'welcome') res(c); });
     ws.addEventListener('error', rej);
     setTimeout(() => rej(new Error(`${name} never got a welcome`)), 10000);
@@ -197,7 +204,7 @@ let host = null;
 try {
   const b = boot(NAME, PORT, ['--peer-tasks']);
   if (b.status !== 0) { console.error(b.stdout, b.stderr); throw new Error('the jam did not start'); }
-  host = connect(PORT, 'Roy', { host: true });
+  host = connect(PORT, 'Roy', { host: true, hostKey: hostKey() });
   await host.ready;
 
   // ------------------------------------------------- 1: no host switch, no feature ----

@@ -32,7 +32,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCREEN_HISTORY_MAX, SCREEN_CACHE_MS, MIRROR_CHROME } from '../lib.mjs';
+import { SCREEN_HISTORY_MAX, SCREEN_CACHE_MS, MIRROR_CHROME, hostKeyPath } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -126,11 +127,14 @@ const REPLAY = 5;   // what a joiner is shown
 const HISTORY = 400; // what the ring keeps — /history is the difference between the two
 
 // ------------------------------------------------------------------- clients ----
-function connect(name, { host = false } = {}) {
+function connect(name, { host = false, hostKey = null } = {}) {
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
   const c = { ws, name, events: [] };
   c.ready = new Promise((res, rej) => {
-    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name, token: TOKEN, ...(host ? { host: true } : {}) })));
+    // v0.34: a host claim carries the key out of that jam's own 0600 host.key — the claim
+    // alone is a guest now, deliberately.
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name, token: TOKEN,
+      ...(host ? { host: true, hostKey } : {}) })));
     ws.addEventListener('message', (m) => {
       const ev = JSON.parse(m.data);
       c.events.push(ev);
@@ -170,7 +174,10 @@ if (boot.status !== 0) {
 // A pane tall enough that a page is a real page, and short enough that 400 lines are history.
 tmux('resize-window', '-t', CLAUDE_PANE, '-x', '100', '-y', '30');
 
-const host = connect('Host', { host: true });
+// v0.34: the daemon writes `<state>/host.key` at start, so this is read at CALL time — a host
+// peer proves itself with the key exactly the way the real client does.
+const hostKey = () => readHostKey(hostKeyPath(path.join(TMP, `claude-jam-${PORT}`)));
+const host = connect('Host', { host: true, hostKey: hostKey() });
 const guest = connect('Dana');
 let exitCode = 1;
 try {

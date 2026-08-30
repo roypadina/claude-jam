@@ -16,7 +16,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { xferFrames, stripTokenBlock, jsonlGlobs, humanBytes, UPLOAD_MAX } from '../lib.mjs';
+import { xferFrames, stripTokenBlock, jsonlGlobs, humanBytes, UPLOAD_MAX, hostKeyPath,
+  stateDirFor } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from '../xfer.mjs';
 import { clipboardImage } from '../platform.mjs';
 
@@ -133,7 +135,10 @@ function redPng(w = 64, h = 64) {
 // A fresh guest name per run: `/allow-export always` is per name and lives as long as the
 // daemon, so re-running under one name would skip the very prompts the first steps assert on.
 const GUEST = `Guest${Date.now() % 10000}`;
-const host = peer({ name: 'XferHost', host: true, token });
+// v0.34: the daemon writes `<state>/host.key` at start, so this is read at CALL time — a host
+// peer proves itself with the key exactly the way the real client does.
+const HOST_KEY = readHostKey(hostKeyPath(stateDirFor(os.tmpdir(), Number(new URL(url).port) || 7777)));
+const host = peer({ name: 'XferHost', host: true, hostKey: HOST_KEY, token });
 const guest = peer({ name: GUEST, token });
 let cwd = null; // the daemon's cwd, from the welcome frame: where jam-uploads/ lives
 let sessionId = null;
@@ -174,7 +179,7 @@ await step('approved: the guest gets the real JSONL byte for byte, minus our tok
     await host.want('exportreq', (f) => f.t === 'exportreq' && f.name === GUEST);
     host.send({ t: 'exportok', op: 'allow', name: GUEST });
     const got = await until('the transfer to land', () => guest.saved[had], 30000);
-    const want = Buffer.from(stripTokenBlock(fs.readFileSync(jsonl, 'utf8'), token), 'utf8');
+    const want = Buffer.from(stripTokenBlock(fs.readFileSync(jsonl, 'utf8'), token, HOST_KEY), 'utf8');
     ok = sha(got.data) === sha(want);
     console.log(`      attempt ${attempt}: ${got.file} ${humanBytes(got.data.length)} sha ${sha(got.data).slice(0, 16)} vs ${sha(want).slice(0, 16)}${ok ? ' ✓' : ' (file grew mid-export, retrying)'}`);
     if (!ok) continue;
@@ -182,6 +187,8 @@ await step('approved: the guest gets the real JSONL byte for byte, minus our tok
     // The token, its join command and the whole "reveal only to the host" block are gone.
     const text = got.data.toString('utf8');
     if (text.includes(token)) throw new Error('the join token survived the export');
+    // v0.34: and the host key is scrubbed on the same pass, whether or not it was ever in there.
+    if (HOST_KEY && text.includes(HOST_KEY)) throw new Error('the host key survived the export');
     if (/Join token:/.test(text)) throw new Error('the token block survived the export');
     if (!text.includes('[claude-jam join-token block removed on export]')) throw new Error('nothing was stripped');
     // And it is still the transcript: same line count, still parseable JSON.

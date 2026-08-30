@@ -24,7 +24,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { decodeInvite, encodeInvite, INVITE_PREFIX } from '../lib.mjs';
+import { decodeInvite, encodeInvite, INVITE_PREFIX, hostKeyPath } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -77,6 +78,9 @@ fs.writeFileSync(FAKE_CLAUDE,
   + "printf '%s\\n' 'fake claude — v0.22 invite smoke' '' '❯ '\nexec sleep 1800\n", { mode: 0o755 });
 const ENV = { ...process.env, TMPDIR: TMP, JAM_CLAUDE: FAKE_CLAUDE };
 const STATE = path.join(TMP, `claude-jam-${PORT}`);
+// v0.34: the daemon writes `<state>/host.key` at start, so this is read at CALL time — a host
+// peer proves itself with the key exactly the way the real client does.
+const hostKey = () => readHostKey(hostKeyPath(STATE));
 
 const jam = (...args) => {
   const r = spawnSync(JAM, args, { encoding: 'utf8', env: ENV });
@@ -172,7 +176,7 @@ try {
   const info = JSON.parse(fs.readFileSync(path.join(STATE, 'session.json'), 'utf8'));
   console.log(`      launched: ${info.tmux} on :${info.port}, state ${info.state}`);
   // Knock-only on purpose (no --token): then every fall-through is visible as a real knock.
-  host = peer({ name: 'Host', host: true });
+  host = peer({ name: 'Host', host: true, hostKey: hostKey() });
   await host.want('host welcome', (f) => f.t === 'welcome');
 
   // ======================================================== minting ====

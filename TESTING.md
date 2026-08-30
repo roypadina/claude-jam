@@ -375,6 +375,35 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   on the result frame), the decision is cheap to make. Prove: Roy's call — one live run with the
   flag set below the task's cost, checking it refuses rather than truncating silently.
 
+- 2026-08-30 · **v0.34 batch (host identity is a local secret).** Run per the batch policy, not
+  the full sweep: `node --test test.mjs` (407 → 422, green) plus `smoke-slash`, `smoke-lifecycle`,
+  `smoke-knock`, `smoke-adopt` and `smoke-transport`, all green. **Not re-run:** `smoke-ink`,
+  `smoke.mjs`, `smoke-mirror`, `smoke-popup`, `smoke-xfer`, `smoke-perm`, `smoke-replay`,
+  `smoke-invite`, `smoke-answer`, `smoke-discover`, `smoke-nudge`, `smoke-peer`, `smoke-scroll`.
+  Every one of them that connects a scripted host was edited in the same commit to read
+  `<state>/host.key` and present it, and `node --check` passes on all of them — but an edit that
+  compiles is not a run, and a host peer that silently became a guest would fail those suites
+  loudly rather than subtly (a demoted host gets no join line, no F3 and no host-only report).
+  Prove: full sweep at the next release gate.
+- 2026-08-30 · **v0.34: the `/export` leak proof did not run in `smoke-slash`.** Its jam's claude
+  had never taken a turn, so there was no transcript on disk and the daemon refused the export
+  with "there is no transcript on disk yet" — which the step now prints rather than failing on.
+  The export half is proven instead in `smoke-adopt` S7c, against the transcript that suite
+  plants under a `$HOME` of its own, with the key written INTO it first so the scrub is not
+  vacuous (`[host key removed]` present, key absent, 501 bytes). `smoke-xfer` asserts the same
+  thing against a REAL claude transcript and was not run (it costs a turn). Prove: `smoke-xfer`
+  at the next release gate.
+- 2026-08-30 · **Funnel: the transport is still unverified; the HOST GATE no longer depends on
+  it.** Whether a Tailscale Funnel upgrade carries any proxy header was never measured (Funnel is
+  not enabled on this tailnet and the installed Tailscale is the sandboxed App Store build), and
+  that is unchanged. What changed is that it no longer matters for host authority: since v0.34 a
+  socket is the host only if it presents the daemon's `0600` `host.key`, which a process on
+  another machine cannot read — so a funnel-relayed socket is not the host whether or not
+  Tailscale sets a header we would have recognised. The **relay itself** (does `--funnel` carry
+  bytes at all, end to end, from another machine) remains unproven and `smoke-transport`'s T4
+  still runs against a stub CLI. Prove: after Roy enables Funnel and installs the standalone
+  build — the same condition as the 2026-08-29 entry above.
+
 ## The 2026-08-30 campaign
 
 The end-game campaign of the section above, run overnight on 2026-08-30. Node 24.15 / tmux 3.7c /
@@ -391,6 +420,17 @@ tmux server on any socket, no jam daemon anywhere).
   WS admission path and all six loopback-gated HTTP endpoints, with five unit tests. Verified
   after the fix: the stranger knocks, a token-holding relay guest is still an ordinary guest, and
   the host's own loopback client is unchanged.
+
+- **F1's fix was a blocklist, and v0.34 replaced it with proof.** The header test above holds for
+  cloudflared, which was measured — but it enumerates what a relay looks like, so the next relay
+  that proxies to `127.0.0.1` without a header on that list re-opens the hole silently. v0.34
+  makes host authority a `0600` file in the `0700` state dir that only a local process can read,
+  with the header test kept as a second, independent condition. Canary (2026-08-30, run twice):
+  breaking `hostKeyMatches` turned **8** `smoke-knock` steps red including "loopback host hello is
+  welcomed", and 5 unit tests; removing `--host-key-file` from the launcher's own client turned
+  `smoke-lifecycle` steps 5 and 6 red ("the attached client did not join as the HOST", then a
+  demoted host unable to `/end`) and the "every surface … hands it the key file" lint. Restored,
+  both suites green again.
 
 ### Deferrals this campaign closes, and the ones it opens
 

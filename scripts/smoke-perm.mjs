@@ -24,7 +24,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveClaude, parsePermOptions } from '../lib.mjs';
+import { resolveClaude, parsePermOptions, hostKeyPath, stateDirFor } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -112,7 +113,8 @@ await until('the daemon to answer /health', () => {
   process.exit(1);
 });
 
-const host = peer('Host', { host: true });
+// v0.34: the launcher's jam runs in the ambient $TMPDIR, so its state dir is the usual one.
+const host = peer('Host', { host: true, hostKey: readHostKey(hostKeyPath(stateDirFor(os.tmpdir(), PORT))) });
 const guest = peer('Guest');
 let bell = null;
 

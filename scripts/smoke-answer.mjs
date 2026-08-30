@@ -33,7 +33,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PASTE_CHUNK_MAX, MAX_TEXT, outboxEntries } from '../lib.mjs';
+import { PASTE_CHUNK_MAX, MAX_TEXT, outboxEntries, hostKeyPath } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -84,6 +85,9 @@ fs.writeFileSync(FAKE,
   + `exec ${process.execPath} ${path.join(HERE, 'fake-tui.mjs')} ${CTL} ${LOG}\n`, { mode: 0o755 });
 const ENV = { ...process.env, TMPDIR: TMP, JAM_CLAUDE: FAKE, FAKE_TUI_W: '100', ...(process.env.FAKE_TUI_TRACE ? { FAKE_TUI_TRACE: '1' } : {}) };
 const STATE = path.join(TMP, `claude-jam-${PORT}`);
+// v0.34: the daemon writes `<state>/host.key` at start, so this is read at CALL time — a host
+// peer proves itself with the key exactly the way the real client does.
+const hostKey = () => readHostKey(hostKeyPath(STATE));
 const OUTBOX = path.join(STATE, 'outbox');
 const TOKEN = 'answersmoketok';
 
@@ -98,11 +102,14 @@ const outbox = () => { try { return outboxEntries(fs.readdirSync(OUTBOX)); } cat
 // ------------------------------------------------------------------- clients ----
 // Raw sockets rather than the real client: this smoke is about the DAEMON's decisions, and a raw
 // socket can assert on the exact frames it gets back.
-function connect(name, { host = false } = {}) {
+function connect(name, { host = false, hostKey = null } = {}) {
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
   const c = { ws, name, events: [], ready: null };
   c.ready = new Promise((res, rej) => {
-    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name, token: TOKEN, ...(host ? { host: true } : {}) })));
+    // v0.34: a host claim carries the key out of that jam's own 0600 host.key — the claim
+    // alone is a guest now, deliberately.
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name, token: TOKEN,
+      ...(host ? { host: true, hostKey } : {}) })));
     ws.addEventListener('message', (m) => {
       const ev = JSON.parse(m.data);
       c.events.push(ev);
@@ -138,7 +145,7 @@ if (boot.status !== 0) {
 
 tmux('resize-window', '-t', `${NAME}:claude`, '-x', '100', '-y', '44');
 
-const host = connect('Host', { host: true });
+const host = connect('Host', { host: true, hostKey: hostKey() });
 const guest = connect('Dana');
 let exitCode = 1;
 try {

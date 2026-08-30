@@ -34,7 +34,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { projectSlug, BRIEF_NAME, validName } from '../lib.mjs';
+import { projectSlug, BRIEF_NAME, validName, hostKeyPath } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 import { daemonHealth } from '../sessions.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -179,11 +180,14 @@ function makePane(name, sess = tmux, cwd = WORK) {
 }
 
 // A scripted guest. Raw socket, because the assertions are about the DAEMON's frames.
-function connect(port, name, { host = false } = {}) {
+function connect(port, name, { host = false, hostKey = null } = {}) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   const c = { ws, name, events: [] };
   c.ready = new Promise((res, rej) => {
-    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name, token: TOKEN, ...(host ? { host: true } : {}) })));
+    // v0.34: a host claim carries the key out of that jam's own 0600 host.key — the claim
+    // alone is a guest now, deliberately.
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name, token: TOKEN,
+      ...(host ? { host: true, hostKey } : {}) })));
     ws.addEventListener('message', (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch { return; }
       c.events.push(ev);
@@ -403,6 +407,55 @@ try {
       .filter((l) => /\[brief\]|\[prompt\]/.test(l)).slice(-4).map((l) => `        ${l.trim()}`).join('\n')}`);
     guest.ws.close();
     guest = null;
+  });
+
+  // v0.34: the key is a CREDENTIAL. It rides in one direction only — the client's hello — and the
+  // daemon compares it and drops it. This jam has a REAL transcript on disk (this smoke planted
+  // it, under a $HOME of its own), so the /export scrub can be proven rather than assumed: the
+  // key is written INTO that transcript first, because a scrub of something that was never there
+  // proves nothing.
+  await step('S7c the host key leaks into nothing — no frame, no daemon log, no export', async () => {
+    const key = readHostKey(hostKeyPath(stateDir(P.own)));
+    ok(key, `no host.key in ${stateDir(P.own)}`);
+    ok((fs.statSync(hostKeyPath(stateDir(P.own))).mode & 0o777) === 0o600, 'host.key is not 0600');
+    // The host's own client, proving itself the way the real one does.
+    const h = await connect(P.own, 'Roy', { host: true, hostKey: key }).ready;
+    const welcome = h.events.find((e) => e.t === 'welcome');
+    ok(typeof welcome.session.tmux === 'string' && welcome.session.tmux,
+      'the key did not earn host — the welcome carries no tmux session');
+
+    // Plant the key in the transcript, then take a copy of it as the host.
+    fs.appendFileSync(TRANSCRIPT, `${JSON.stringify({ type: 'user', cwd: WORK,
+      message: { content: `and the host key is ${key}` } })}\n`);
+    h.send({ t: 'export' });
+    const head = await h.waitFor('the export header', (e) => e.t === 'xfer' && e.kind === 'export', 20000);
+    await h.waitFor('the last export chunk', (e) => e.t === 'file' && e.xfer === head.xfer && e.done, 20000);
+    const bytes = Buffer.concat(h.events.filter((e) => e.t === 'file' && e.xfer === head.xfer)
+      .map((e) => Buffer.from(e.b64, 'base64'))).toString('utf8');
+    ok(bytes.includes('[host key removed]'), 'nothing was scrubbed — the plant never reached the export');
+    ok(!bytes.includes(key), 'the host key survived /export');
+    console.log(`      /export: ${bytes.length} bytes, the planted key replaced by [host key removed]`);
+
+    // Every frame either participant has been sent, of any type, this whole run.
+    for (const c of [h, ...(guest ? [guest] : [])]) {
+      ok(!JSON.stringify(c.events).includes(key), `the key came back in a frame to ${c.name}`);
+    }
+    console.log(`      ${h.events.length} frames to the host: no key in any of them`);
+
+    // The daemon's own log — it logged the adoption, the briefings and this export.
+    const log = daemonLog();
+    ok(log.trim().length > 0, 'could not read the daemon log — nothing to prove');
+    ok(!log.includes(key), 'the host key is in the daemon log');
+    console.log(`      daemon log: ${log.split('\n').length} line(s), no key in them`);
+
+    // And nothing else in the 0700 state dir holds it.
+    for (const f of fs.readdirSync(stateDir(P.own))) {
+      const file = path.join(stateDir(P.own), f);
+      if (f === 'host.key' || !fs.statSync(file).isFile()) continue;
+      ok(!fs.readFileSync(file, 'utf8').includes(key), `the host key is in ${f}`);
+    }
+    console.log(`      ${stateDir(P.own)}: host.key is 0600 and the only file holding it`);
+    h.ws.close();
   });
 
   await step('S8 REFUSAL the same pane is never adopted twice', async () => {

@@ -33,7 +33,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDnssdZone, discoveredJams, findJson, DISCOVERY_TYPE, DISCOVERY_DOMAIN,
-  DISCOVERY_TXT_KEYS, JOIN_PASTE_VALUE } from '../lib.mjs';
+  DISCOVERY_TXT_KEYS, JOIN_PASTE_VALUE, hostKeyPath } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -315,7 +316,9 @@ try {
     // fields — so setting a token on a knock-only jam is a real re-announce with a real change.
     const ws = new WebSocket(`ws://127.0.0.1:${PORT_A}`);
     await new Promise((done, fail) => {
-      ws.addEventListener('open', () => { ws.send(JSON.stringify({ t: 'hello', name: 'Roy', host: true })); done(); });
+      // v0.34: a host proves itself with the key out of that jam's own state dir.
+      const hk = readHostKey(hostKeyPath(path.join(TMP, `claude-jam-${PORT_A}`)));
+      ws.addEventListener('open', () => { ws.send(JSON.stringify({ t: 'hello', name: 'Roy', host: true, hostKey: hk })); done(); });
       ws.addEventListener('error', () => fail(new Error(`could not reach the daemon on :${PORT_A}`)));
     });
     ws.send(JSON.stringify({ t: 'token', op: 'set', value: 'discoreannounce1' }));
