@@ -579,7 +579,7 @@ approves.
 | `/diff [path]` | anyone | `git diff --stat` of the host's working tree, or the real hunks for one path |
 | `/answer`, `/answer <n>` | anyone | show what claude is asking · answer it. **A question** (claude's own `AskUserQuestion`) goes straight through, first answer wins. **A permission** (a tool wanting approval) is offered to the host, who approves before a key is typed |
 | `/answer <q> <n>` | anyone | one question of a multi-question form — only the one on screen |
-| `/answer other <text>` | host | the free-text option. Host-only whatever `--answers` says: arbitrary text into the terminal is raw keyboard access |
+| `/answer other <text>` | host | the free-text option. Host-only whatever `--answers` says: arbitrary text into the terminal is raw keyboard access. Reduced to one line with no control characters, so it cannot submit and start a second prompt |
 | `/outbox`, `/retry` | anyone | what claude-jam kept when it could not confirm a message landed · send the newest kept one again (yours; the host may send anybody's) |
 | `↑` / `↓` | anyone | recall your own last 50 submissions — per client, and they survive a restart |
 | `/join`, `/token new\|set\|off` | host | reprint the invite lines (one dated block, so which one is live is never a guess) · rotate or drop the token |
