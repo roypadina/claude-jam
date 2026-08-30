@@ -1,6 +1,55 @@
 # Changelog
 
-## Unreleased
+## 0.23.3
+
+**The release a second and third CI leg paid for.** No new features: a Linux CI leg, and the four
+defects that only exist where macOS is not — one of them a latent crash, two of them found by the
+`windows-latest` leg reading a check written for Linux, and one a user-facing message that told
+people to install a package which does not do what it said.
+
+Nothing in the wire protocol, the frame pipeline, the trust boundary or the tmux/injection half
+changed. Upgrading is safe and picks up the fixes on restart.
+
+### Fixed — the Windows leg found two, and neither could fail on macOS
+
+**`node sessions.mjs <anything>` exited 0 having done nothing, on Windows.** The entry-point guard
+that decides "am I the script being run, or an import?" compared `path.resolve(process.argv[1])`
+with `path.resolve(new URL(import.meta.url).pathname)`. On Windows that pathname carries a leading
+slash — `/C:/dir/sessions.mjs` — so `path.resolve` makes `\C:\dir\sessions.mjs`, the two never
+match, and **the entire command dispatch block was skipped**: `list`, `sessions`, `end`, `clean`,
+`invite`, `invites`, `remote`, `find`, `discover` and `adopt`, all ten, silently successful.
+
+Found the long way round, which is the interesting part: `scripts/check-discovery-refusal.mjs` was
+written to assert that discovery *refuses* where there is no `dns-sd`, and on the Windows leg it
+reported `find` exiting 0 with an empty listing. The refusal logic was never the problem — it never
+ran. Reachable only by invoking `sessions.mjs` directly (through `claude-jam`, `windowsCli` refuses
+all ten with the WSL2 route), but a silent exit 0 is the worst shape a bug can take.
+
+**The Windows client could not read its own manual.** Same root cause, different file:
+`client-ink.mjs`'s `HERE_DIR` is how `/menu → Help` finds `MANUAL.md`, and it came off the same
+`.pathname`. The client that shipped in 0.23.0 would have shown `could not read MANUAL.md`. Nothing
+tested it, because no test reads a file through that path on win32.
+
+Fixed with `fileURLToPath` at all seven sites (`cli.mjs` was already doing it correctly), and
+**pinned by a lint**, because one run on one platform cannot catch this: no module may take
+`.pathname` off a file: URL, and the lint additionally asserts the fix is present at the two places
+it mattered. Canaried from both directions. Note `new URL('./x', import.meta.url)` handed straight to
+`fs` is fine and stays — `fs` accepts a file: URL and gets the platform right.
+
+### Fixed — a message that sent people to do something useless
+
+`DNSSD_MISSING` said *"on Linux install avahi-utils, on Windows Apple Bonjour"*. The Linux half was
+**false**: measured 2026-08-30 in a Debian bookworm container, `apt-get install avahi-utils` provides
+`avahi-browse`, `avahi-publish-service` and friends and **no `dns-sd` at all**, so following the
+advice changed nothing. The Windows half named a binary `DNSSD_PATHS` deliberately does not look for.
+
+**The decision, stated once: LAN discovery is macOS-only.** It needs Apple's `dns-sd`, which is not
+packaged for Linux or Windows. Elsewhere a jam still hosts normally — it just does not announce, with
+one line saying so — and `claude-jam find` refuses with the reason instead of reporting an empty
+network. The message now names what does work: an invite link, or the `ws://` address directly.
+`TESTING.md` records both unbuilt paths (avahi, and Bonjour's `dns-sd.exe`) with what each would
+cost, so the decision is revisitable from evidence rather than re-argued. Two unit assertions were
+inverted to the measured truth rather than deleted.
 
 ### CI gains a Linux leg, and the leg is what it is for
 
