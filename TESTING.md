@@ -18,6 +18,11 @@ the release gate and, finally, to the overnight campaign described below.
 The full smoke sweep (all suites, documented order) is the release gate. A red suite stops the
 release; it is never released over.
 
+**Before the tag is pushed, not after.** A gate that runs after publication cannot stop anything —
+it can only tell you what you already shipped. 0.24.0 was released on the per-batch subset and gated
+afterwards, with the tag pushed and the tap already serving it; the entry below is labelled so nobody
+has to guess which releases were gated before publication. If a release is cut without the sweep, say so in the gate record.
+
 ## The end-game campaign (overnight, whole app)
 
 Run when the feature list is done. Not a smoke re-run — an adversarial pass over the product:
@@ -186,6 +191,79 @@ Deferred as a product nit rather than fixed here. **Fixed in 0.23.5** — `waitF
 own `fetch` now, and the same container runs `smoke-lifecycle` 19/19 with no curl installed.
 
 ## Release gates that have actually run
+
+**Read the date against the tag.** A gate here ran BEFORE its release was published unless the entry
+says otherwise in its first line. Exactly one so far did not — 0.24.0, immediately below — and it is
+labelled, because "all nineteen were green" and "all nineteen were green before anybody could install
+it" are different claims and this file is the only place that can tell them apart.
+
+- **0.24.0 — 2026-08-30. RAN AFTER THE RELEASE, NOT BEFORE. The gate was skipped at release time;
+  this is it, run late.** 0.24.0 was tagged, published, tap-bumped and installed on the W2 batch's
+  per-batch subset (unit suite on macOS and Linux, five `check-*`, `smoke-lifecycle`, `smoke-invite`,
+  `smoke-nudge`, `smoke-answer`) plus three green CI legs — which is what `TESTING.md` prescribes for
+  a *batch*, and is not the release gate. Roy's call to correct it properly rather than quietly.
+
+  All nineteen suites in the documented order, one at a time, plus the unit suite (**471 tests, 468
+  pass, 0 fail, 3 skipped**) and all five `check-*.mjs`, on node 24.15 / tmux 3.7c / claude 2.1.251 /
+  ttyd 1.7.7 / cloudflared 2026.8.2 / git 2.50.1 / curl 8.7.1. `npm pack --dry-run` clean at 22
+  files. Suites 1–6 shared one `--model haiku` daemon on :7799 (`smoke-ink` first against a fresh
+  daemon, `smoke-slash` last and once), suite 7 its own knock-only daemon on that port after the
+  first was torn down, suites 8–19 self-contained.
+  **19/19, exit 0 on every suite, 243 PASS lines, 0 FAIL.** That is the 0.23.2 gate's 241 plus the
+  two steps `smoke-peer` and `smoke-scroll` gained since, so nothing that was running steps stopped.
+  `smoke.mjs`'s `--- RESULT ---` block was read rather than counted: `pong` returned, the jsonl
+  `[Tester]:` line found, the system prompt in effect (it refused a paraphrase of the token), and the
+  v0.30 big paste whole at 7650 chars / 120 marked lines.
+
+  **What the release itself was gated on is therefore unchanged by this** — the artifact users have
+  was published before any of it ran. What this gate can say is that the published tree passes, which
+  it does.
+
+  **The 0.23.4 ink fix still holds**, re-checked because it is the defect that made ink paint
+  nothing: `smoke-lifecycle` **19/19 in 23 s** and `smoke-adopt` **16/16 in 9 s** with
+  `CI=true GITHUB_ACTIONS=true`, i.e. identical to the unset runs. The pre-fix shape was 4 failures
+  in 88 s.
+
+  **Five things landed since the last full sweep were under-exercised, and each was driven rather
+  than read:**
+
+  | landed | what actually exercised it here |
+  | --- | --- |
+  | `waitForHealth()` on node's `fetch` (0.23.5) | a real jam launched with a `curl` shim first on `PATH` that exits 127 — daemon up, `/health` `{"ok":"ok"}`, join line printed. Every one of the ~30 daemons this gate started also went through it |
+  | the per-field tmux pane query (0.23.5) | `smoke-adopt` 16/16, twice — `cmdAdopt` is the only caller. The tmux **3.3a** shape (Debian/Ubuntu, and so WSL2) is pinned by a real captured fixture, not by this machine, which is 3.7c |
+  | the hook POST via node, and `hook-error.json` (0.24.0) | `check-hook-post` directly: a hook reaching the daemon **with no curl on `PATH` at all**, a hook that cannot reach it writing down why and still exiting 0, bash reporting the one case node cannot, and a real daemon reading that file and logging it |
+  | the `ps`-absent handling (0.24.0) | **fired, not assumed.** `smoke-lifecycle` and `smoke-adopt` re-run under a `PATH` built with symlinks to every binary except `ps`: both throw "`ps` is not installed (Debian: `apt-get install procps`) — this suite cannot tell a running process from a dead one without it" instead of reporting live processes dead. The `test.mjs` lint that counts exactly four pid-asking suites is green |
+  | the cascade/BLOCK reporting (0.23.4) | the same canary: `--- RESULT --- 4 step(s) FAILED · 4 step(s) BLOCKED by an earlier failure — not failures of their own`. A red run distinguishes the two, which is the whole point of it |
+
+  **WSL detection and the DrvFs refusal (0.24.0) were NOT exercised here, and cannot be.**
+  `check-wsl.mjs` reports all seven WSL branches `NOT EXERCISED — this machine is not WSL`, which is
+  the honest answer and the designed one; `JAM_WSL_OSRELEASE` reaches them from a Linux container, not
+  from macOS. What carries them on this platform is the eight v0.32 W2 unit tests (green) and the CI
+  legs. No COMPATIBILITY row for W2 reads verified, and this gate does not change that.
+
+  **The gate found one defect, and it is in the HARNESS, not in the released artifact.**
+  `smoke-view` was 6/6 and still leaked: it `mkdtemp`s two directories and its teardown removed one,
+  so every run of it left a `jam-view-*` behind, forever. No suite could go red on that — it *is* a
+  passing run — and it was caught by the F10 discipline of counting `$TMPDIR` either side of the
+  sweep: **143 `jam-*` directories before, 144 after**, with `smoke-view` the only suite that grew
+  it. `scripts/` is not in the npm tarball (22 files, checked), so nothing about this reaches an
+  installed 0.24.0 and **no 0.24.1 is owed**. Fixed in `63a319a`, with the failure branch driven too
+  (both directories kept and named), and a lint added because the leak is a passing run: every
+  `const NAME = fs.mkdtempSync(` in a smoke must be reachable by an `rmSync` — twelve suites,
+  twenty-six bindings — canaried both ways. Unit suite **471 → 472, 0 fail**.
+
+  **One branch this gate could not reach, and it is a machine fact rather than a skip:**
+  `smoke-lifecycle` S3 is the read-only proof about the live jam on :7777, and it is guarded on one
+  running. None was — there was no tmux server on any socket at all — so S3 reported *"no `jam`
+  session is running on the default socket — nothing to prove against"* and passed on the other half.
+  The guard was left exactly as it is.
+
+  Machine state verified rather than assumed, both ends. Before: **no live tmux server on any of the
+  83 sockets under `/tmp/tmux-501`** (asked one at a time, not inferred from the socket files, which
+  are all stale), no jam process, no listener anywhere in 7700–7999, and Roy's dormant state dirs at
+  7777 and 7873 present. After: the same, `$TMPDIR` back at **143** `jam-*` directories, every
+  session killed by exact name on its own socket, no `dns-sd`/`ttyd`/`cloudflared`/daemon child left,
+  and 7777/7873 untouched throughout.
 
 - **0.23.2 — 2026-08-30. The second security patch in a row, gated on all nineteen.**
   All nineteen suites plus the unit suite (**453 tests, 450 pass, 3 skipped, 0 fail**) and
