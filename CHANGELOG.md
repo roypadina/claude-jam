@@ -1,78 +1,115 @@
 # Changelog
 
-## Unreleased
+## 0.23.1
 
-### The hook secret was the un-scrubbed sibling of `host.key`
+**A security patch. Three findings, all in already-shipped code, all found by an adversarial
+review of surfaces nothing had attacked before: the browser view, the file commands and LAN
+discovery.** Nothing here needs a config change to pick up — upgrade, restart the jam.
 
-Also from the 2026-08-30 review. v0.34 established that **any participant can ask claude to read a
-file in the state dir**, and closed that route for `host.key` by making it a scrub needle on the
-mirror rows, the transcript funnel and `/export`. The daemon's *other* host-level credential got
-none of that treatment.
+Reported as classes, not recipes. If you run a jam with `--view` on a network you do not control,
+or over `--tunnel`/`--funnel`, this is the release to be on.
 
-`JAM_HOOK_SECRET` authenticates `POST /admit`, `/end`, `/invite`, `/remote`, `/peer/dispatch` and
-every `/hook/*`, and it is written to `<state>/session.json` as the **lower-case** field
-`"secret"` — the one shape `maskSecrets` deliberately refuses to match, because its `.env` rule is
-upper-case-only so it does not eat prose. So the exact route v0.34 documents leaked this one
-instead. Measured on a real jam: a guest's mirror frame came back carrying
+### Security
 
-```
-> "secret": "HOOKSECRETcanary1234"
-```
+**1. The browser view (`--view`) was documented read-only and was not — two independent ways.**
+Affects **every released version that has `--view`**: the feature landed in the v0.3 batch, before
+this changelog begins, so 0.14.0 through 0.23.0 inclusive.
 
-in clear, on a screen where the join token and the 64-hex host key on the adjacent rows were both
-masked (`[token removed]`, `[host key removed]`). The `JAM_HOOK_SECRET=…` env form *was* masked,
-which is what made the gap easy to miss.
+- *A viewer could resize the host's live Claude Code pane, from anywhere.* Each browser tab gets
+  its own tmux session grouped with the jam's, and a grouped session shares the jam's windows —
+  with tmux's default `window-size latest`, the newest client sizes that window for **everybody**.
+  Merely opening the view at a small browser size dragged a real host's claude window from 150x44
+  to 30x8, and one resize message on the ttyd socket took it to **12x4**: ttyd's read-only mode
+  means "no keyboard input" and says nothing about resize. Any holder of the view URL could do it,
+  including through a public relay. A garbled TUI is the visible damage; the point is that it came
+  from the surface documented as look-only.
+- *Whether a viewer could TYPE depended on which `ttyd` was installed, and nothing checked.* The
+  daemon passed no writability flag and rested the guarantee on one code comment: "ttyd >= 1.7 is
+  read-only unless `-W`". True of 1.7.0 and later — and **ttyd 1.6.x and earlier are writable
+  unless `-R`**, while `--view-ttyd <path>` accepts any binary. On such a host the tool published
+  a *writable* terminal on a port and printed "read-only". Run under a writable ttyd, the shipped
+  script let a browser tab's keystrokes reach the real claude pane; the tmux layer stopped nothing.
 
-And the secret is sufficient on its own — no `host.key`, no join token. Against a throwaway jam:
-`POST /invite {"op":"new","name":"Mallory"}` with only `x-jam-secret` returned `200` and a working
-`cjam1_…` invite link, and `POST /end` returned `200` and the jam was gone. The `localSocket` gate
-still holds (the same POST with `x-forwarded-for` got `403 loopback only`, so the cloudflared path
-is shut by v0.34's F1 fix) — but loopback is not a hard boundary for a guest on the `ssh -L
-7777:127.0.0.1:7777` tunnel the README itself recommends.
+  **`SPEC.md` claimed ttyd ran with `-R` and it never did.** That single stale line is how this
+  survived every review, and it is corrected. `-R` could not have been used anyway: it does not
+  exist on ttyd 1.7, so passing it would stop the view booting.
 
-Fixed by threading the secret as a third needle through the four funnels that already carry the
-other two: `scrubSecrets`, `scrubRowJoins` (so a wrapped secret is caught — 24 characters wraps on
-an 80-column pane 29% of the time), `sanitizeFrameRow` and `stripTokenBlock`. The mirror row now
-reads `"secret": "[hook secret removed]"`.
+Fixed at the **tmux** layer, not with a ttyd flag: a viewer's grouped session is now born
+`-f read-only,ignore-size`, so the guarantee holds whatever `--view-ttyd` points at. Both flags
+want tmux >= 3.2, already this project's floor (`display-popup`, the knock popup's mechanism,
+landed in that tmux release). `scripts/smoke-view.mjs` is new — the nineteenth smoke, and the
+**first behavioural test this surface has ever had**: real daemon, real host client attached in a
+real pty, real ttyd, real frames on the wire, and a step that deliberately runs a *writable* ttyd
+so the flags cannot quietly come back out.
 
-**Not fixed, and left for a decision:** whether `session.json` should carry the secret at all.
-`claude-jam end` reads it from there, but `host.key` — 0600, never written anywhere else, already
-a scrub needle — could authenticate those endpoints instead, which would delete the leak class
-rather than masking it. That changes the auth model of five HTTP endpoints, so it is Roy's call.
+**2. The daemon's internal hook secret reached guests' mirror frames in the clear.** Affects every
+released version in which a mirror and a hook secret coexist; verified on 0.23.0.
 
-### The browser view was never actually read-only — two ways
+`JAM_HOOK_SECRET` authenticates the daemon's local control endpoints — admitting a knocker, ending
+the jam, minting an invite, switching a public relay on, dispatching a peer task, and every hook
+callback. v0.34 established that **any participant can ask claude to read a file in the state
+dir**, and closed that route for `host.key` by making it a scrub needle on the mirror rows, the
+transcript funnel and `/export`. The hook secret got none of that treatment, and it is written to
+`session.json` in the one shape the pattern masker deliberately ignores. So a guest's mirror frame
+could carry it in clear on a screen where the join token and the host key on the adjacent rows were
+both masked — which is exactly what made it easy to miss. Holding it was sufficient on its own, no
+host key and no join token, to reach those endpoints from a socket that looks local; the
+`--tunnel` path was already shut by 0.21.1's proxy-header check, but a plain SSH tunnel — which
+this project's own README recommends — is not.
 
-Found by the 2026-08-30 adversarial review of `--view`, the surface documented "read-only" in
-every version that has ever shipped it (v0.3 onwards). Both halves are fixed by the same change,
-two tmux client flags on the viewer's grouped session; both were reproduced against a real jam
-with a real host client attached at 150x45, and `scripts/smoke-view.mjs` — new, the nineteenth
-smoke and the first behavioural test this surface has ever had — is the canary.
+**3. `claude-jam find` treated a discovered jam as somewhere a credential may go.** Affects
+**0.19.0 through 0.23.0** (discovery shipped in 0.19.0).
 
-- **A viewer could resize the host's live Claude Code pane, and nothing about that needed a bug in
-  ttyd.** A grouped session shares the jam's windows, `window-size` defaults to `latest`, so the
-  newest client sizes the window for everybody. A browser merely *opening* the view at 30x8 dragged
-  the host's real claude window from 150x44 to **30x8**; one ttyd `RESIZE_TERMINAL` frame
-  (`'1' + {"columns":12,"rows":4}`) took it to **12x4**. ttyd's read-only mode means "no INPUT" and
-  says nothing about resize, so this was available to any holder of the view URL, over `--tunnel`
-  from anywhere. Fixed by `-f ignore-size`: measured again, the host stayed at 150x44 through both.
-- **Whether a viewer could TYPE depended on which `ttyd` was installed, and nothing checked.** The
-  code passed no writability flag and rested the guarantee on one comment — "ttyd >= 1.7 is
-  read-only unless `-W`". True of 1.7.0+; **ttyd <= 1.6.3 is writable unless `-R`** (its own
-  `--help`: `-R, --readonly  Do not allow clients to write to the TTY`), and `--view-ttyd <path>`
-  accepts any binary, so an old Homebrew install or a distro package published a **writable**
-  terminal on a port while the tool printed "read-only". Running the shipped script under `ttyd -W`
-  — exactly what an old ttyd does with no flag — landed a viewer's keystrokes in the real claude
-  pane: the tmux layer was no defence at all. Fixed by `-f read-only`, which holds on every ttyd
-  version; under the same `-W`, tmux now drops the keys. `SPEC.md` claimed `-R` was passed and it
-  never was — that is corrected too, and `-R` could not be added anyway (it does not exist on 1.7).
+mDNS is unauthenticated by construction: no signature, no identity, nothing to check. Anybody on
+your network can publish a jam that looks exactly like somebody else's — reproduced with an
+advertisement claiming another jam's name, another host's name, `access=token` and `view=yes`,
+which listed beside the real jam and matched it in **every displayed column except the address**.
+Under it, the tool then printed a join command containing `--token <token>`, and the launcher made
+that a one-keypress pick whose preview echoed the real token to the terminal. A printed command is
+an instruction, so that line was the vulnerability regardless of what the human did next.
 
-Both flags want tmux >= 3.2, already this project's floor: `display-popup`, the knock popup's whole
-mechanism, landed in the same tmux release. `VIEW_SH` moved from `host.mjs` to `lib.mjs` so the
-smoke runs the same string the daemon runs rather than a copy that could rot.
+Discovery is an address hint now, and only that: no printed join command anywhere carries
+`--token`; the **address leads every row** (the one field an attacker cannot forge into a match —
+it used to be last); a line under every listing says advertisements are unauthenticated and anybody
+on the network can publish one; a token jam is pointed at an **invite link**, whose per-invite
+secret is bound to the host's own addresses and is useless to a look-alike host; and the launcher's
+token prompt names the address the token is about to be sent to while its printed command shows
+`<your token>` instead of the value. No crypto and no new protocol — the fix is to stop treating a
+broadcast as a destination for a secret.
 
-**Docs**: `README.md` and `MANUAL.md` now say the view URL's credential **is the join token**
-whenever one is set — so a leaked view link is a leaked join link — and that `/kick` does not
-revoke a view (only `/token new` or turning the view off does).
+### The root cause behind #2, fixed as such
+
+Three scrub needles maintained by hand is *how* #2 happened: the work that added `host.key` sat one
+file away from the credential it did not add. So the list stops being hand-written. `lib.mjs` now
+has a **secret registry** — one enumeration of every secret a daemon holds, with its mask and its
+validator — and all four scrub funnels iterate it instead of a hand-written list. `host.mjs` has a
+single expression that builds the secrets object, and every funnel call uses it.
+
+Two tests are the forcing function: one walks the registry and asserts every entry is scrubbed on
+every funnel, including every boundary the value can wrap at; the other lints `host.mjs` so a
+funnel cannot be handed a hand-picked subset. Deregister a secret, register one without wiring it,
+or hand-pick at a call site, and a test goes red instead of a secret appearing on somebody's
+screen.
+
+**Invite secrets are deliberately not registered**, and the comment says why: only
+`inviteHash(secret)` is persisted, so the plaintext exists in exactly one frame — the reply to the
+host who asked for it — and in no file, log line or pane. A needle for a value the daemon does not
+retain is a scrub that quietly never runs.
+
+The pattern masker also learns the **quoted-JSON** shape, case-insensitively, since that is the
+shape that hid #2. The unquoted `.env` rule stays upper-case-only on purpose, and a test pins it:
+this runs on a code screen, and `const token = getToken(scope)` has to survive or the mirror stops
+being worth watching.
+
+### Docs
+
+- `README.md` and `MANUAL.md`: the view URL's credential **is the join token** whenever one is set,
+  so a leaked view link is a leaked join link; `/kick` does not revoke a view (only `/token new`,
+  or turning the view off, does); read-only is enforced on the tmux client and why that matters.
+- `README.md` and `MANUAL.md`: `find` locates an address you already trust and does not
+  authenticate anybody, with the reproduction named.
+- `SPEC.md`: the `-R` correction above.
+- `TESTING.md`: `smoke-view` documented as the nineteenth suite, with its canary result.
 
 ## 0.23.0
 
