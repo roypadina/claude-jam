@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Security — host identity is a local secret, not a network address (v0.34)
+
+**This closes `--funnel`'s unverified exposure without needing to measure it**, and every relay
+added later with it. It supersedes nothing in 0.21.1: that fix stays, as the second of two
+conditions.
+
+0.21.1 fixed F1 by reading the proxy headers a relay cannot suppress. That was measured against
+cloudflared and it holds — but it is structurally a **blocklist**: it enumerates what a relay
+looks like. The next relay that proxies to `127.0.0.1` without a header on that list re-opens the
+same hole, silently, and the hole hands a stranger the host's machine and the join token.
+`--funnel` was exactly that unknown, and it could not be measured here (Funnel is not enabled on
+this tailnet).
+
+So the inference is replaced with proof. At daemon start the jam writes **`<state>/host.key`** —
+32 random bytes, mode `0600`, in the state dir that is already `0700`. The host's own client reads
+that file and presents it in its `hello`; `host: true` and the daemon's `trusted()` gate now
+require it. A process on another machine cannot read it, whatever address its packets appear to
+come from and whatever headers they carry, so a funnel-relayed socket is not the host whether or
+not Tailscale sets a header we would have recognised.
+
+**Two conditions, and they fail independently.** `localSocket()` stays: a connection must present
+the key **AND** look local. Belt and braces on the gate that owns somebody's machine. The refusal
+says which condition failed — key, locality, or both — because "you are not the host on your own
+machine" is otherwise an unanswerable bug report.
+
+**This is not a new trust assumption.** Anyone who can read `<state>/host.key` can already read
+`token.json` beside it, and is already a local user with the host's own privileges. The key grants
+nothing filesystem access did not already grant; it stops the *network* impersonating the
+filesystem.
+
+**No silent fallback, ever.** A client launched with `--host` against a jam with no key file (an
+older daemon, or one started by hand) says so and joins as a **guest**. Falling back to
+address-only host would re-open F1 for exactly the people who upgrade without restarting. End the
+jam and start it again to be its host.
+
+**The key is a credential**: never logged, never in a frame the daemon sends, never in the
+transcript, never in an export (`stripTokenBlock` scrubs it like the join token), never in a
+`--help` example. Only its **path** is ever printed — the launcher hands its own client
+`--host-key-file <path>` on every surface that opens it (`claude-jam host`, `host --attach`, the
+launcher menu's attach, and `claude-jam adopt`), and the client reads the file itself.
+
+**Still not verified:** Tailscale Funnel's *transport* (does it relay at all, on this tailnet).
+What changed is that the *host gate* no longer depends on recognising it.
+
 ### Tests — the smoke suites clean up after themselves (campaign F10)
 
 `smoke-peer` (4 directories per run), `smoke-answer` (3), `smoke-discover` (2) and `smoke-xfer`

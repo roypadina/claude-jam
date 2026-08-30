@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath } from './lib.mjs';
+import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, validHostKey } from './lib.mjs';
 
 export const IS_MAC = process.platform === 'darwin';
 export const IS_WINDOWS = process.platform === 'win32';
@@ -54,6 +54,19 @@ export function secureWrite(file, data) {
 export function secureDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+// v0.34: the one place the host key is read off disk — the daemon (to know what to compare
+// against), and each client (to prove it is the host). Anything that is not a well-formed key
+// comes back null, which every caller reads as "no key", i.e. a guest. Never logged, never
+// returned in an error string: a missing key and an unreadable one are the same answer here,
+// and the reason a human needs is hostKeyNotice()'s, which quotes the PATH and not the file.
+export function readHostKey(file) {
+  if (!file) return null;
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  const key = raw.trim();
+  return validHostKey(key) ? key : null;
 }
 
 // ------------------------------------------------------------------- notifications ----

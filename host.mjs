@@ -22,6 +22,9 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   validDiffPath, gitDiffArgs, capOutput, maskSecrets,
   // v0.17 Batch P: the read-only allowlist, the permission relay, per-client RTT.
   isSafeGuestCommand, parsePermOptions, permOptionsReport, validPermChoice, PERM_TEXT_MAX,
+  // v0.34: host identity is a local secret, not a network address — the key file, the two-
+  // condition gate and the refusal that says which condition failed.
+  hostKeyPath, hostRefusal, HOST_KEY_BYTES, HOST_KEY_FILE,
   // v0.18: jam owns the tmux session it made — the marker, the prompts, the way back in.
   OWNED_OPTION, SESSION_FILE, sessionInfo, parseSessionJson, exitDecision, EXIT_KEYS,
   exitPromptText, reattachLines, TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName,
@@ -70,7 +73,7 @@ import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHeal
 // v0.32 W0: $TMPDIR, and every file that must be readable by its owner and nobody else, come
 // from the one module that knows what operating system this is.
 // v0.23: and so does mDNS — advertising is a platform binary, browsing is a platform binary.
-import { stateDir, secureDir, secureWrite, advertiseSpawn } from './platform.mjs';
+import { stateDir, secureDir, secureWrite, advertiseSpawn, readHostKey } from './platform.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 // v0.23: what the TXT record's `v=` says. Read once, off the package.json beside this file, so
@@ -725,6 +728,12 @@ async function runHostClient(info) {
     const client = spawnSync(process.execPath,
       [path.join(HERE, 'client.mjs'), `ws://127.0.0.1:${info.port}`,
         '--name', opts.name, ...(token ? ['--token', token] : []), '--host',
+        // v0.34: the PATH of the key, never the key — an argv is in `ps`, and the file behind
+        // this path is 0600 in a 0700 dir. Every surface that launches the host's own client
+        // comes through here (`claude-jam host`, `--attach`, the launcher menu's attach, and
+        // `claude-jam adopt`), which is what keeps them from silently demoting the host.
+        // The client reads it, and says so and joins as a guest if it is not there.
+        '--host-key-file', hostKeyPath(info.state || opts.state),
         // v0.25: a sound is the client's business, so --no-sound is forwarded rather than
         // interpreted here. /menu → Notifications and /sound on|off flip it while it runs.
         ...(opts.sound === false ? ['--no-sound'] : [])],
@@ -755,6 +764,8 @@ async function runHostClient(info) {
     console.log(`\nclient closed — the jam is still running.\n`
       + `${reattachLines({ tmux: info.tmux, port: info.port, clientCmd: opts.clientCmd, name: opts.name, token,
         socket: info.socket || SOCKET,
+        // v0.34: where the key is, so the raw `or:` line still comes back as the HOST.
+        state: info.state || opts.state,
         // v0.33: the raw TUI of an adopted jam is somebody else's pane on their own server.
         adopt: info.adopt || null }).map((l) => `  ${l}`).join('\n')}\n`);
     return;
@@ -864,6 +875,37 @@ function writeTokenFile() {
   if (opts.noTokenInContext) return fs.rmSync(file, { force: true });
   const { join, view, tunnelJoin, tunnelView } = joinInfo();
   fs.writeFileSync(file, JSON.stringify(buildTokenFile(currentToken, join, view, tunnelJoin, tunnelView), null, 2));
+}
+
+// -------------------------------------------------- v0.34: the host's own key ----
+// The proof that replaces the inference. 32 random bytes as hex in `<state>/host.key`, 0600,
+// inside the 0700 state dir — beside token.json, which is already exactly as sensitive. A
+// process on another machine cannot read it, whatever address its packets arrive from, so
+// `host:true` no longer depends on recognising what a relay looks like (see hostGate in lib).
+//
+// An EXISTING key is reused rather than replaced: a daemon that restarts under a host client
+// that is already running (the client reconnects on its own) must not silently demote it, and
+// the file lives and dies with the state dir, which goes when the jam ends. The value is never
+// logged, never put in a frame and never told to claude — only the path is ever printed.
+let HOST_KEY = null;
+function loadHostKey() {
+  const file = hostKeyPath(opts.state);
+  HOST_KEY = readHostKey(file);
+  if (HOST_KEY) {
+    console.log(`[host-key] reusing ${file} (0600) — the host's own client proves itself with it`);
+    return HOST_KEY;
+  }
+  try {
+    HOST_KEY = randomBytes(HOST_KEY_BYTES).toString('hex');
+    secureWrite(file, `${HOST_KEY}\n`);
+    console.log(`[host-key] wrote ${file} (0600) — host authority is this file, not an address`);
+  } catch (e) {
+    // Fails CLOSED and says so: with no key nobody is the host, which is a jam you can still
+    // talk in but not drive. The alternative — falling back to the address — is F1.
+    HOST_KEY = null;
+    console.log(`[host-key] COULD NOT write ${file} (${e.message}) — nobody can be host in this jam`);
+  }
+  return HOST_KEY;
 }
 
 function writeRoster(participants) {
@@ -1847,6 +1889,10 @@ function pumpPopups() {
 }
 
 function daemon() {
+  // v0.34: FIRST, before there is a server at all — the host's own client is spawned by the
+  // launcher the moment the health endpoint answers, and it reads this file to prove itself.
+  // A key written after listen() would be a race the host loses by becoming a guest.
+  loadHostKey();
   saveStatusRight();
   // v0.20-3: the resting value, set once at boot — `⚑ N waiting` takes the line whenever
   // something is pending and refreshStatusRight puts this back afterwards.
@@ -2520,8 +2566,16 @@ function onSocket(ws, req) {
           text: inviteRefusal(v.reason, v.why) });
         console.log(`[invite] refused from ${ip}: ${v.reason} — ${v.why}`);
       }
-      const c = classifyHello(m, currentToken, local);
+      const c = classifyHello(m, currentToken, local, HOST_KEY);
       if (!c.ok) { sendError(ws, c.error); return ws.close(c.code, c.error); }
+      // v0.34: somebody claimed host and did not get it. Told out loud, with WHICH of the two
+      // conditions failed — key, locality, or both — because a demoted host is otherwise
+      // invisible (it falls through to the read-only allowlist and the pane looks identical).
+      // Not fatal: the claim is dropped, the connection carries on as an ordinary guest.
+      if (c.failed?.length) {
+        sendError(ws, hostRefusal(c.failed));
+        console.log(`[host-key] ${c.name} from ${ip} claimed host and was refused: ${c.failed.join(', ')}`);
+      }
       // v0.24: invite-only. A knock is refused rather than left waiting for a host who has
       // decided not to be asked — and the refusal says what to go and get. The host's own
       // loopback client and a valid token still come in above this: this closes the KNOCK door.
@@ -3298,7 +3352,7 @@ function sendExport(rec) {
   }
   let text;
   try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return sendError(rec.ws, `could not read the transcript: ${e.message}`); }
-  const data = Buffer.from(stripTokenBlock(text, currentToken), 'utf8');
+  const data = Buffer.from(stripTokenBlock(text, currentToken, HOST_KEY), 'utf8');
   const xfer = `e${++xferN}`;
   console.log(`[export] ${rec.name} ← ${file} (${humanBytes(data.length)})`);
   broadcast({ t: 'sys', text: `${rec.name} took a copy of the session transcript (${humanBytes(data.length)})` });

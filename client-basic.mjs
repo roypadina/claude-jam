@@ -27,7 +27,9 @@ import { parseClientLine, inviteLines, labelWidth, wrapText, mdLite, userColor, 
   // v0.29: a task somebody wants to run on THIS machine — the consent block, the second gate on
   // anything that writes or executes, and where it would run.
   PEER_TOOLS_DEFAULT, peerTaskBlock, peerAcceptDecision, peerScratchDir, peerWhyText,
-  peerTag } from './lib.mjs';
+  peerTag,
+  // v0.34: what to say when the host key is not there to read.
+  hostKeyNotice } from './lib.mjs';
 // v0.29: the spawn itself, shared with the ink client — one place where a peer task is built,
 // capped and killed, so the two surfaces cannot drift apart.
 import { runPeerTask } from './peer.mjs';
@@ -38,14 +40,22 @@ import { xferStart, xferChunk, saveXfer, readForUpload, DOWNLOAD_DIR } from './x
 // v0.32 W0: anything that touches this machine's clipboard, desktop or dot-directories goes
 // through the one module that knows what operating system this is.
 import { clipboardImage, notify, playSound, configDir, historyFile, secureWrite,
-  secureDir } from './platform.mjs';
+  secureDir, readHostKey } from './platform.mjs';
 
 const argv = process.argv.slice(2);
 const url = argv.find((a) => a.startsWith('ws'));
 const flag = (n) => { const i = argv.indexOf(`--${n}`); return i < 0 ? undefined : argv[i + 1]; };
 const NAME = flag('name');
 const TOKEN = flag('token');
-const IS_HOST = argv.includes('--host');
+// v0.34: `--host` is a CLAIM; the key file is the proof. The path arrives on the argv (the
+// launcher's runHostClient puts it there for every surface that opens the host's own client);
+// the key itself never does — an argv is in `ps`, and the file is 0600 in a 0700 dir. No key
+// means this client says so and joins as a GUEST: a silent fall back to address-only host is
+// exactly the F1 hole, and it would re-open it for whoever upgrades without restarting.
+const HOST_CLAIM = argv.includes('--host');
+const HOST_KEY = HOST_CLAIM ? readHostKey(flag('host-key-file')) : null;
+if (HOST_CLAIM && !HOST_KEY) console.error(hostKeyNotice(flag('host-key-file')));
+const IS_HOST = HOST_CLAIM && !!HOST_KEY;
 // v0.22B: what an invite link unpacked into (client.mjs decoded it). The secret rides in the
 // hello; the address list is tried in order, tunnel first, with INVITE_CONNECT_MS each.
 const INVITE = flag('invite');
@@ -54,7 +64,7 @@ let addr = 0;
 // No --token is normal now: the host may run knock-only, and then you wait to be accepted.
 if (!url || !NAME) {
   console.error('usage: claude-jam join <invite-link>\n'
-    + '       claude-jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host]');
+    + '       claude-jam join|node client.mjs <ws-url> --name <Name> [--token <token>] [--host --host-key-file F]');
   process.exit(2);
 }
 
@@ -529,7 +539,10 @@ function connect() {
     attempts = 0;
     // v0.22B: `invite` is checked before the token and admits under the name the host bound to
     // the link; a refused one is explained and then knocks, so it always rides along.
-    ws.send(JSON.stringify({ t: 'hello', name: NAME, token: TOKEN, invite: INVITE, host: IS_HOST || undefined }));
+    // v0.34: the key rides in the hello and nowhere else — the daemon compares it and never
+    // echoes it back, so it is in no frame it sends, no log line and no transcript.
+    ws.send(JSON.stringify({ t: 'hello', name: NAME, token: TOKEN, invite: INVITE,
+      host: IS_HOST || undefined, hostKey: HOST_KEY || undefined }));
   });
   ws.addEventListener('message', (m) => {
     let ev;

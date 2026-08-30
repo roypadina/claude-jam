@@ -77,6 +77,29 @@ plugins, MCP servers and version), so nothing there is a guess.
   They need to reach the host — same Tailscale network typically, or the host's `--tunnel` /
   `--funnel` URL.
 
+### Who is the host, exactly (v0.34) — say this if somebody asks
+
+Host is not a name and not an address. It is **two conditions, both required**:
+
+1. the client presented the contents of `<state>/host.key` — 32 random bytes, mode `0600`, written
+   by the daemon at start inside the `0700` state dir, readable only by a process on the host's own
+   machine running as the host; and
+2. the connection started on this machine (loopback, no proxy header).
+
+Either one failing means guest. If somebody says "I started this jam but I am not the host", the
+answer is one of:
+
+- **their client had no key file to read** — it says so in one line at startup and joins as a
+  guest. That happens against a daemon started before v0.34, or one started by hand. The fix is to
+  end the jam and start it again (`claude-jam end <session>`, then `claude-jam host`), not to pass
+  a flag;
+- **they connected through a relay** (`--tunnel` / `--funnel` URL) instead of over loopback. The
+  host's own client connects to `ws://127.0.0.1:<port>`; a relay URL is for guests.
+
+The daemon's refusal names which of the two failed. **Never read the key file out, never quote it,
+never put it in a message** — it is a credential exactly like the join token, and there is no
+reason for anybody to see its contents, host included.
+
 ## F3 — the host attaches to your screen
 
 The host presses **F3** and their client hands the whole terminal to
@@ -90,7 +113,7 @@ status line says `F3 or Ctrl-b d → back to claude-jam` — unless somebody is 
 which was 300-500 ms per key; now there is no proxy at all. While the host is attached their
 mirror is paused, so guests keep watching but the host's own client is not on screen.
 
-Guests never get F3 (host + loopback only, enforced by the daemon) — if a guest asks, tell them to
+Guests never get F3 (host only, enforced by the daemon) — if a guest asks, tell them to
 ask the host, to send a `/command` request, or (for a permission prompt specifically) to use
 `/answer`, below. Attaching by hand does the same thing as F3, and since v0.20 needs the socket:
 `tmux -L claude-jam-<port> attach -t <jam>:claude` (`claude-jam sessions` prints it).
@@ -838,7 +861,7 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   still in flight. The exact reason went to that person's own client as a `!` line.
 - `/paste` says it is macOS-only → it is: it reads a PNG off the mac clipboard (pngpaste if
   installed, otherwise osascript). Elsewhere, save the image and use `/send <path>`.
-- F3 does nothing → they are a guest (host + loopback only), or their terminal sends a
+- F3 does nothing → they are a guest (see "who is the host" below), or their terminal sends a
   different F3 sequence; the host can `tmux attach -t claude-jam` instead — that is exactly what F3
   does for them. A guest who only needs to answer a permission prompt wants `/answer`.
 - Host is stuck inside the TUI after F3 → **F3 again** detaches (v0.20 binds it on claude-jam's own
