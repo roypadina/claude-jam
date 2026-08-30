@@ -40,6 +40,35 @@ Run when the feature list is done. Not a smoke re-run — an adversarial pass ov
 
 ## Release gates that have actually run
 
+- **0.22.1 — 2026-08-30.** All eighteen suites, in the documented order, plus the unit suite
+  (**427/0**), on node 24.15 / tmux 3.7c / claude 2.1.251, from a verified-clean machine state (no
+  tmux server on any socket, no jam process, the only state dirs the two dormant ones that pre-date
+  the run). Suites 1–6 shared one `--model haiku` daemon on :7799, suite 7 its own knock-only
+  daemon, suites 8–18 self-contained. Logs and `results.tsv` in
+  `~/ClaudWork/2026-08-30-jam-security-review/gate/`.
+
+  **The gate went red on the first pass, and it caught something standalone runs had not.**
+  `smoke-invite` step 9 failed — *"timed out waiting for close 4409"* — because the roster-oracle
+  fix moved the knock path's name check below authentication, and an **invite** whose bound name is
+  already connected had been relying on that check for its 4409 close. The refusal itself was
+  unaffected (immediate, by name — the holder authenticated); what changed is that the socket now
+  falls through to a knock like the other four invite refusal reasons, which is the invite design's
+  own rule. That is better, not merely different: reconnecting on your own link while your stale
+  socket is still in the roster used to be a lockout. Step 9 now asserts the new shape, including
+  that exactly one Yossi is in the roster while the duplicate waits.
+
+  **Second pass, on the tree that shipped: 18/18, exit 0 on every suite, 235 PASS lines, 0 FAIL.**
+  `smoke-mirror` and `smoke-xfer` were run against a real claude rather than deferred again (both
+  green), which discharges the two deferrals the security review opened. `smoke.mjs`'s field report
+  had every field present, `system prompt IN EFFECT`, and the 121-line paste WHOLE in the
+  transcript. Machine clean afterwards: no tmux server on any socket, no jam process, no
+  `jam-uploads/` in the repo, and `$TMPDIR/claude-jam-7777` and `-7873` untouched.
+
+  **What this gate means that the last one did not.** `smoke-nudge` had been reporting green
+  without running a step, and `smoke.mjs` could report green with two checks MISSING — both fixed
+  before this gate ran, and all eighteen suites swept for the class first (see the vacuity audit
+  below). So the 235 PASS lines are steps that actually executed.
+
 - **0.22.0 — 2026-08-30.** All eighteen suites, in the documented order, one at a time, on node
   24.15 / tmux 3.7c / claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2, from a verified-clean
   machine state (no tmux server on any socket, no jam daemon anywhere, the only state dirs the two
@@ -479,11 +508,14 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   Driven against a `fake-tui` daemon it is 5/8, with the three failures attributable to the
   stand-in by their own text. Prove: `smoke-mirror` in the next release gate's shared-daemon block,
   where a real claude is up anyway.
+  **DISCHARGED — 0.22.1 gate, 2026-08-30: run against a real claude in the shared-daemon block,
+  7/7 green.**
 - 2026-08-30 · **SECURITY REVIEW, NEW: `smoke-xfer` not re-run after the upload write changed to
   `flag: 'wx'`.** Same reason — it takes a live jam with a real claude (its last step reads the
   pane for claude's reaction to an uploaded image). `smoke-nudge` covers the same
   `onUpload → writeUpload` path end to end for free, and now runs 16/16 including the two new
   steps. Prove: `smoke-xfer` in the next release gate.
+  **DISCHARGED — 0.22.1 gate, 2026-08-30: run against a real claude, 12/12 green.**
 - 2026-08-30 · **SECURITY REVIEW, NEW: the pre-auth roster oracle is REPORTED, not decided.**
   A hello with a name somebody already holds is refused `the name "X" is already taken here` and
   closed 4409 **before** any admission, so a stranger with no token can enumerate who is in a jam,
@@ -493,6 +525,9 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   they were refused), so it was left for Roy rather than picked. Prove/decide: either accept it in
   `Security-Model` as the cost of name-based attribution, or move the name check below admission
   and give a knocker a generic refusal.
+  **DECIDED AND DISCHARGED — 0.22.1: Roy chose ordering over silence.** The name check moved below
+  the authentication gate, a knocker's clash is settled at admission by `resolveJoinName`, and a
+  source lint fails if it ever moves back. See the CHANGELOG's 0.22.1 section.
 
 ## The 2026-08-30 vacuity audit — every suite, for tests that cannot fail
 
