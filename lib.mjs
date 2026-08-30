@@ -32,9 +32,20 @@ export function tokenMatches(given, current) {
 
 // Attribution is by name, so two live participants cannot share one. Compared
 // case-insensitively: "[dana]" and "[Dana]" would read as the same person to the agent.
+// v0.34.2: and TRIMMED as well as lowercased, because `NAME_RE` allows a trailing space and a
+// person does not have one. Measured 2026-08-30 against 0.24.0: with the host `Roy` in the room, a
+// guest joining as `"Roy "` was not a clash — so the roster read `["Roy","Roy "]`, two rows that
+// render identically; the pane got `[Roy ]: …`, which reads as the host to anybody and to the
+// agent; and the impostor could not be removed, because `/kick Roy` trims its argument and finds
+// the real Roy first (and then refuses, since that is the host themselves). The token rule held —
+// it turns on the PREFIX, not on the name — but everything else about who was speaking did not.
+//
+// This is the same shape as 0.21.1's `PREFIX_FORGERY_RE`: the check that decides "same person" was
+// narrower than what a human or an agent reads as the same person.
+const sameName = (n) => String(n ?? '').trim().toLowerCase();
 export function nameTaken(name, taken) {
-  const n = String(name).toLowerCase();
-  return taken.some((t) => String(t).toLowerCase() === n);
+  const n = sameName(name);
+  return taken.some((t) => sameName(t) === n);
 }
 
 // v0.22.1: what a KNOCKER joins as, decided at admission rather than at hello.

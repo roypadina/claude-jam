@@ -179,6 +179,27 @@ await step('an AUTHENTICATED duplicate name is still refused 4409, immediately',
   console.log(`      ${JSON.stringify(e.text)}`);
 });
 
+// v0.34.2: and the LOOKALIKE is refused by the same rule. NAME_RE allows a trailing space, so
+// through 0.24.0 `"Eli "` was simply a different name: the roster held ["Eli","Eli "], two rows
+// that render identically, the pane got `[Eli ]: …`, and `/kick Eli` could not reach the impostor
+// because it trims its own argument and finds the real Eli first.
+await step('…and so is a name that only LOOKS different — a trailing space is not a person', async () => {
+  for (const name of ['Eli ', 'Eli  ', 'eLi ']) {
+    const dup = peer({ name, token: TOKEN });
+    await dup.want(`the refusal for ${JSON.stringify(name)}`,
+      (f) => f.t === 'error' && /already taken here/.test(f.text));
+    await dup.wantClose(4409);
+  }
+  // A TAB never gets that far — NAME_RE has always refused it, and 4400 is a different refusal.
+  const tabbed = peer({ name: '\tEli', token: TOKEN });
+  await tabbed.wantClose(4400);
+  // An INTERIOR space is a different name and must still get in — "E li" does not read as "Eli".
+  const other = peer({ name: 'E li', token: TOKEN });
+  const w = await other.want('welcome', (f) => f.t === 'welcome');
+  eq(w.you, 'E li', 'an interior space is a different person and still joins');
+  console.log('      "Eli ", "Eli  ", "eLi " refused 4409; "\\tEli" 4400; "E li" admitted');
+});
+
 await step('a wrong token knocks, and admit ok:false closes it 4403', async () => {
   noa = peer({ name: 'Noa', token: 'definitely-wrong-1' });
   const k = await noa.want('knock', (f) => f.t === 'knock');
