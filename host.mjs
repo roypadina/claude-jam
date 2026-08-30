@@ -69,6 +69,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   peerTools, peerCaps, validPeerPrompt, peerPermissionMode, peerRefusal,
   peerEntry, peerDayKey, peersReport, peerLogLine, parsePeerLog, peerLogReport, peerTag,
   peerQuote, peerWhyText, peerResultForAgent, peerStructured, PEER_PROGRESS_MAX,
+  // A hook that could not reach this daemon, which is the one failure the hook cannot report.
+  HOOK_ERROR_FILE, hookErrorNote,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -2024,6 +2026,7 @@ function daemon() {
   setInterval(tailJsonl, 300).unref?.();
   startHeartbeat(wss);
   startSessionWatch();
+  startHookWatch();
 }
 
 // ------------------------------------------------------ v0.18: ending the jam ----
@@ -2105,6 +2108,27 @@ function startSessionWatch() {
     removeState = true; // there is no session left for it to describe
     broadcast({ t: 'ending', by: opts.name, reason: 'the tmux session went away' });
     setTimeout(() => process.exit(0), 500).unref?.();
+  }, 5000);
+  timer.unref?.();
+}
+
+// A stop or notification hook that could NOT reach this daemon has nowhere to report it — the
+// report IS the thing that failed, which is how a box with no curl ran jams for six releases
+// while every idle signal and every turn-end nudge went nowhere. hooks.sh writes the reason to
+// <state>/hook-error.json and deletes the file again the moment a hook lands, so this is the
+// only eye there can be on it. Polled at the watchdog's own 5 s rather than fs.watch'd: the file
+// usually does not exist, and fs.watch cannot watch a path that is not there.
+function startHookWatch() {
+  const file = path.join(opts.state, HOOK_ERROR_FILE);
+  let seen = 0;
+  const timer = setInterval(() => {
+    let mtime = 0;
+    try { mtime = fs.statSync(file).mtimeMs; } catch { seen = 0; return; } // gone: a hook landed
+    if (mtime === seen) return;
+    seen = mtime;
+    let note = null;
+    try { note = hookErrorNote(fs.readFileSync(file, 'utf8')); } catch { /* caught mid-write */ }
+    if (note) console.log(note);
   }, 5000);
   timer.unref?.();
 }

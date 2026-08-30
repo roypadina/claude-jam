@@ -112,6 +112,8 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   LINUX_SOUNDS, FREEDESKTOP_SOUND_DIR, ALSA_SOUND_DIR, linuxSoundPlan,
   terminalSupport, WINDOWS_TERMINAL_HINT, canAttachTmux, NO_TMUX_ATTACH,
   windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS,
+  // 0.23.6: the hook that could not reach the daemon — the one failure a hook cannot report.
+  HOOK_ERROR_FILE, hookErrorNote,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7720,4 +7722,54 @@ test('0.23.4 no smoke suite reports a ZOMBIE as a running process', () => {
   }
   // The four suites that ask about a pid at all. A rename must not turn this lint into a no-op.
   assert.equal(checked, 4, `expected four pid-asking suites, linted ${checked}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 0.23.6: `hooks.sh` posted the stop and notification hooks with `curl … || true`. On a box with
+// no curl a jam ran normally while EVERY one of them was dropped — no idle signal, no turn-end
+// nudge, and no error anywhere, because the thing that failed IS the report. It posts with the
+// daemon's own node now, and a POST that does not land writes its reason to
+// <state>/hook-error.json, which the daemon polls and logs. These pin the daemon's half.
+test('0.23.6 hookErrorNote turns a dropped hook into one line the daemon can print', () => {
+  const line = hookErrorNote(JSON.stringify({
+    at: '2026-08-30T10:11:12.000Z', event: 'stop', error: 'fetch failed',
+  }));
+  assert.match(line, /^\[hook\] stop hook did NOT reach this daemon at 2026-08-30T10:11:12\.000Z: fetch failed/);
+  assert.match(line, /turn-end and attention signals are being dropped/);
+  // The bash fallback (node itself never ran) has no clock to ask, so the timestamp is optional.
+  assert.equal(hookErrorNote('{"event":"notification","at":"","error":"could not run node"}'),
+    '[hook] notification hook did NOT reach this daemon: could not run node'
+    + ' — turn-end and attention signals are being dropped');
+  // Nothing to say is said as null, never as a half-line: the daemon prints only real losses.
+  for (const bad of ['', '   ', 'not json', '[]', 'null', '"stop"', '42', undefined, null]) {
+    assert.equal(hookErrorNote(bad), null, `hookErrorNote(${JSON.stringify(bad)}) should be null`);
+  }
+  assert.equal(HOOK_ERROR_FILE, 'hook-error.json');
+});
+
+test('0.23.6 hookErrorNote cannot paint the daemon console with claude-side text', () => {
+  // Every field crosses a trust boundary: the file is written by a hook running under claude, in
+  // a directory claude's own file tools can reach. Control bytes are what would let a one-line log
+  // entry rewrite the daemon window, so they go before anything is printed.
+  const nasty = hookErrorNote(JSON.stringify({
+    at: 'a\u001b[2Jb', event: 'st\nop', error: `x${'y'.repeat(400)}`,
+  }));
+  assert.equal(/[\u0000-\u001f\u007f]/.test(nasty), false, 'a control byte reached the log line');
+  assert.match(nasty, /^\[hook\] st op hook did NOT reach this daemon at a \[2Jb: xy+/);
+  // And each field is bounded, so a 400-char error cannot scroll the window either.
+  assert.ok(nasty.length < 320, `line is ${nasty.length} chars`);
+});
+
+test('0.23.6 no hook, and no smoke harness, depends on a curl being installed', () => {
+  const here = import.meta.dirname;
+  const hooks = fs.readFileSync(path.join(here, 'hooks.sh'), 'utf8');
+  assert.equal(/\bcurl\b/.test(hooks.replace(/^\s*#.*$/gm, '')), false,
+    'hooks.sh runs curl again — a box without one drops every stop and notification hook');
+  // The secret used to ride on curl's argv, where `ps` shows it to every user on the machine.
+  assert.match(hooks, /process\.env\.JAM_HOOK_SECRET/, 'the hook secret is not read from the environment');
+  for (const f of fs.readdirSync(path.join(here, 'scripts')).filter((n) => n.endsWith('.mjs'))) {
+    const src = fs.readFileSync(path.join(here, 'scripts', f), 'utf8').replace(/^\s*\/\/.*$/gm, '');
+    assert.equal(/spawnSync\('curl'|spawn\('curl'/.test(src), false,
+      `${f}: shells out to curl — node's own fetch reaches the same loopback port`);
+  }
 });

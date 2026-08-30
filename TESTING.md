@@ -1183,6 +1183,23 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   there would have shown as a dead suite rather than a subtle one. Prove: the full sweep at the
   release gate.
 
+- 2026-08-30 · **0.23.6 (the hook-delivery fix): eighteen of the nineteen suites were not re-run.**
+  What ran, on macOS, with and without `CI=true`: the unit suite (**462 tests, 459 pass, 3 skipped,
+  0 fail**), the new `scripts/check-hook-post.mjs` (5/5), and the other three `check-*.mjs`. The
+  judgement: the diff is `hooks.sh`'s stop/notification branch, one new pure function
+  (`hookErrorNote`), one new 5 s poll in `daemon()`, and a `curl` → `fetch` swap in
+  `smoke-perm`'s own health wait. Nothing in the frame pipeline, the WS admission path, the trust
+  boundary, transfers, invites, discovery or either client was touched.
+  **What the new check does NOT cover, and it is the honest gap**: no suite drives a REAL claude
+  through a real turn against the new hook, so "a turn ends and `busy` clears" is still carried by
+  `smoke.mjs` and `smoke-perm`, neither of which was re-run (both cost tokens). The pieces are each
+  measured — the POST arrives at `/hook/stop` with the right secret and the exact payload, and
+  `onHook` is unchanged — but the seam between them is not. Prove: `smoke.mjs` and `smoke-perm` at
+  the next release gate; a red there would show as a turn that never stops being busy.
+  Also not covered: the marker file is only ever read by `startHookWatch`'s 5 s poll, so a jam whose
+  daemon dies before the poll never prints the line. That is deliberate (the daemon is the only
+  reader there can be), and the file is still on disk for whoever looks.
+
 ## The 2026-08-30 vacuity audit — every suite, for tests that cannot fail
 
 Ordered by the 0.22.1 review after `smoke-nudge` was found printing **"all steps passed" having
