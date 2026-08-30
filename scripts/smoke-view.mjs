@@ -304,6 +304,23 @@ try {
   console.error(`smoke-view: ${e.message}`);
 } finally {
   killMine();
-  try { fs.rmSync(BIN, { recursive: true, force: true }); } catch { /* nothing to remove */ }
+  // Both directories `mkdtempSync` handed this process, one `rmSync` each, by exact path — never a
+  // pattern, never a sweep of $TMPDIR, because another suite's directories and Roy's look identical
+  // from the outside. This removed only BIN through 0.24.0, so every run leaked its TMP: measured on
+  // the (late) 0.24.0 gate, 2026-08-30, where $TMPDIR went 143 → 144 `jam-*` directories across a
+  // sweep in which this was the only suite that grew it. That is campaign F10's exact shape, and
+  // F10 is why every other suite already does this.
+  //
+  // A run that FAILED keeps them and says where, which is when anybody actually wants to read them.
+  // The condition is `exitCode` rather than `failed`: a throw leaves `failed` at 0 while exiting 1,
+  // and the evidence for a crash is worth as much as the evidence for a red step.
+  if (exitCode !== 0) {
+    console.log(`(left in place for inspection: ${TMP}, ${BIN})`);
+  } else {
+    for (const d of [TMP, BIN]) {
+      try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    console.log(`(cleaned up: ${TMP}, ${BIN})`);
+  }
 }
 process.exit(exitCode);

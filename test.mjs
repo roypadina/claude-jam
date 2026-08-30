@@ -7737,6 +7737,41 @@ test('0.23.4 no smoke suite reports a ZOMBIE as a running process', () => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// 0.24.0 (found by the LATE 0.24.0 gate, 2026-08-30): a suite must remove every directory
+// `mkdtempSync` handed it. `smoke-view` made two and removed one, so every run of it leaked a
+// `jam-view-*` — caught not by a red suite (it was 6/6) but by counting $TMPDIR either side of the
+// sweep: 143 → 144, with that suite the only one that grew it. This is campaign F10's exact shape,
+// and F10 is why the other suites already loop over their own paths.
+//
+// It is a lint rather than a behavioural check because the leak IS a passing run — there is no
+// output to assert on. It reads the two idioms in use, and only those: `rmSync(NAME` directly, and
+// a `for (const d of [A, B, C])` whose body removes `d`. A cleanup written some third way will
+// fail this and should — the point is that the shape stays greppable.
+test('0.24.0 every smoke removes every directory it mkdtemp\'d — F10 cannot come back', () => {
+  const dir = path.join(import.meta.dirname, 'scripts');
+  let checked = 0;
+  for (const f of fs.readdirSync(dir).filter((n) => n.startsWith('smoke-') && n.endsWith('.mjs'))) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    // Only plain `const NAME = fs.mkdtempSync(` bindings. A factory (`smoke-adopt`'s `mkdir`) names
+    // no directory here, so there is nothing for this rule to follow, and it says so by skipping.
+    const made = [...src.matchAll(/const (\w+) = fs\.mkdtempSync\(/g)].map((m) => m[1]);
+    if (!made.length) continue;
+    // Every name a cleanup can reach: removed by name, or a member of an array a loop removes.
+    const freed = new Set([...src.matchAll(/rmSync\(\s*(\w+)\b/g)].map((m) => m[1]));
+    for (const [, loopVar, list] of src.matchAll(/for \(const (\w+) of \[([^\]]*)\]\)/g)) {
+      if (!freed.has(loopVar)) continue;             // that loop is not a cleanup loop
+      for (const n of list.split(',')) freed.add(n.trim());
+    }
+    for (const name of made) {
+      assert.ok(freed.has(name), `${f}: ${name} is mkdtemp'd and never rmSync'd — it leaks one directory per run`);
+    }
+    checked++;
+  }
+  // A rename or a moved file must not quietly turn this into a no-op.
+  assert.ok(checked >= 12, `expected at least twelve mkdtemp-ing smokes, linted ${checked}`);
+});
+
+// ---------------------------------------------------------------------------------------------
 // 0.23.6: `hooks.sh` posted the stop and notification hooks with `curl … || true`. On a box with
 // no curl a jam ran normally while EVERY one of them was dropped — no idle signal, no turn-end
 // nudge, and no error anywhere, because the thing that failed IS the report. It posts with the
