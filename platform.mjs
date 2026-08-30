@@ -76,8 +76,20 @@ export function secureDir(dir) {
 // ACL it inherited from `%APPDATA%` or `%TEMP%`, both of which are inside the user's own profile
 // (current user + SYSTEM + Administrators — never other users, never a network principal). It is
 // still worth knowing about, so the reason comes back rather than a bare boolean.
+//
+// ONCE PER PATH PER PROCESS, and that is not an optimisation — it is the difference between a
+// usable client and an unusable one. `rememberInput()` calls secureDir + secureWrite on EVERY
+// submitted line, so without this every message a Windows user sends would pay two synchronous
+// `icacls` spawns (~100 ms) on the input path. An ACL persists on the file, so applying it when
+// the path is first written is the same end state. The attempt is remembered whether it worked or
+// not: a failure here is almost always permanent (no %USERNAME%), and retrying a failing spawn
+// per keystroke is worse than the degradation it is retrying against.
 export const ICACLS = 'icacls';
-export function restrictToUser(target, { dir = false, env = process.env } = {}) {
+const restricted = new Set();
+export function restrictToUser(target, { dir = false, env = process.env, again = false } = {}) {
+  const key = `${dir ? 'd' : 'f'}:${target}`;
+  if (!again && restricted.has(key)) return { ok: true, cached: true };
+  restricted.add(key);
   const user = aclUser(env);
   if (!user) return { ok: false, why: 'no %USERNAME% in the environment, so there is no principal to grant to' };
   try {
