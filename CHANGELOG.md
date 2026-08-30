@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — the client and the launcher menu painted NOTHING in any CI-flavoured shell
+
+**If your shell exports `CI`, `CONTINUOUS_INTEGRATION` or any `CI_*` variable, `claude-jam` opened on
+a blank screen and still read your keys.** Not a hang and not an error — a live process, an empty
+terminal, and no way to tell which. GitLab CI exports a dozen `CI_*` variables; so does anyone who
+sets `CI=true` for a toolchain and forgets.
+
+ink asks [`is-in-ci`](https://github.com/sindresorhus/is-in-ci) whether it is in CI, and when it
+decides yes it writes only its `<Static>` output and returns — the dynamic region is never painted
+until unmount. That is the right call for a build log. It is fatal here, because **both** of jam's ink
+surfaces are dynamic-only: the client's mirror view mounts with no `<Static>` at all (deliberately —
+the alternate screen has no scrollback to reprint) and the launcher menu has none anywhere.
+
+Fixed in `ink-ci.mjs`: one assignment, made before ink is first imported. It is a module of its own
+because `import` declarations are hoisted above the module body, so the same statement written at the
+top of a file that imports ink runs too late, every time — `menu.mjs` imports it above its ink
+import, and `client.mjs` awaits it immediately before its renderer. The caller's own `CI` is put back
+once ink has loaded, because the menu shells into `claude-jam host` and claude's environment is none
+of ink's business.
+
+**How it was found, which is the interesting part.** 0.23.3 wired `scripts/smoke-lifecycle.mjs` to
+the Linux CI leg; it failed three steps, all of them driving `claude-jam host --attach`, twice
+deterministically and again under a real pty. The step came out and the note said it "may be a real
+Linux defect in the attach path". It was not. `--attach` works on Linux — the same Debian bookworm
+container runs the suite **19/19 with `CI` unset and 19/19 with `CI=0` while `CONTINUOUS_INTEGRATION`
+and `GITHUB_ACTIONS` stay set**, and **4-red with `CI=true`**, which is the exact shape the runner
+reported. `CI=true` was the whole of "Linux" in it, and macOS never saw it only because the suite had
+only ever been run from a developer shell. Two new tests carry the fix (the real `is-in-ci`, asked
+with all three env shapes set; and the import-ordering trap, swept across every ink surface), both
+canaried in each direction. **SPEC W2 (the WSL2 Windows host) is unaffected.** Full write-up, with
+the control that isolates the mechanism, in `TESTING.md`.
+
 ## 0.23.3
 
 **The release a second and third CI leg paid for.** No new features: a Linux CI leg, and the four

@@ -9,6 +9,12 @@
 //
 // Any argument at all (including --no-menu) means the caller knows what they want, and `jam`
 // never gets here. A non-tty stdin prints usage, because a menu nobody can answer is a hang.
+// v0.23.4 — FIRST, and above the ink import on purpose: ink refuses to paint its dynamic region
+// when `is-in-ci` says CI, this menu is dynamic-only, and `is-in-ci` decides at ink's module load.
+// Measured 2026-08-30: `CI=true node menu.mjs` painted a blank screen and still read keys. Moving
+// this line below the one that imports ink puts it back (import declarations are hoisted), which
+// is what the ordering lint in test.mjs is there to catch.
+import { restoreCi } from './ink-ci.mjs';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,6 +31,10 @@ import { hostPlan, buildJoinArgv, remoteRows, ACCESS_MODES, resolveTailscale, fu
   menuNonTtyExit } from './lib.mjs';
 import { listRows } from './sessions.mjs';
 import { copyText, browseText } from './platform.mjs';
+
+// ink is loaded by now, so its verdict is frozen and the caller's own `CI` can go back — this menu
+// shells into `claude-jam host`, and claude's environment is none of ink's business.
+restoreCi();
 
 const h = React.createElement;
 // `fileURLToPath`, NOT `new URL(...).pathname` (0.23.3). On Windows the pathname of a file: URL is

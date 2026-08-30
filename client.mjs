@@ -50,4 +50,10 @@ if (!url || !flag('name')) {
 // No tty on stdin (a pipe, a cron, a heredoc) is exactly the case `--basic` exists for: ink
 // needs raw mode and throws without it, while readline just reads the lines.
 const basic = argv.includes('--basic') || !process.stdin.isTTY;
+// v0.23.4: ink paints nothing but its <Static> region when `is-in-ci` says CI, and the mirror view
+// has no <Static> — so a client started from any shell carrying `CI`, `CONTINUOUS_INTEGRATION` or a
+// `CI_*` variable opened on a blank screen. See ink-ci.mjs; the import is what does it, and it has
+// to happen before ink's, which is why the renderer below is loaded dynamically after this line.
+const { restoreCi } = await import('./ink-ci.mjs');
 await import(basic ? './client-basic.mjs' : './client-ink.mjs');
+restoreCi();
