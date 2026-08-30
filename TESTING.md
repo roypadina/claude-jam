@@ -40,6 +40,58 @@ Run when the feature list is done. Not a smoke re-run — an adversarial pass ov
 
 ## Release gates that have actually run
 
+- **0.22.0 — 2026-08-30.** All eighteen suites, in the documented order, one at a time, on node
+  24.15 / tmux 3.7c / claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2, from a verified-clean
+  machine state (no tmux server on any socket, no jam daemon anywhere, the only state dirs the two
+  dormant ones that pre-dated the run). Unit suite **424/0**.
+
+  **The gate went red, and that is the whole story of this release.** `smoke-adopt` **S7c** failed
+  on the first run — *"the key came back in a frame to Roy"* — and then passed five times running.
+  A one-in-six flake on the assertion that guards the release's headline feature. Two real defects
+  behind it:
+
+  1. **The product.** `stripTokenBlock` had exactly one call site, `/export`. Every
+     transcript-derived frame passes through one line in `onTranscript` and was broadcast
+     unscrubbed, for all four kinds; the mirror rows were unscrubbed too (`maskSecrets` runs there,
+     but `SECRET_HINT` needs a word like SECRET/TOKEN, so a bare 64-hex key matches nothing). The
+     v0.34 comment asserting the key "has no route into a transcript" was the assumption it rested
+     on — and there is a route: claude runs as the host user with file tools, so **any participant
+     can ask it to read `<state>/host.key`**. Fixed with one shared helper (`scrubSecrets`) on both
+     funnels, by known literal rather than by pattern. No released version was affected: none has a
+     host key to leak.
+  2. **The test.** S7c planted the key in the transcript the daemon tails and then asserted no
+     frame held it — so the tailer's poll interval decided the result. It now **waits** for the
+     planted line to come back and asserts it arrives scrubbed.
+
+  Both canaries were run, because neither claim is worth anything unproven. Neutering
+  `scrubSecrets` turns the two new unit tests **and** both pre-existing `stripTokenBlock` tests red
+  (420/4), which is what proves the refactor actually routes through the shared helper. Reverting
+  `scrubSecrets` out of `onTranscript` turns S7c red on **2 of 2** runs rather than 1 of 6, quoting
+  the leaked value — the flake is gone, not merely re-hidden. Post-fix, `smoke-adopt` ran green
+  five times, printing `transcript funnel: "and the host key is [host key removed]"` on each.
+
+  **Host-still-host, on every launch surface**, since this release changes that gate:
+  `smoke-slash` (*"the host's own loopback client is still the HOST — flag, F3 keys, host-only
+  report"*), `smoke-lifecycle` 5 and 6 (`host --attach` and the launcher menu's attach — the
+  assertion names `--host-key-file` by name), `smoke-adopt` S6 (`claude-jam adopt`), and
+  `smoke-knock`'s three v0.34 refusals, each naming which condition failed.
+
+  **The 0.21.1 → 0.22.0 upgrade path, measured rather than reasoned** (a real 0.21.1 daemon from
+  `git archive 9e64c63`, confirmed to contain no host-key logic, with the real 0.22.0 client):
+
+  | probe | result |
+  | --- | --- |
+  | 0.22.0 client, `--host`, no key file | prints `hostKeyNotice` with the path, joins as a **guest** — `host:false`, `tmux:null`, `join:null` |
+  | a client still CLAIMING `host:true`, no key, vs the 0.21.1 daemon | **granted host on address alone**, handed `tmux` and the join line |
+
+  So the client is correct and never falls back to address-only host — but the *daemon* decides,
+  and an unrestarted jam keeps 0.21.1's gate. That is now an **Upgrading** section in the
+  changelog rather than a footnote.
+
+  Nothing was left behind: `$TMPDIR` held 100 `jam-*` directories before the sweep and 100 after
+  (F10 holds across sixteen suites), no `dns-sd` child still advertising, no tmux server on a
+  socket the gate created.
+
 - **0.21.1 — 2026-08-30 (the security release).** All eighteen suites, in the documented order,
   one at a time, on node 24.15 / tmux 3.7c / claude 2.1.251 / ttyd 1.7.7 / cloudflared 2026.8.2,
   from a verified-clean machine state (no live tmux server on any socket). Every one green; unit
@@ -300,11 +352,14 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   Measured, 2026-08-30: `$TMPDIR` held 104 `jam-*` directories; `smoke-peer`, `smoke-answer` and
   `smoke-discover` were run back to back (all green) and it held **104** afterwards. Before this
   change those three runs would have left nine.
-  NOT run: `smoke-xfer`. It is one of the six that need a daemon of yours with a real claude, so
+  ~~NOT run: `smoke-xfer`. It is one of the six that need a daemon of yours with a real claude, so
   it spends tokens, and this batch's guardrail was not to. Its change is the same shape as the
   other three — one `rmSync` of one `mkdtempSync` path at the end of the script — and `node
   --check` passes it, which is not the same as having run it. Prove: the next full sweep; watch
-  for `(cleaned up: …/jam-xfer-smoke-…)` on its last line.
+  for `(cleaned up: …/jam-xfer-smoke-…)` on its last line.~~
+  **DISCHARGED — 0.22.0 gate, 2026-08-30.** `smoke-xfer` ran and its last line read
+  `(cleaned up: /var/folders/…/jam-xfer-smoke-eB7uZB)`, exactly the string this entry said to watch
+  for. Across the whole sixteen-suite sweep `$TMPDIR` went 100 `jam-*` directories in, 100 out.
 - 2026-08-30 · **F6 — said rather than waited for, deliberately.** The tunnel-ready line now ends
   `· give it a few seconds — the edge needs a moment before the first join works`, because
   cloudflared reports its hostname ~2.5 s before Cloudflare will route to it (soak log,
@@ -375,7 +430,7 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   on the result frame), the decision is cheap to make. Prove: Roy's call — one live run with the
   flag set below the task's cost, checking it refuses rather than truncating silently.
 
-- 2026-08-30 · **v0.34 batch (host identity is a local secret).** Run per the batch policy, not
+- ~~2026-08-30 · **v0.34 batch (host identity is a local secret).** Run per the batch policy, not
   the full sweep: `node --test test.mjs` (407 → 422, green) plus `smoke-slash`, `smoke-lifecycle`,
   `smoke-knock`, `smoke-adopt` and `smoke-transport`, all green. **Not re-run:** `smoke-ink`,
   `smoke.mjs`, `smoke-mirror`, `smoke-popup`, `smoke-xfer`, `smoke-perm`, `smoke-replay`,
@@ -384,15 +439,24 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   `<state>/host.key` and present it, and `node --check` passes on all of them — but an edit that
   compiles is not a run, and a host peer that silently became a guest would fail those suites
   loudly rather than subtly (a demoted host gets no join line, no F3 and no host-only report).
-  Prove: full sweep at the next release gate.
-- 2026-08-30 · **v0.34: the `/export` leak proof did not run in `smoke-slash`.** Its jam's claude
+  Prove: full sweep at the next release gate.~~
+  **DISCHARGED — 0.22.0 gate, 2026-08-30: all thirteen re-run, all green.** The judgement held for
+  twelve of them. It did NOT hold for `smoke-adopt`, which was in the re-run half and passed there:
+  its S7c step was flaky, and the 0.22.0 gate is where it finally went red and gave up a real
+  scrub gap. "An edit that compiles is not a run" was the right instinct; the missing half is that
+  a suite that RAN is not the same as a suite that ran deterministically.
+- ~~2026-08-30 · **v0.34: the `/export` leak proof did not run in `smoke-slash`.** Its jam's claude
   had never taken a turn, so there was no transcript on disk and the daemon refused the export
   with "there is no transcript on disk yet" — which the step now prints rather than failing on.
   The export half is proven instead in `smoke-adopt` S7c, against the transcript that suite
   plants under a `$HOME` of its own, with the key written INTO it first so the scrub is not
   vacuous (`[host key removed]` present, key absent, 501 bytes). `smoke-xfer` asserts the same
   thing against a REAL claude transcript and was not run (it costs a turn). Prove: `smoke-xfer`
-  at the next release gate.
+  at the next release gate.~~
+  **DISCHARGED — 0.22.0 gate, 2026-08-30.** Both halves ran. `smoke-xfer` green against a real
+  claude transcript, and `smoke-slash`'s own step ran this time too — its jam HAD taken turns by
+  then — reporting `/export: 5 chunk(s), 311203 bytes, no key in them` plus `daemon window: 241
+  line(s) captured, no key in them` and `host.key is 0600 and the only file holding the key`.
 - 2026-08-30 · **Funnel: the transport is still unverified; the HOST GATE no longer depends on
   it.** Whether a Tailscale Funnel upgrade carries any proxy header was never measured (Funnel is
   not enabled on this tailnet and the installed Tailscale is the sandboxed App Store build), and

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.22.0
+
+**A security release, and the release the end-game campaign paid for.** The headline is that host
+authority is now *proven* by a local file instead of inferred from the network — so it no longer
+depends on recognising a relay, which is what made `--funnel` an open question. Then eight
+campaign findings, one of which was found by this release's own gate.
+
+If a jam is running while you upgrade, **end it and start it again** — see *Upgrading* below.
+
 ### Security — host identity is a local secret, not a network address (v0.34)
 
 **This closes `--funnel`'s unverified exposure without needing to measure it**, and every relay
@@ -75,6 +84,22 @@ Known ceiling, recorded in the code: a secret **wrapped across two captured rows
 neither half, so a 64-hex key on an 80-column pane is half-exposed on the pane path. The
 transcript funnel and `/export` see whole text and do catch it, and host authority still needs
 locality as well as the key.
+
+### Upgrading — restart the jam, don't just upgrade the client
+
+**A jam already running when you upgrade is still governed by the old rules.** Its daemon wrote no
+`host.key`, and it is the daemon that decides who the host is. Verified against a real 0.21.1
+daemon, 2026-08-30:
+
+- The 0.22.0 client does the right thing: no key file, so it **says so and joins as a guest** —
+  `! no host key at <path> — joining as a GUEST`, naming the path and never the value. It does not
+  claim host, so there is no silent fall back to address-only host.
+- But anything still *claiming* host against that old daemon is granted it on address alone, and
+  handed the tmux session and the join line. That is 0.21.1's own gate, unchanged by upgrading the
+  client around it.
+
+So: `claude-jam end <session>`, then `claude-jam host` again. Until you do, the jam has 0.21.1's
+security properties, whatever version your client reports.
 
 ### Tests — the smoke suites clean up after themselves (campaign F10)
 
