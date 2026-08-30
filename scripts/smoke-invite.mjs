@@ -311,8 +311,26 @@ try {
     // Yossi is still connected from step 2, so their own (still live, multi-use) link cannot
     // seat a second person under that name — attribution is by name, and two of one is worse
     // than a refusal.
+    //
+    // v0.22.1 changed what happens NEXT, and it is worth stating because this step is where it
+    // shows. The refusal itself is unchanged and still immediate: the link holder authenticated,
+    // so they are told `name-taken` by name, exactly as before. What they no longer get is a 4409
+    // close — that came from the KNOCK path's name check, which now sits below authentication
+    // (see resolveJoinName). So a refused link falls through to a knock like every other invite
+    // refusal in this suite, which is the invite design's own rule: a link is a shortcut past the
+    // approval, never past the door. If the host then says yes they come in as `Yossi-2`, never as
+    // a second Yossi — and the case this makes better is Yossi's own laptop waking up and
+    // reconnecting on the same link while the stale socket is still in the roster.
     const dup = await wantRefusal('Yossi', yossi.secret, 'name-taken');
-    await dup.wantClose(4409);
+    const k = await dup.want('the fall-through knock', (f) => f.t === 'knock' && f.state === 'pending');
+    eq(k.state, 'pending', 'a refused link knocks rather than being closed');
+    if (dup.closeCode != null) throw new Error(`closed ${dup.closeCode} instead of knocking`);
+    // The host is told which name it clashes with, so approving is an informed act.
+    const seen = await host.want('the clash note', (f) => f.t === 'knock' && f.name === 'Yossi' && f.detail);
+    if (!/already here/.test(seen.detail)) throw new Error(`host's detail is ${JSON.stringify(seen.detail)}`);
+    // Not seated as a second Yossi: exactly one Yossi in the roster while they wait.
+    eq(host.roster().filter((n) => n === 'Yossi').length, 1, 'Yossi count while the duplicate waits');
+    dup.bye();
   });
 
   // ======================================================== /kick ====
