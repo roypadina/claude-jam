@@ -400,6 +400,14 @@ If somebody asks **"how do I find Roy's jam?"**, this is the answer.
 - No token (default) → a guest "knocks": they wait, and the host sees
   `⚑ Dana wants to join — /accept Dana | /deny Dana` in their client. Knocks expire after
   2 minutes.
+- **Two people cannot share a name — but when you are TOLD depends on whether you authenticated**
+  (0.22.1). A guest with the token or an invite link is refused straight away: `the name "Dana" is
+  already taken here`. A **knocker** is not told, because answering that to somebody who has not
+  authenticated is a way to enumerate who is in the jam, one name at a time. Their clash is
+  settled when the host lets them in: they join as `Dana-2` and are told
+  `"Dana" was already taken here, so you joined as Dana-2`. The host sees it on the bar they
+  approve from — `⚑ Dana wants to join (…) — "Dana" is already here, so they will join under
+  another name` — so a stranger cannot make that line read a name that is in the room.
 - **Invite-only (v0.24)** — `claude-jam host --invite-only`, or `/token invite-only on` while the
   claude-jam runs, or the access row on the launcher's Host screen. A knock is then **refused outright**
   with "this jam is invite-only — ask the host for a claude-jam invite link", rather than left

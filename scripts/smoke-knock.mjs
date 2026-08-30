@@ -120,9 +120,36 @@ await step('host admit ok:true welcomes the knocker and puts it in the roster', 
   if (last.items.length) throw new Error(`still pending after admit: ${JSON.stringify(last.items)}`);
 });
 
-await step('a second Dana is closed 4409', async () => {
-  const dup = peer({ name: 'Dana' });
-  await dup.wantClose(4409);
+// v0.22.1: this used to be "a second Dana is closed 4409" — and that refusal, given to an
+// UNAUTHENTICATED hello, was a roster oracle: anybody who could reach the port could enumerate
+// who is in a jam, name by name, unlimited (measured 2026-08-30). Nothing about the roster is
+// answered before the caller has authenticated, so a knocker's clash is settled at admission.
+await step('an unauthenticated duplicate name learns NOTHING about the roster', async () => {
+  const dup = peer({ name: 'Dana' }); // no token: a knocker, and Dana is already in the room
+  const k = await dup.want('the knock', (f) => f.t === 'knock');
+  eq(k.state, 'pending', 'a duplicate name knocks exactly like any other name');
+  eq(dup.closeCode, null, 'and is NOT closed 4409');
+  const leaked = dup.frames.filter((f) => /taken|already here|already in/i.test(String(f.text ?? '')));
+  if (leaked.length) throw new Error(`the knocker was told about the roster: ${JSON.stringify(leaked)}`);
+  // The HOST is told, on the frame they approve from — otherwise a stranger could make the
+  // approval bar read a name that is already in the room (the host's own, say) with nothing
+  // saying so. The knocker never sees this.
+  const seen = await host.want('the clash note for the host',
+    (f) => f.t === 'knock' && f.name === 'Dana' && f.detail);
+  if (!/already here/.test(seen.detail)) throw new Error(`host's detail is ${JSON.stringify(seen.detail)}`);
+  console.log(`      host sees: ${JSON.stringify(seen.detail)}`);
+  const bar = await host.want('the pending item carrying it',
+    (f) => f.t === 'pending' && f.items?.some((i) => i.name === 'Dana' && i.detail));
+  if (!bar) throw new Error('the approval bar would show no note');
+});
+
+await step('…and once the host says yes, they are renamed and TOLD the name they got', async () => {
+  host.send({ t: 'admit', name: 'Dana', ok: true });
+  const w = await host.want('the second Dana in the roster', (f) => f.t === 'roster' && f.joined === 'Dana-2');
+  eq(w.joined, 'Dana-2', 'the free name the daemon picked');
+  if (!host.roster().includes('Dana')) throw new Error(`the first Dana left: ${host.roster().join(',')}`);
+  if (!host.roster().includes('Dana-2')) throw new Error(`roster is ${host.roster().join(',')}`);
+  console.log(`      roster: ${host.roster().join(', ')}`);
 });
 
 await step('host /token set replies to host clients with the join line', async () => {
@@ -139,6 +166,17 @@ await step('a friend with that token is admitted directly, no knock', async () =
   const w = await eli.want('welcome', (f) => f.t === 'welcome');
   eq(w.you, 'Eli', 'welcome.you');
   if (eli.frames.some((f) => f.t === 'knock')) throw new Error('token path went through a knock');
+});
+
+// The other half of the v0.22.1 ordering: a caller who HAS authenticated is still told about a
+// clash at once, because they are a legitimate guest and being told is the whole point. Only the
+// unauthenticated case is silent.
+await step('an AUTHENTICATED duplicate name is still refused 4409, immediately', async () => {
+  const dup = peer({ name: 'Eli', token: TOKEN }); // Eli joined on the token a moment ago
+  const e = await dup.want('the refusal', (f) => f.t === 'error' && /already taken here/.test(f.text));
+  if (!/"Eli"/.test(e.text)) throw new Error(`the refusal should name it: ${e.text}`);
+  await dup.wantClose(4409);
+  console.log(`      ${JSON.stringify(e.text)}`);
 });
 
 await step('a wrong token knocks, and admit ok:false closes it 4403', async () => {

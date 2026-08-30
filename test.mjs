@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, resolveJoinName, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
   exportFileName, resumeInstructions, scrubSecrets, stripTokenBlock, clientCommand,
   scrubRowJoins,
@@ -334,6 +334,40 @@ test('nameTaken is case-insensitive', () => {
   assert.equal(nameTaken('dana', ['Dana']), true);
   assert.equal(nameTaken('Dana', ['Roy', 'Danae']), false);
   assert.equal(nameTaken('Dana', []), false);
+});
+
+// v0.22.1: a knocker's name clash is settled at ADMISSION, because answering it at hello let an
+// unauthenticated stranger enumerate the roster name by name (measured 2026-08-30).
+test('resolveJoinName: a clash becomes a suffix, and it can never hand back a taken name', () => {
+  assert.deepEqual(resolveJoinName('Eli', ['Roy', 'Dana']), { name: 'Eli', renamed: false });
+  assert.deepEqual(resolveJoinName('Dana', ['Roy', 'Dana']), { name: 'Dana-2', renamed: true });
+  // Case-insensitive, like every other name comparison here.
+  assert.deepEqual(resolveJoinName('dana', ['DANA']), { name: 'dana-2', renamed: true });
+  // It keeps walking, and every answer it gives is free and a valid name.
+  const room = ['Dana', 'Dana-2', 'Dana-3'];
+  const r = resolveJoinName('Dana', room);
+  assert.deepEqual(r, { name: 'Dana-4', renamed: true });
+  for (const taken of [[], ['A'], ['Dana'], room, ['Dana', 'Dana-2']]) {
+    const got = resolveJoinName('Dana', taken);
+    assert.equal(validName(got.name), true, `${JSON.stringify(taken)} -> ${got.name}`);
+    assert.equal(nameTaken(got.name, taken), false, `${JSON.stringify(taken)} -> ${got.name}`);
+  }
+  // NAME_RE caps at 24 characters, so the BASE is trimmed to make room for the suffix rather than
+  // the suffix being dropped — dropping it would hand back a name that is already taken.
+  const long = 'Bartholomew Prendergast!!'.slice(0, 24).replace(/!/g, 'x'); // exactly 24, valid
+  assert.equal(long.length, 24);
+  const cut = resolveJoinName(long, [long]);
+  assert.equal(cut.renamed, true);
+  assert.equal(cut.name.length <= 24, true, cut.name);
+  assert.equal(validName(cut.name), true, cut.name);
+  assert.equal(nameTaken(cut.name, [long]), false);
+  // Exhaustion FAILS CLOSED: null, never the taken name, because two people under one [Name]: is
+  // the one thing attribution cannot survive.
+  const all = ['Dana', ...Array.from({ length: 98 }, (_, i) => `Dana-${i + 2}`)];
+  assert.equal(resolveJoinName('Dana', all).name, null);
+  assert.equal(resolveJoinName('Dana', ['Dana'], 1).name, null, 'no tries left');
+  // Junk in is not a crash.
+  assert.deepEqual(resolveJoinName(undefined, []), { name: '', renamed: false });
 });
 
 test('classifyHello: a matching token admits straight away', () => {
@@ -6553,6 +6587,21 @@ test('the host key never rides in a frame the daemon sends, or in any log line',
   }
   // And it is used at all — a lint that passes because the symbol vanished proves nothing.
   assert.equal(uses.length >= 3, true, `expected the key to be read in host.mjs, saw ${uses.length}`);
+
+  // v0.22.1: the roster is not answered before the caller has authenticated. Linted rather than
+  // remembered, because the whole bug was one `if` sitting three lines too high: the name check
+  // must be INSIDE the `admit === 'token'` branch, never above it, or an unauthenticated hello
+  // gets told whether a name is in use and the roster is enumerable again.
+  const lines = src.split('\n');
+  const nameCheck = lines.findIndex((l) => /nameTaken\(c\.name,/.test(l));
+  const authGate = lines.findIndex((l) => /if \(c\.admit === 'token'\)/.test(l));
+  assert.ok(nameCheck > 0 && authGate > 0, 'both the auth gate and the name check are in host.mjs');
+  assert.ok(nameCheck > authGate,
+    `host.mjs:${nameCheck + 1} answers a name clash at line ${nameCheck + 1}, above the `
+    + `authentication gate at ${authGate + 1} — that is the pre-auth roster oracle`);
+  // And a knocker's clash is settled at admission instead, by the one function that can.
+  assert.match(src, /resolveJoinName\(p\.name, names\(\)\)/,
+    'admit() must resolve a knocker\'s name rather than refusing it at hello');
 
   // 2026-08-30: EVERY funnel out of the pane needs BOTH scrubs. `sanitizeFrameRow` only ever sees
   // one row, so a secret wrapped at the right margin is in neither half — `scrubRowJoins` is the

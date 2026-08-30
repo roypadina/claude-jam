@@ -651,7 +651,7 @@ function render(ev) {
       // low sound and it repeats once — see armKnock. The re-sends a reconnecting host client
       // gets for knocks already on screen are deduped by name, or a reconnect would ring twice.
       armKnock(ev.name);
-      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
+      return emit({ glyph: '⚑', glyphColor: C.accent, text: `${ev.name} wants to join${ev.ip ? ` (${ev.ip})` : ''}${ev.detail ? ` — ${ev.detail}` : ''} — /accept ${ev.name} · /deny ${ev.name}` });
     }
     // v0.14: a guest wants to run one of claude's commands. Host clients only — and the
     // wording is the answer, so the host never has to remember the syntax.

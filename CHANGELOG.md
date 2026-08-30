@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Security — the roster was enumerable before you had authenticated (0.13–0.22.0)
+
+A hello naming somebody already in the jam was refused `the name "X" is already taken here` and
+closed 4409 **before any admission** — so anybody who could reach the port could enumerate who is
+in a jam, name by name, with no token and no approval. Unlimited: the close happens above the
+pending set, so the 10-knock cap never applies and every attempt is a fresh socket. Measured
+2026-08-30 against a real jam — probing `Roy`, `Dana` and `Nobody` returned 4409, 4409, and a
+pending knock, which is the whole roster. It contradicted what the knock design already promises,
+and what is otherwise true: a waiting knocker holds exactly one `{state:'pending'}` frame.
+
+**The fix is ordering, not silence**, because silence would have cost the join UX:
+
+- a **token or invite holder** is told at once, by name, exactly as before — they have proved they
+  belong here and being told is the point;
+- a **knocker** has nothing to authenticate with yet, so the clash is not answered at all. It is
+  settled at admission: they join as `Dana-2` and are told that is the name their messages are
+  attributed to. After the fix, probing three names — two of them in the room — returns the
+  identical `{state:'pending'}`;
+- the **host** is told, on the frame they approve from: `⚑ Dana wants to join (…) — "Dana" is
+  already here, so they will join under another name`. Without that line an unauthenticated
+  stranger could make the approval bar read a name that is in the room — the host's own — with
+  nothing saying it was not them.
+
+Invite-only mode never leaked it: its refusal comes first.
+
+`resolveJoinName` suffixes rather than refuses (the host has already said yes by then), starts at
+`-2` because the person already here is the unnumbered one, trims the base to fit `NAME_RE`'s
+24-character cap, and **fails closed** — `null` after 99 tries, never the taken name, because two
+people under one `[Name]:` is the one thing attribution cannot survive.
+
+Guarded three ways: unit tests on `resolveJoinName`, a **source lint** that fails if the name check
+ever moves back above the authentication gate (the whole bug was one `if` three lines too high),
+and two `smoke-knock` steps. Reverting the ordering turns the lint red with
+`host.mjs:2628 answers a name clash at line 2628, above the authentication gate at 2632` and both
+smoke steps with it — checked.
+
 ### Security — a guest's free-text answer reached the pane as raw keystrokes
 
 **Affects every released version with `/answer other` (0.21.0–0.22.0).** Found by the focused
