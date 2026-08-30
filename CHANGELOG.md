@@ -43,6 +43,18 @@ is removed when a hook lands and written when it does not, and then starts a bar
 watches it log the dropped hook. Canaried against 0.23.5's `hooks.sh`: **all four delivery checks
 go red**, the second one saying `the daemon got 0 requests with no curl on PATH`.
 
+### Fixed — four smoke suites reported every process dead on a box with no `ps`
+
+Harness, not product, and the same shape as the bug above: `running()`/`alive()` in
+`smoke-lifecycle`, `smoke-adopt`, `smoke-view` and `smoke-peer` shell out to `ps -o stat=` (which
+is how they tell a zombie from a live process, 0.23.4). On a box with no procps — `node:22-bookworm-slim`,
+the container this project's Linux work is done in — `spawnSync` returns `ENOENT`, every pid reads
+as dead, and `smoke-lifecycle` fails step 2 with **"the daemon was not running to begin with"**
+while the daemon is up. Measured 2026-08-30, on the released 0.23.5 tree as well as this one; with
+`apt-get install procps` both are 19/19. They name the missing tool now instead of answering the
+wrong question, and a lint keeps it that way.
+
+
 ## 0.23.5
 
 **Two portability defects, both of them Linux-shaped, and both found by running the thing on a
