@@ -683,6 +683,40 @@ export function resolveTtyd(override, exists = () => false) {
   return exists(TTYD_DEFAULT) ? TTYD_DEFAULT : null;
 }
 
+// What ttyd runs once per browser connection. Lives here, not in host.mjs, for one reason: it IS
+// the read-only guarantee, so `smoke-view` has to be able to run the SAME string the daemon runs
+// — a copy in the test would let the product's copy rot while the test stayed green.
+//
+// A tmux session of the viewer's own, grouped with the jam session (same live windows) but with
+// its own focus, so the host switching windows never yanks a viewer's screen — pinned to the
+// claude window and destroyed the moment the browser goes away. The tmux binary, the jam's
+// session name and its socket are passed as ARGUMENTS ($1/$2/$3), never interpolated.
+// v0.9: `status off` on the viewer's OWN session (never the host's), so the browser shows the
+// Claude Code screen and nothing else — no window list, no `⚑ N waiting` badge.
+// v0.20: `-L $3` — a viewer's grouped session has to be born on the same tmux server as the jam
+// it is grouped with, so the socket is an argument like everything else.
+// v0.23.1: `-f read-only,ignore-size`, the two client flags that make "read-only" a property of
+// the VIEWER instead of a property of whichever ttyd happens to be installed. Both measured
+// 2026-08-30 on a real jam with a real host client attached at 150x45:
+//   - `ignore-size`: a grouped session shares the jam's windows and `window-size` defaults to
+//     `latest`, so the newest client sizes the window for EVERYBODY. A browser opening the view
+//     at 30x8 dragged the host's real claude window from 150x44 to 30x8, and one ttyd
+//     RESIZE_TERMINAL frame took it to 12x4 — ttyd honours a resize even when it refuses input,
+//     because read-only there means "no INPUT", never "no resize". With the flag: 150x44 through
+//     both.
+//   - `read-only`: without it the only thing between a viewer and the host's keyboard is ttyd's
+//     default, and that default is version-dependent — ttyd >= 1.7.0 is read-only unless `-W`,
+//     ttyd <= 1.6.3 is WRITABLE unless `-R` (its own --help: "-R, --readonly  Do not allow
+//     clients to write to the TTY"), and `--view-ttyd <path>` accepts any binary. Under `ttyd -W`
+//     — what an old ttyd does with no flag at all — a viewer's keystrokes landed in the real
+//     claude pane; with the flag, under the same `-W`, tmux dropped them.
+// Both flags want tmux >= 3.2, already this project's floor: `display-popup`, the knock popup's
+// whole mechanism, landed in that same release.
+export const VIEW_SH = 'S="$2-view-$$"; exec "$1" -L "$3" '
+  + 'new-session -f read-only,ignore-size -t "$2" -s "$S" ";" '
+  + 'set-option -t "$S" destroy-unattached on ";" set-option -t "$S" status off ";" '
+  + 'select-window -t "$S:claude"';
+
 // ------------------------------------------------- v0.4: in-TUI knock approval ----
 
 // The tmux argv for one knock popup. `display-popup -E <cmd> <args…>` hands argv to the

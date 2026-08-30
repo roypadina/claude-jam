@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### The browser view was never actually read-only — two ways
+
+Found by the 2026-08-30 adversarial review of `--view`, the surface documented "read-only" in
+every version that has ever shipped it (v0.3 onwards). Both halves are fixed by the same change,
+two tmux client flags on the viewer's grouped session; both were reproduced against a real jam
+with a real host client attached at 150x45, and `scripts/smoke-view.mjs` — new, the nineteenth
+smoke and the first behavioural test this surface has ever had — is the canary.
+
+- **A viewer could resize the host's live Claude Code pane, and nothing about that needed a bug in
+  ttyd.** A grouped session shares the jam's windows, `window-size` defaults to `latest`, so the
+  newest client sizes the window for everybody. A browser merely *opening* the view at 30x8 dragged
+  the host's real claude window from 150x44 to **30x8**; one ttyd `RESIZE_TERMINAL` frame
+  (`'1' + {"columns":12,"rows":4}`) took it to **12x4**. ttyd's read-only mode means "no INPUT" and
+  says nothing about resize, so this was available to any holder of the view URL, over `--tunnel`
+  from anywhere. Fixed by `-f ignore-size`: measured again, the host stayed at 150x44 through both.
+- **Whether a viewer could TYPE depended on which `ttyd` was installed, and nothing checked.** The
+  code passed no writability flag and rested the guarantee on one comment — "ttyd >= 1.7 is
+  read-only unless `-W`". True of 1.7.0+; **ttyd <= 1.6.3 is writable unless `-R`** (its own
+  `--help`: `-R, --readonly  Do not allow clients to write to the TTY`), and `--view-ttyd <path>`
+  accepts any binary, so an old Homebrew install or a distro package published a **writable**
+  terminal on a port while the tool printed "read-only". Running the shipped script under `ttyd -W`
+  — exactly what an old ttyd does with no flag — landed a viewer's keystrokes in the real claude
+  pane: the tmux layer was no defence at all. Fixed by `-f read-only`, which holds on every ttyd
+  version; under the same `-W`, tmux now drops the keys. `SPEC.md` claimed `-R` was passed and it
+  never was — that is corrected too, and `-R` could not be added anyway (it does not exist on 1.7).
+
+Both flags want tmux >= 3.2, already this project's floor: `display-popup`, the knock popup's whole
+mechanism, landed in the same tmux release. `VIEW_SH` moved from `host.mjs` to `lib.mjs` so the
+smoke runs the same string the daemon runs rather than a copy that could rot.
+
+**Docs**: `README.md` and `MANUAL.md` now say the view URL's credential **is the join token**
+whenever one is set — so a leaked view link is a leaked join link — and that `/kick` does not
+revoke a view (only `/token new` or turning the view off does).
+
 ## 0.23.0
 
 **The Windows client is implemented, it is now unit-tested on real Windows in CI, and no human has

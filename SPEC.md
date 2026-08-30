@@ -241,7 +241,9 @@ Roster/hooks unchanged: pending knockers are NOT in the roster and never reach c
    each ttyd connection gets its own tmux grouped session pinned to the `claude` window
    (`tmux new-session -t <jam> ; set destroy-unattached on ; select-window -t <jam>:claude`)
    so viewers have independent focus and host window-switching never yanks their screen.
-   ttyd runs with `-R` (read-only) and HTTP basic auth `-c jam:<view-key>`; view-key = the
+   ttyd runs with HTTP basic auth `-c jam:<view-key>` and no writability flag at all — read-only
+   is enforced on the tmux side instead (`new-session -f read-only,ignore-size`, v0.23.1), because
+   `-R` exists only on ttyd <= 1.6 and ttyd honours a resize even when it refuses input; view-key = the
    friend token when one is set, else a generated 16-char key that rotates with `/token`.
    The join info (daemon window, host welcome, `/join`) prints BOTH lines: client command +
    `view: http://jam:<key>@<ip>:<view-port>`. ttyd missing → one log line "install ttyd for
@@ -900,6 +902,22 @@ node scripts/smoke-adopt.mjs
 # — the same trap smoke-adopt's fixtures hit.
 # Verified 2026-08-29: all 15 steps pass.
 node scripts/smoke-peer.mjs
+
+# v0.23.1: the nineteenth smoke, and the first behavioural test the browser view has ever had.
+# NO arguments, no daemon of yours, no real claude, no network — but a REAL ttyd, because ttyd is
+# the thing under test; it skips cleanly when there is none. Own $TMPDIR, ports 7951/7952/7953,
+# sessions jamview and jamviewdrive on their own sockets, killed by exact name. ~25 s, costs
+# nothing.
+#
+# The pane is `cat >> <log>`, so "a viewer typed into the host" is a byte in a file rather than a
+# judgement about a redraw, and a REAL host client is attached in a real pty at 150x45 so "the
+# host did not move" is a claim about a host that was there. It speaks ttyd's own protocol: the
+# AuthToken out of `/token`, `'0'+data` for INPUT and `'1'+json` for RESIZE_TERMINAL.
+#
+# Step 4 is the canary and the reason the file exists: it runs the SAME VIEW_SH under `ttyd -W`,
+# which is exactly what ttyd <= 1.6.3 does with no flag at all, and asserts tmux still drops the
+# keys. Remove `-f read-only,ignore-size` from VIEW_SH and steps 3 and 4 go red (verified).
+node scripts/smoke-view.mjs
 ```
 
 ### What each smoke covers of v0.25/v0.26/v0.27
