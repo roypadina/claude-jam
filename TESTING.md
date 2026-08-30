@@ -1092,7 +1092,7 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   the package has never been published. `npm pack --dry-run` (both CI legs) shows the tarball holds
   every module a client imports, which is not the same as a shim that works. Prove: publish, or
   `npm i -g ./claude-jam-<v>.tgz` on a Windows machine, then run `claude-jam` and `claude-jam join`.
-- 2026-08-30 · **`claude-jam adopt` is BROKEN on tmux 3.3a, and the message blames the wrong thing.**
+- ~~2026-08-30 · **`claude-jam adopt` is BROKEN on tmux 3.3a, and the message blames the wrong thing.**
   `PANE_SEP` is U+0001; tmux 3.3a replaces it with `_` in `display-message -p` output where 3.7c
   passes it through, so `parsePaneInfo` sees 1 field of 8 and `cmdAdopt` prints `no tmux pane %0 on
   socket <s>` for a pane that exists. Measured both ways on 2026-08-30 (3.7c → 8 of 8, 3.3a → 1 of
@@ -1100,7 +1100,31 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   Debian/Ubuntu box with the packaged tmux is affected, not just the suite. Fix: a separator tmux
   does not rewrite (or one `display-message` per field), a unit test over `parsePaneInfo` fed real
   3.3a output, and `smoke-adopt` green on Linux — then it can join the CI leg. Prove: that suite
-  green in the container, and `claude-jam adopt` by hand on tmux 3.3a.
+  green in the container, and `claude-jam adopt` by hand on tmux 3.3a.~~
+  **DISCHARGED — 0.23.5, 2026-08-30. The fix is one `display-message -p` PER FIELD, and the reason
+  it is not a cleverer separator is a measurement rather than a preference.** The same probe on both
+  versions asked for the eight fields in one call three times over, joined by U+0001, by a newline
+  and by a tab. tmux 3.3a came back with `%0_620_node_/home/runner/claude-jam_jamfx605_0_0_claude`
+  for **all three** — it filters every non-printable byte out of `display-message -p` output and
+  writes `_` — where 3.7c passed all three through. So "one field per line" loses on 3.3a exactly as
+  U+0001 does, and the per-field read is the only shape with no separator to rewrite. It also
+  survives a VALUE that contains a newline, which no separator can. Cost: 7.0 ms against 1.2 ms on
+  3.3a (mean of 5), once per adoption.
+  Both captures are committed as `fixtures/pane/display-message-tmux-3.3a.json` and
+  `-3.7c.json` — the eight raw per-field stdouts, the parse they must produce, and the three broken
+  `joined` forms — and two unit tests read them, so a future change cannot regress one tmux version
+  while passing on the other. Canaried both ways 2026-08-30: joining the queries back into one
+  format string reds the shape test; putting the old joined-string parse back reds the fixture test
+  with `3.3a: per-field parse`.
+  **Proved, not predicted, in the Debian bookworm container (tmux 3.3a, node 22.23.2, `--init`,
+  non-root):** `smoke-adopt` **6 FAIL + 7 BLOCKED at `HEAD` → 16/16 in 8 s** after, and 16/16 again
+  with `CI=true`; on macOS/tmux 3.7c 16/16 both ways. S12 is the load-bearing one — a session on the
+  container's DEFAULT tmux socket, adopted and released with the pane's pid unchanged. And by hand
+  on 3.3a, which is what the deferral asked for: `claude-jam adopt --pane %0 --socket <s>` now prints
+  `pane %0 (handadopt1864:0.0 "claude") / running node (pane pid 1874) / directory /home/runner` —
+  all eight fields — where it printed `no tmux pane %0 on socket <s>` before.
+  **Still not done:** `smoke-adopt` is not wired to the Linux CI leg. It is now a candidate (that
+  was the blocker this entry named), but wiring it is a gate-policy decision, and Roy's.
 - 2026-08-30 · **`smoke-transport` and `smoke-replay` have the unguarded-setup shape** — the sibling
   of the cascade, found while checking the other eighteen suites for it, recorded rather than fixed
   because both need restructuring rather than a declaration. `smoke-transport`: no top-level
@@ -1284,6 +1308,10 @@ So `claude-jam adopt` fails on Debian bookworm's packaged tmux for every user, n
 suite, and the failure message points at the pane rather than at the separator. **Not fixed here** —
 it is a product change in `lib.mjs` with its own unit and smoke surface, and it is not what this
 batch was for. In Deferred, and flagged to Roy.
+
+**Fixed in 0.23.5**, by reading one field per call rather than by picking a better separator: 3.3a
+rewrites a newline and a tab exactly as it rewrites U+0001, which was measured before choosing. The
+before/after numbers, the canaries and the two committed captures are in that Deferred entry.
 
 ## The 2026-08-30 campaign
 

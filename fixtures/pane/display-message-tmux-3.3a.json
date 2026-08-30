@@ -1,0 +1,39 @@
+{
+ "tmux": "tmux 3.3a",
+ "note": "Captured 2026-08-30 in a Debian bookworm container (node:22-bookworm-slim, aarch64, tmux 3.3a, node 22.23.2, non-root, `docker run --init`) — Debian and Ubuntu's packaged tmux, and so WSL2's. Same probe as the 3.7c fixture. `perField` is correct; every `joined` form is wrong in the same way, because this tmux replaces each non-printable byte in `display-message -p` output with `_` — so U+0001, a newline and a tab all collapse eight fields into one. That is the 0.23.5 bug: `claude-jam adopt` reported a pane that exists as missing on every Debian/Ubuntu box.",
+ "fields": [
+  "pane_id",
+  "pane_pid",
+  "pane_current_command",
+  "pane_current_path",
+  "session_name",
+  "window_index",
+  "pane_index",
+  "window_name"
+ ],
+ "perField": [
+  "%0\n",
+  "620\n",
+  "node\n",
+  "/home/runner/claude-jam\n",
+  "jamfx605\n",
+  "0\n",
+  "0\n",
+  "claude\n"
+ ],
+ "expect": {
+  "paneId": "%0",
+  "pid": 620,
+  "command": "node",
+  "cwd": "/home/runner/claude-jam",
+  "session": "jamfx605",
+  "windowIndex": "0",
+  "paneIndex": "0",
+  "windowName": "claude"
+ },
+ "joined": {
+  "u0001": "%0_620_node_/home/runner/claude-jam_jamfx605_0_0_claude\n",
+  "newline": "%0_620_node_/home/runner/claude-jam_jamfx605_0_0_claude\n",
+  "tab": "%0_620_node_/home/runner/claude-jam_jamfx605_0_0_claude\n"
+ }
+}

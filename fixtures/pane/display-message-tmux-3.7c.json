@@ -1,0 +1,39 @@
+{
+ "tmux": "tmux 3.7c",
+ "note": "Captured 2026-08-30 on macOS (Darwin 25.6.0), tmux 3.7c, node 24.15: a detached session on its own tmux socket, window named `claude`, pane running node — the shape `claude-jam adopt` meets. `perField` is one raw stdout per `fields` entry, in order, from eight calls of `tmux display-message -p -t <pane> \"#{<field>}\"`. `joined` is the SAME eight fields asked for in ONE call with the formats joined by U+0001 / newline / tab — the shape the code used through 0.23.4. On this tmux all three separators pass through untouched.",
+ "fields": [
+  "pane_id",
+  "pane_pid",
+  "pane_current_command",
+  "pane_current_path",
+  "session_name",
+  "window_index",
+  "pane_index",
+  "window_name"
+ ],
+ "perField": [
+  "%0\n",
+  "78764\n",
+  "node\n",
+  "/Users/roypadina/Code/Padina/claude-jam\n",
+  "jamfx78755\n",
+  "0\n",
+  "0\n",
+  "claude\n"
+ ],
+ "expect": {
+  "paneId": "%0",
+  "pid": 78764,
+  "command": "node",
+  "cwd": "/Users/roypadina/Code/Padina/claude-jam",
+  "session": "jamfx78755",
+  "windowIndex": "0",
+  "paneIndex": "0",
+  "windowName": "claude"
+ },
+ "joined": {
+  "u0001": "%0\u000178764\u0001node\u0001/Users/roypadina/Code/Padina/claude-jam\u0001jamfx78755\u00010\u00010\u0001claude\n",
+  "newline": "%0\n78764\nnode\n/Users/roypadina/Code/Padina/claude-jam\njamfx78755\n0\n0\nclaude\n",
+  "tab": "%0\t78764\tnode\t/Users/roypadina/Code/Padina/claude-jam\tjamfx78755\t0\t0\tclaude\n"
+ }
+}
