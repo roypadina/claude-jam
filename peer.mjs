@@ -119,8 +119,16 @@ export function runPeerTask(task, {
       // one this function created and can name by the pid it was given.
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-      // The guest's own environment, minus the two things that would make this run as somebody
-      // else's account or read somebody else's config.
+      // The guest's own environment, whole, plus one marker. v0.34.1: this comment used to say
+      // "minus the two things that would make this run as somebody else's account or read somebody
+      // else's config" — and it never named them, because nothing is subtracted here and nothing
+      // ever was (checked back to the commit that wrote it). The behaviour is the intended one and
+      // the comment was the wrong half: a peer task runs on the GUEST's account, with the guest's
+      // own CLAUDE_CONFIG_DIR and their own credentials, because that is the entire feature —
+      // their machine, their quota, and no credential crossing the wire. What keeps a task from
+      // reaching the rest of their setup is not the environment but the three confinements at the
+      // top of this file: the fresh 0700 cwd, `--restricted` (which ignores their user, project and
+      // local settings), and `--strict-mcp-config` with no config at all.
       env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'claude-jam-peer' },
     });
   } catch (e) {
