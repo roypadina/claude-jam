@@ -52,7 +52,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
 | `peer-mcp.mjs` | v0.29: `list_peers` / `dispatch_to_peer` as a stdio MCP server for the HOST's own claude. A PIPE, not a brain — every decision is the daemon's, reached over the same loopback+secret endpoint `hooks.sh` uses. |
 | `peer.mjs` | v0.29: running ONE peer task on this machine — the scratch dir, the generated settings, the spawn, the caps and the killing. Imported by both clients so there is one place a peer task is built and stopped. |
-| `test.mjs` | the unit suite. `scripts/` holds the eighteen end-to-end smokes, `scripts/check-terminal-gate.mjs` (a free non-smoke check that spawns the real client entry point, in CI on both legs) and `fixtures/pane/` the real `capture-pane` corpus. |
+| `test.mjs` | the unit suite. `scripts/` holds the nineteen end-to-end smokes, `scripts/check-terminal-gate.mjs` (a free non-smoke check that spawns the real client entry point, in CI on both legs) and `fixtures/pane/` the real `capture-pane` corpus. |
 | `docs/COMPATIBILITY.md` | what has actually been RUN, per platform and per capability, with the date and the build. No "should work" rows. A capability is verified or it is listed as unverified with the experiment that would settle it. |
 | `integrations/claude-plugin/` | the OPTIONAL `/jam` Claude Code plugin: a command, a skill, a manifest. **No code** — everything it does, it does by running the `claude-jam` on `PATH`. `.claude-plugin/marketplace.json` at the repo root points at it; a test asserts the two manifests agree. |
 
@@ -106,7 +106,7 @@ binaries** and stay where they are used — see §1.
 
 If you add a module to the repo root, both lints pick it up automatically. That is deliberate.
 
-### The eighteen smokes, and the order
+### The nineteen smokes, and the order
 
 They are end-to-end and they are the only thing that proves the tmux/injection/WS half works.
 The full recipe — driver session, ports, arguments — is in `SPEC.md` under **"Running the
@@ -199,14 +199,24 @@ Then, in any order, the ones that bring their own everything:
     many of each it actually sent, which step 9b asserts against. That is campaign F4's lesson
     made structural: the stand-in used to send no `message.id` at all, so the turn counter that
     ships was never once driven by the shape it meets, and a bug that halved every cap survived
-    eighteen smokes. **A stand-in is only as good as the last measurement behind it** — if you
+    eighteen smokes (nineteen, since 0.23.1). **A stand-in is only as good as the last measurement behind it** — if you
     change one, say what you measured and when.
 
     Note: it asserts the scratch directory by BASENAME. On macOS `$TMPDIR` is a symlink, so the
     argv carries `/var/folders/…` and the child's own `process.cwd()` reports
     `/private/var/folders/…` — the same trap `smoke-adopt`'s fixtures hit.
 
-Prefer 8–18 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
+19. `smoke-view.mjs` — no arguments, no real claude, no network — but a **real `ttyd`**, because
+    ttyd is the thing under test; it prints `SKIP` and exits 0 when there is none. Own `$TMPDIR`,
+    ports 7951/7952/7953, sessions `jamview` and `jamviewdrive` on their own sockets. ~25 s.
+    Added by the 0.23.1 security review: through 0.23.0 the browser view's "read-only" claim was
+    carried by a **code comment** and nothing else, and it was wrong twice over. Step 4 is the
+    canary and the reason the file exists — it runs the same `VIEW_SH` the daemon runs (which is
+    why `VIEW_SH` lives in `lib.mjs`) under `ttyd -W`, i.e. what ttyd ≤ 1.6.3 does with no flag at
+    all, and asserts tmux still drops the keys. Remove `-f read-only,ignore-size` and steps 3 and
+    4 go red; the other four stay green.
+
+Prefer 8–19 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
 real tokens, so run them once, at the end, and use `--model haiku`.
 
 ### A suite cleans up after itself, by exact path
@@ -330,3 +340,29 @@ false negatives on 2026-08-29 and nearly got a real, documented flag declared mi
 
 Use `grep -a` or `rg` on `host.mjs`, `lib.mjs`, the client files and anything in `fixtures/pane/`.
 If a grep comes back empty on a file you expected a hit in, re-run with `-a` before believing it.
+
+## Pushing the Homebrew tap: git's credentials do not follow `gh`
+
+Measured on the 0.23.1 release. Pushing `roypadina/homebrew-tap` **over HTTPS is rejected as
+`roypadina-reeco`** even when `gh auth status` shows `roypadina` as the active account, because
+git's credential helper resolves independently of `gh` — `gh` switching accounts changes nothing
+about what the helper hands to `git push`. Push the tap over **SSH**, and leave the stored remote
+alone rather than rewriting it.
+
+**The trap is what happens when that push fails**, and it is worse than a plain error: `brew
+upgrade` builds from the **local** tap clone at
+`/opt/homebrew/Library/Taps/roypadina/homebrew-tap`, so a failed tap push still produces a
+perfectly working local install — the machine doing the release verifies green while **everybody
+else is served the previous version**. A `brew upgrade` that reports the new version is therefore
+*not* evidence the tap was published.
+
+So a tap bump is done only when both are true, checked separately:
+
+```sh
+git -C /opt/homebrew/Library/Taps/roypadina/homebrew-tap rev-list --count origin/main..HEAD  # must be 0
+brew style roypadina/tap/claude-jam                                                          # must be clean
+```
+
+And note there are **two clones**: brew's own (above), which is what `brew upgrade` reads, and
+Roy's working copy at `~/Code/Padina/homebrew-tap`. Bumping one leaves the other stale and they
+diverge silently.
