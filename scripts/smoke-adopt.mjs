@@ -427,6 +427,21 @@ try {
     // Plant the key in the transcript, then take a copy of it as the host.
     fs.appendFileSync(TRANSCRIPT, `${JSON.stringify({ type: 'user', cwd: WORK,
       message: { content: `and the host key is ${key}` } })}\n`);
+
+    // The daemon TAILS this transcript, so the planted line comes back as a `say` frame — and
+    // that is the realistic shape of the leak, not an artifact of the plant: claude runs as the
+    // host user, so any participant can ask it to read host.key and the answer arrives here.
+    // WAIT for that frame instead of racing it. Until 0.22.0 the "no frame holds the key" loop
+    // below simply ran first, usually, and this step passed five times in six while the
+    // transcript funnel scrubbed nothing — the one run where the poll landed first is what found
+    // it. Requiring the frame to arrive, scrubbed, pins the fix and removes the race together.
+    const said = await h.waitFor('the planted transcript line, echoed back to the room',
+      (e) => e.t === 'say' && /and the host key is/.test(e.text || ''), 20000);
+    ok(!said.text.includes(key), `the planted key came back verbatim in a say frame: ${said.text}`);
+    ok(said.text.includes('[host key removed]'),
+      `the transcript funnel did not scrub the key: ${said.text}`);
+    console.log(`      transcript funnel: ${JSON.stringify(said.text)}`);
+
     h.send({ t: 'export' });
     const head = await h.waitFor('the export header', (e) => e.t === 'xfer' && e.kind === 'export', 20000);
     await h.waitFor('the last export chunk', (e) => e.t === 'file' && e.xfer === head.xfer && e.done, 20000);
