@@ -88,9 +88,20 @@ export function secureDir(dir) {
 // a POSIX mode there is reinterpreted rather than honoured (see secureWrite), so on win32 the
 // owner and mode questions have no answer here and restrictToUser's ACL is the mechanism. The TYPE
 // check still runs everywhere — a symlink is a symlink.
+// It FAILS CLOSED on an lstat that cannot answer, and only ENOENT/ENOTDIR is an allow: those two
+// mean the path is not there yet, which is the normal case and the caller's job to create. Anything
+// else — EACCES on a parent directory, ELOOP, EIO, a mount that has gone away — is a path jam
+// cannot reason about, and `catch { return null }` would have called every one of them private.
+// That is the same fail-open shape as the finding this function exists to close.
 export function assumePrivate(target, { kind = 'directory' } = {}) {
   let st;
-  try { st = fs.lstatSync(target); } catch { return null; } // does not exist: nothing to distrust
+  try {
+    st = fs.lstatSync(target);
+  } catch (e) {
+    if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return null; // not there yet
+    return `it cannot be inspected (${e?.code || e?.message}), so nothing here can tell whether `
+      + 'another user can reach it';
+  }
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   return pathPrivacy(st, uid, { kind });
 }

@@ -221,12 +221,22 @@ export function hostKeyMatches(given, current) {
 //   mode   — any group or other bit at all. A 0700 directory is the guarantee the whole host-key
 //            argument rests on; 0750 is already enough for a group member to read the key.
 //
-// `uid` null means "there is no POSIX identity on this filesystem", which is what Windows passes:
+// `uid` null means "this platform has no POSIX identity at all", which is ONLY what win32 passes:
 // there is no getuid() there, and `fs.Stats.mode` is SYNTHESISED rather than a real mode — every
 // writable file reads 0o666 — so a group/other test would refuse every directory on the platform.
 // Both the owner and the mode question are therefore unanswerable there and are skipped together;
 // the port on win32 is restrictToUser's NTFS ACL and this function is not the gate. The TYPE check
 // still runs everywhere, because a symlink is a symlink. Said out loud rather than degraded quietly.
+//
+// **On a POSIX platform this FAILS CLOSED, and that is the whole point of the third branch below.**
+// `uid` non-null is a promise that this machine has real uid/mode semantics — so a `stat` that then
+// cannot answer either question is not "probably fine", it is a filesystem jam cannot reason about,
+// and jam's secrets do not go there. The case that matters is WSL2, which is the documented Windows
+// host path (SPEC v0.32 W2): `process.getuid` exists there, so uid is non-null, but a `--state` (or
+// a `$TMPDIR`) on a mounted Windows drive is a DrvFs mount whose metadata is emulated. DrvFs
+// without `metadata` reports one uid and mode 0777 for everything, which the mode branch already
+// refuses; what this branch adds is the mount that reports nothing usable at all. Refusing a jam
+// that could have been private is a startup message; allowing one that is not is finding 3.
 export function pathPrivacy(st, uid = null, { kind = 'directory' } = {}) {
   if (!st) return null; // it does not exist yet: nothing to distrust, and the caller creates it
   const want = kind === 'directory' ? 'isDirectory' : 'isFile';
@@ -234,14 +244,19 @@ export function pathPrivacy(st, uid = null, { kind = 'directory' } = {}) {
     return `it is not a ${kind} owned by this process — a symlink or another kind of file here `
       + 'means somebody else chose where these bytes go';
   }
-  if (uid == null) return null; // no POSIX identity: neither of the two below can be asked
+  if (uid == null) return null; // win32: no POSIX identity exists, so neither question below can be asked
+  if (!Number.isInteger(st.uid) || !Number.isInteger(st.mode)) {
+    return 'this filesystem does not report an owner and a mode that can be checked, so nothing '
+      + 'here can tell whether another user can reach it — a mount with emulated metadata (a '
+      + 'Windows drive under WSL2, for instance) does this';
+  }
   if (st.uid !== uid) {
     return `it is owned by uid ${st.uid}, not by this process (uid ${uid}) — that user can replace `
       + 'anything inside it whatever the mode says';
   }
-  const extra = (st.mode ?? 0) & 0o077;
+  const extra = st.mode & 0o077;
   if (extra) {
-    return `its mode is ${((st.mode ?? 0) & 0o7777).toString(8)}, which grants `
+    return `its mode is ${(st.mode & 0o7777).toString(8)}, which grants `
       + `${(extra & 0o070) ? 'the group' : 'other users'} access — `
       + (kind === 'directory'
         ? `jam's state dir holds ${HOST_KEY_FILE} and token.json, so it must be 0700`
@@ -2146,15 +2161,24 @@ export function replayCount(replay = REPLAY_DEFAULT, held = 0) {
 //     `[Name]: ` parses as bridged and the live path DROPS it, so nothing was ever broadcast. The
 //     cost is that a host who really typed `[note]: mine` sees one bent bracket in the replay.
 //
-// ponytail: the CEILING, named rather than implied. A FIRST line reading `[Dana]: hello` is
-// byte-identical to what jam's own injection writes, so a transcript that contains one is replayed
-// as Dana whether Dana ever said it or not — there is no marker in the file to tell the two apart,
-// and inventing one would mean writing jam's own sideband into claude's transcript. What is closed
-// above is everything a name cannot be (`from` is a validName or the line is the host's) and
-// everything after the first line (bent). What remains needs WRITE access to
-// `~/.claude/projects/…/<id>.jsonl` — the host's own machine — so the guard that matters is not
-// resuming a transcript somebody else can write. Upgrade path if that ever stops holding: sign the
-// injected line, or keep jam's own record of who said what beside the state dir.
+// ponytail: the CEILING, named rather than implied — and so is WHO can reach it, because that is
+// what makes it acceptable. A FIRST line reading `[Dana]: hello` is byte-identical to what jam's
+// own injection writes, so a transcript containing one is replayed as Dana whether Dana ever said
+// it or not. There is no marker in the file to tell the two apart, and adding one means jam writing
+// its own sideband into claude's transcript — which is the pane the HOST reads, so the cure is worse.
+//
+// THE THREAT MODEL, in one line: exploiting it requires WRITE access to
+// `<claude config dir>/projects/*/<session id>.jsonl` — a LOCAL user on the host's machine, running
+// as the host or able to write that user's files. That is strictly more access than the whole
+// feature already grants: the same person can type into the pane. No PARTICIPANT can reach it —
+// a guest's own text is bent by neutralizePrefixes before it is ever injected, and a guest who gets
+// claude to WRITE such a file still cannot make the host resume that session id.
+//
+// What IS closed above, and holds against a crafted file: everything a name cannot be (`from` is a
+// validName or the line becomes the host's, so no ESC and no punctuation reaches a label column)
+// and every line after the first (bent). Upgrade path, if a jam ever resumes a transcript from
+// somewhere less trusted than the host's own disk: sign the injected line, or keep jam's own record
+// of who said what beside the state dir and replay from that instead of from the JSONL.
 export function backfillHistory(text, { hostName = 'Host', cap = REPLAY_DEFAULT, secrets = {} } = {}) {
   const events = [];
   const files = new Map();
