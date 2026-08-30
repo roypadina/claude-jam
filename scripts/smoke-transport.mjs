@@ -20,6 +20,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WS from 'ws';
+import { hostKeyPath } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -63,6 +65,8 @@ async function daemon(name, extra = []) {
   child.on('exit', (code) => { d.exited = code; });
   d.waitLog = (re, ms = 30000) => until(`${name} to log ${re}`, () => re.exec(d.out), ms);
   d.tokenFile = () => JSON.parse(fs.readFileSync(path.join(state, 'token.json'), 'utf8'));
+  // v0.34: what a host peer has to present. Read at call time: the daemon writes it at start.
+  d.hostKey = () => readHostKey(hostKeyPath(state));
   d.stop = async () => {
     if (d.exited == null) { try { child.kill('SIGTERM'); } catch { /* gone */ } }
     await until(`${name} to exit`, () => d.exited != null, 10000).catch(() => { child.kill('SIGKILL'); });
@@ -100,7 +104,7 @@ if (spawnSync('cloudflared', ['--version'], { encoding: 'utf8' }).status !== 0) 
   const d = await daemon('tunnel', ['--port', String(P.tunnel), '--tunnel']);
   // Loopback + host:true is what earns the {t:'token'} frames — the same frame /token rotation
   // uses, which is exactly why T1 needed no new protocol.
-  const host = peer(`ws://127.0.0.1:${P.tunnel}`, 'Host', {}, { host: true });
+  const host = peer(`ws://127.0.0.1:${P.tunnel}`, 'Host', {}, { host: true, hostKey: d.hostKey() });
   let first = null;
   let firstPid = null;
 
@@ -282,7 +286,7 @@ exit 1
 
   const d = await daemon('funnel', ['--port', String(P.funnel), '--view-port', String(P.funnelView),
     '--view', '--funnel', '--funnel-cli', stub]);
-  const host = peer(`ws://127.0.0.1:${P.funnel}`, 'Host', {}, { host: true });
+  const host = peer(`ws://127.0.0.1:${P.funnel}`, 'Host', {}, { host: true, hostKey: d.hostKey() });
 
   await step('T4 the funnel URL is printed before it is up, because it is the same one every run', async () => {
     const m = await d.waitLog(/funnel: (wss:\/\/\S+) \(stable — same URL across restarts\)/, 20000);
@@ -318,7 +322,7 @@ exit 1
     // The other delivery path: a host client that connects while the funnel is already up gets
     // the URLs in its welcome, not on a later frame. Both matter — the stub resolves instantly,
     // so a real cloudflared's five-second head start does not exist to paper this over.
-    const late = peer(`ws://127.0.0.1:${P.funnel}`, 'Late', {}, { host: true });
+    const late = peer(`ws://127.0.0.1:${P.funnel}`, 'Late', {}, { host: true, hostKey: d.hostKey() });
     const w = await late.want('welcome', (f) => f.t === 'welcome', 20000);
     console.log(`      a host client's welcome carries: ${w.session.tunnelJoin}`);
     if (w.session.tunnelJoin !== tf.tunnelJoin) throw new Error(`welcome disagrees: ${w.session.tunnelJoin}`);

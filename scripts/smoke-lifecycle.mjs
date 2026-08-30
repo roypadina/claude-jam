@@ -517,6 +517,13 @@ try {
     line('a');
     await until('the client to open on the mirror', () => /fake claude/.test(pane(S.drive)), 25000);
     show('the host client, attached to a jam that was already running', S.drive);
+    // v0.34: and it is the HOST, said out loud. The launcher hands its own client the path of
+    // the daemon's 0600 host.key; without it the client demotes itself to a guest, and this jam
+    // has no token, so a demoted host would still be knocking. `(host)` is the roster's own word
+    // for how this client got in — the one surface where a demotion is visible.
+    if (!/Host joined \(host\)/.test(flat(S.drive))) {
+      throw new Error('the attached client did not join as the HOST — did it get --host-key-file?');
+    }
     line('/quit');
     const asked = await until('the exit prompt', () => (/\[k\]eep it running/.test(flat(S.drive)) ? back(S.drive) : null), 15000);
     console.log(`      ${asked.split('\n').filter((l) => /still running/.test(l)).at(-1).trim()}`);

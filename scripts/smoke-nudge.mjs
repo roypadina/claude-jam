@@ -27,10 +27,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { UPLOAD_MAX } from '../lib.mjs';
+import { UPLOAD_MAX, hostKeyPath } from '../lib.mjs';
 // The seam's own table, so this smoke asserts on the sounds the product actually plays rather
 // than on three file names copied into a test.
-import { SOUNDS } from '../platform.mjs';
+import { SOUNDS, readHostKey } from '../platform.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -74,6 +74,8 @@ async function until(what, pred, ms = 12000) {
 
 // ------------------------------------------------------------------ fixtures ----
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-nudge-'));
+// v0.34: where this jam's host.key lives — the daemon writes it at start, 0600.
+const STATE = path.join(TMP, `claude-jam-${PORT}`);
 const CWD = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-nudge-cwd-'));
 const BIN = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-nudge-bin-'));
 const FAKE_CLAUDE = path.join(BIN, 'claude');
@@ -176,13 +178,17 @@ try {
   const roy = stubs('Roy');
   const royBorn = tmux('new-session', '-d', '-s', S.roy, '-x', '120', '-y', '40',
     'env', `PATH=${roy.path}`, `TMPDIR=${TMP}`,
-    process.execPath, CLIENT_MJS, `ws://127.0.0.1:${PORT}`, '--name', 'Roy', '--token', TOKEN, '--host');
+    process.execPath, CLIENT_MJS, `ws://127.0.0.1:${PORT}`, '--name', 'Roy', '--token', TOKEN, '--host',
+    // v0.34: `--host` is the claim, this is the proof — the same pair runHostClient hands the
+    // client on every surface that opens the host's own client. Without it a REAL client demotes
+    // itself to a guest, out loud, which is what makes this a live check of the client half.
+    '--host-key-file', hostKeyPath(STATE));
   if (royBorn.status !== 0) throw new Error(`could not start Roy's client: ${royBorn.stderr}`);
   await until("Roy's client to connect", () => /host Roy/.test(pane(S.roy)));
 
   // A second trusted client, raw, for driving the policy frames and watching what the daemon
   // sends. Loopback + host:true is exactly what makes a client trusted (see classifyHello).
-  ops = peer({ name: 'Ops', host: true, token: TOKEN });
+  ops = peer({ name: 'Ops', host: true, hostKey: readHostKey(hostKeyPath(STATE)), token: TOKEN });
   await ops.want('the ops welcome', (f) => f.t === 'welcome');
 
   // ======================================================== 1: two different sounds ====

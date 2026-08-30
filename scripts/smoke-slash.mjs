@@ -9,12 +9,30 @@
 // is also why the ladder steps below use /release-notes: an allowlisted command never asks.
 // v0.21.1: and the other direction — the host's OWN loopback client is still the host after the
 // loopback gate was narrowed (the flag in the welcome, F3 keys landing, a trusted() report).
+// v0.34: and the key that proves it. `--host` is a claim; `<state>/host.key` is the proof, so a
+// scripted host reads it exactly the way the real client does — and the last step proves the key
+// leaks into nothing: no frame either peer received (the /export bytes included), no daemon log
+// line, and no file in the state dir but host.key itself.
 // usage: node scripts/smoke-slash.mjs <ws-url> <token> <tmux-session>
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { hostKeyPath, stateDirFor, HOST_KEY_FILE } from '../lib.mjs';
+import { readHostKey } from '../platform.mjs';
 
 const [url, token, session] = process.argv.slice(2);
 if (!url || !token || !session) {
   console.error('usage: node scripts/smoke-slash.mjs <ws-url> <token> <tmux-session>');
+  process.exit(2);
+}
+// v0.34: the daemon writes `<state>/host.key` at start; the host's own client reads it. The
+// state dir is `$TMPDIR/claude-jam-<port>` — the same one the recipe's `rm -rf` names.
+const PORT = Number(new URL(url).port) || 7777;
+const STATE = stateDirFor(os.tmpdir(), PORT);
+const HOST_KEY = readHostKey(hostKeyPath(STATE));
+if (!HOST_KEY) {
+  console.error(`no ${HOST_KEY_FILE} in ${STATE} — this daemon predates v0.34, or is not the one on ${url}`);
   process.exit(2);
 }
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
@@ -71,7 +89,7 @@ async function until(what, pred, ms = 20000) {
 }
 const eq = (got, want, what) => { if (got !== want) throw new Error(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); };
 
-const host = peer({ name: 'SmokeHost', host: true, token });
+const host = peer({ name: 'SmokeHost', host: true, hostKey: HOST_KEY, token });
 const guest = peer({ name: 'Guest', token });
 
 await step('a loopback host and a token guest are both in', async () => {
@@ -254,6 +272,55 @@ await step('knock still works end to end: wrong token knocks, host accepts', asy
   eq(w.you, 'Noa', 'welcome.you');
   eq(w.session.join, undefined, 'a guest must not receive the join line');
   noa.close();
+});
+
+// v0.34: the key is a CREDENTIAL. It rides in one direction only — the client's hello — and the
+// daemon compares it and drops it. This is the runtime proof of that: everything the daemon
+// emits, on every surface it emits on, with the key never appearing in any of it.
+await step('the host key leaks into nothing: no frame, no daemon log, no export, no other file', async () => {
+  // 1. The /export bytes — the largest thing the daemon ever sends, and the one that carries a
+  //    copy of the whole conversation. The host is trusted, so it needs no approval. A jam whose
+  //    claude has never taken a turn has no transcript on disk, and then there is nothing to
+  //    prove HERE — smoke-adopt does that half against a planted transcript with the key in it.
+  host.send({ t: 'export' });
+  const answer = await until('the daemon to answer the export',
+    () => host.frames.find((f) => (f.t === 'xfer' && f.kind === 'export')
+      || (f.t === 'error' && /transcript/.test(f.text))), 30000);
+  if (answer.t === 'error') {
+    console.log(`      /export: ${JSON.stringify(answer.text)} — nothing to scan (see smoke-adopt)`);
+  } else {
+    await until('the export to finish streaming', () => host.frames.some((f) => f.t === 'file' && f.done), 30000);
+    const chunks = host.frames.filter((f) => f.t === 'file');
+    const bytes = Buffer.concat(chunks.map((f) => Buffer.from(f.b64, 'base64'))).toString('utf8');
+    if (bytes.includes(HOST_KEY)) throw new Error('the host key is in the exported transcript');
+    console.log(`      /export: ${chunks.length} chunk(s), ${bytes.length} bytes, no key in them`);
+  }
+
+  // 2. EVERY frame either peer has received, this run, of any type.
+  for (const [who, p2] of [['host', host], ['guest', guest]]) {
+    const all = JSON.stringify(p2.frames);
+    if (all.includes(HOST_KEY)) throw new Error(`the host key came back in a frame to the ${who}`);
+  }
+  console.log(`      ${host.frames.length} host frames + ${guest.frames.length} guest frames: no key in any of them`);
+
+  // 3. The daemon's own log — its tmux window, whole scrollback. It logs the knock, the admit,
+  //    the grants and the export; it must never log what it compared.
+  const log = spawnSync(TMUX, [...TMUX_ARGS, 'capture-pane', '-p', '-S', '-', '-t', `${session}:daemon`],
+    { encoding: 'utf8' }).stdout || '';
+  if (!log.trim()) throw new Error('could not read the daemon window — nothing to prove');
+  if (log.includes(HOST_KEY)) throw new Error('the host key is in the daemon log');
+  console.log(`      daemon window: ${log.split('\n').length} line(s) captured, no key in them`);
+
+  // 4. And nothing else in the 0700 state dir holds it — not token.json, not the roster, not the
+  //    generated settings or system prompt. Only host.key itself, at 0600.
+  const key = hostKeyPath(STATE);
+  eq(fs.statSync(key).mode & 0o777, 0o600, `${HOST_KEY_FILE} mode`);
+  for (const f of fs.readdirSync(STATE)) {
+    const file = path.join(STATE, f);
+    if (file === key || !fs.statSync(file).isFile()) continue;
+    if (fs.readFileSync(file, 'utf8').includes(HOST_KEY)) throw new Error(`the host key is in ${f}`);
+  }
+  console.log(`      ${STATE}: ${HOST_KEY_FILE} is 0600 and the only file holding the key`);
 });
 
 host.close();
