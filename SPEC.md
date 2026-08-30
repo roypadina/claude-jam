@@ -2249,3 +2249,42 @@ Feasible whenever that claude runs inside a tmux pane — jam's whole substrate 
 6. **When adoption is impossible** (not inside tmux — a bare terminal, or a cmux pane), say so
    with the exact alternative: exit and run `claude-jam host --resume <id> --cwd <dir>`, with the
    id already filled in from the detection above.
+
+## v0.34 — host identity is a local secret, not a network address
+
+F1 (campaign, 2026-08-30) was fixed by reading the proxy headers a relay cannot suppress. That
+holds for cloudflared, which was measured. It does **not** generalise: `--funnel` was never
+tested, a future relay may set different headers or none, and the whole approach is a blocklist —
+we enumerate what a relay looks like and hope the list is complete. The next relay that proxies
+to `127.0.0.1` without a header we recognise re-opens the same hole, and it opens it silently.
+
+Replace the inference with proof.
+
+1. **A key on disk.** At daemon start, write `<state>/host.key` — 32 random bytes, mode `0600`,
+   in the state dir that is already `0700`. It is a credential; it is never logged, never put in
+   a frame, never in the transcript, and `stripTokenBlock` must scrub it like the join token.
+2. **The host proves it by reading the file.** The host's own client — launched by `claude-jam
+   host`, by `--attach`, or by the launcher menu — reads `host.key` and presents it in `hello`.
+   `host:true` and `trusted()` require **that key**. A process on another machine cannot read it,
+   whatever address its packets appear to come from and whatever headers they carry.
+3. **Loopback stays, as a second condition, not the first.** Keep `localSocket()`: a connection
+   must both present the key AND look local. Two independent conditions, either of which failing
+   denies host. Belt and braces is the point — this is the gate that owns somebody's machine.
+4. **This is not a new trust assumption.** Anyone who can read `<state>/host.key` can already read
+   `token.json` beside it, and is already a local user with the host's own privileges. The key
+   grants nothing that filesystem access did not already grant; it just stops the *network* from
+   impersonating the filesystem.
+5. **What it closes, without needing a live test.** `--funnel`'s exposure — currently unverified
+   and unverifiable here, since Funnel is not enabled on this tailnet — stops being a question:
+   a funnel-relayed socket has no key, so it is not the host, whether or not Tailscale sets a
+   header we would have recognised. Same for any relay added later. Record in `TESTING.md` that
+   Funnel's *transport* is still unverified while its *host gate* no longer depends on it.
+6. **Failure modes must be explicit.** No key file (an older jam, a hand-started daemon): the
+   client says so and joins as a guest rather than silently failing — never fall back to
+   address-only host. A key that does not match is refused the same way a bad token is, and the
+   refusal says which of the two conditions failed, because "you are not the host on your own
+   machine" is otherwise unanswerable.
+7. Tests: the key never appears in any frame, log line or export; a socket presenting the key from
+   a non-local address is refused; a local socket with no key is a guest; the host's own client
+   still gets host over plain loopback; and the F1 probe shape — relay headers, relay address —
+   is refused on both conditions independently.
