@@ -290,8 +290,11 @@ while the jam runs — same relay children as the launcher, **nobody already con
 dropped**, and a mode that cannot run here says why with the exact fix. Links minted earlier
 carry the old address, so the switch offers to re-issue every live link (and waits for the new
 hostname before minting, or they would carry exactly the address they replace). When a relay
-comes up, host clients get `tunnel ready: <the whole join command>` rather than a silent
-refresh, and `/join` prints one dated block instead of another near-identical copy.
+comes up, host clients get `tunnel ready: <the whole join command> · give it a few seconds`
+rather than a silent refresh, and `/join` prints one dated block instead of another
+near-identical copy. The few seconds are real and measured: cloudflared reports its hostname
+about 2.5 s before the edge will route to it, so a client that connects the instant the line
+appears gets one disconnect and then reconnects.
 
 ### Uploads and the transcript: two policies, two defaults
 

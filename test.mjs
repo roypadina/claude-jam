@@ -3619,12 +3619,27 @@ test('v0.24b a pending relay says so, and a ready one announces the whole join l
   assert.equal(relayPendingLine('none'), null);
   assert.equal(relayPendingLine('tunnel'), 'tunnel: starting…');
   assert.equal(relayPendingLine('funnel'), 'funnel: starting…');
-  assert.equal(relayReadyLine('tunnel', 'claude-jam join wss://x.trycloudflare.com --name <You>'),
-    'tunnel ready: claude-jam join wss://x.trycloudflare.com --name <You>');
-  assert.equal(relayReadyLine('funnel', 'j', { changed: true }), 'funnel moved: j');
+  assert.match(relayReadyLine('tunnel', 'claude-jam join wss://x.trycloudflare.com --name <You>'),
+    /^tunnel ready: claude-jam join wss:\/\/x\.trycloudflare\.com --name <You>/);
+  assert.match(relayReadyLine('funnel', 'j', { changed: true }), /^funnel moved: j/);
   // No relay, or no line to give out yet, announces nothing at all.
   assert.equal(relayReadyLine('off', 'j'), null);
   assert.equal(relayReadyLine('tunnel', null), null);
+  // Campaign F6: cloudflared reports the hostname ~2.5 s before the edge will route to it
+  // (measured from the soak log, 21:10:51.616 published → 21:10:54.142 connected, with one hard
+  // 1006 at 21:10:51.922 in between). A human pasting a link is slower than that, so the fix is
+  // to say so rather than to build a health check.
+  for (const changed of [false, true]) {
+    assert.match(relayReadyLine('tunnel', 'j', { changed }), /give it a few seconds/, `changed=${changed}`);
+  }
+  // It belongs on THIS line and no other. relayReadyLine fires once, when the hostname lands,
+  // which is the only moment the caveat is true; the lines /join and /token print are the same
+  // strings an hour later, and must not still be apologising for the URL.
+  assert.deepEqual(tunnelJoinLines('claude-jam join wss://x.trycloudflare.com', 'https://y.trycloudflare.com'),
+    ['tunnel invite: claude-jam join wss://x.trycloudflare.com', 'tunnel view: https://y.trycloudflare.com']);
+  // One line, not two: the daemon console prints it and the host clients get it as one frame of
+  // text, and a newline in either place renders as somebody's message being cut in half.
+  assert.equal(relayReadyLine('tunnel', 'j').includes('\n'), false);
 });
 
 test('v0.24.2 every jam command and every documented host flag is in the host menu', () => {
