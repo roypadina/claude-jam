@@ -3361,10 +3361,28 @@ export function relayPendingLine(mode) {
 
 // v0.24b: a relay coming up is an EVENT, not a silent state refresh.  One line, the join
 // command already in it, so the host can send it without asking anything else.
+//
+// v0.21.2 (campaign F6): and it says the hostname is not routable yet, because it is not.
+// MEASURED on 2026-08-30, from the tunnel soak's own log to the millisecond:
+//
+//   21:10:51.616  tunnel up: sally-consideration-visitor-autos.trycloudflare.com
+//   21:10:51.922  guest socket error, then closed code=1006      (306 ms later)
+//   21:10:54.142  guest connected                    (2.53 s after the URL was published)
+//
+// cloudflared reports the hostname as soon as it has one; the edge needs another ~2.5 s before
+// it will route to it. A human pasting a link into a chat is slower than that, so this costs
+// nothing in practice — but it was the ENTIRE explanation for the tunnel soak's single reconnect,
+// and anything that takes this line and connects immediately gets one hard 1006 first.
+//
+// Said HERE and nowhere else, deliberately: this line fires exactly once, at the moment the
+// hostname lands, which is the only moment the caveat is true. `tunnelJoinLines` — `/join`,
+// `/token`, the console block — must NOT carry it, or a jam would still be apologising for its
+// URL an hour later.
 export function relayReadyLine(mode, joinLine, { changed = false } = {}) {
   const m = remoteMode(mode);
   if (m === 'off' || !joinLine) return null;
-  return `${m} ${changed ? 'moved' : 'ready'}: ${joinLine}`;
+  return `${m} ${changed ? 'moved' : 'ready'}: ${joinLine}`
+    + '  · give it a few seconds — the edge needs a moment before the first join works';
 }
 
 // ------------------------------------------------ v0.24.2: the menu tree ----

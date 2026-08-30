@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed — the tunnel-ready line says the edge is not ready yet (campaign F6)
+
+`tunnel ready: <join command>` now ends `· give it a few seconds — the edge needs a moment before
+the first join works`. Measured on a 2 h 10 m tunnel soak: cloudflared reports its hostname
+**2.5 s** before Cloudflare's edge will route to it, so a client that takes the line and connects
+instantly gets one `1006` and then reconnects. A person pasting a link is slower than that, which
+is why this is a sentence rather than a health check — but it was the entire explanation for that
+soak's single reconnect, and it matters to anything scripting a join.
+
+The caveat is on that one line only. `/join`, `/token` and the console block print the same
+strings hours later, and a jam should not still be apologising for its URL by then.
+
 ### Fixed — a state dir with no `session.json` was invisible to `sessions` and `clean` (campaign F8)
 
 `listRows` skipped any `claude-jam-<port>` directory that held no `session.json`, so a start that

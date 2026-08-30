@@ -659,7 +659,12 @@ and revokes the old one, so the old links stop working and the new ones have to 
 address they exist to replace.
 
 **When a relay comes up you are told (v0.24b).** Host clients get a one-line event —
-`tunnel ready: <the whole join command>` — rather than a silent state refresh; at boot the
+`tunnel ready: <the whole join command> · give it a few seconds — the edge needs a moment before
+the first join works` — rather than a silent state refresh. That last clause is measured, not
+hedging: cloudflared reports the hostname about **2.5 seconds** before its edge will route to it,
+so a client that takes the line and connects instantly gets one hard disconnect and then
+reconnects. A person pasting a link is slower than that, so it costs nothing — but if somebody
+asks why their very first join errored and the second worked, this is why. At boot the
 welcome says `tunnel: starting…` under the LAN line instead of printing a set that is about to
 be wrong; and `/join` prints ONE block with the time in its heading, with
 `(earlier invite lines above are stale)` when the log already holds some. If somebody asks

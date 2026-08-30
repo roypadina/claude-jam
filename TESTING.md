@@ -291,6 +291,21 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   session `claude-jam`, so two at once make `claude-jam end <name>` ambiguous — S13's note) or a
   restructure of S7b's guest lifetime, for a third proof of a path already proven twice. Prove:
   fold a `cleared`-mode paint into S7b when that step is next touched.
+- 2026-08-30 · **F6 — said rather than waited for, deliberately.** The tunnel-ready line now ends
+  `· give it a few seconds — the edge needs a moment before the first join works`, because
+  cloudflared reports its hostname ~2.5 s before Cloudflare will route to it (soak log,
+  21:10:51.616 published → 21:10:54.142 connected, one `1006` at 21:10:51.922 in between). Waiting
+  for the edge instead would mean polling the public URL until it answers — a health check with a
+  timeout, a retry policy and a failure mode of its own — for a race a human never loses. The
+  sentence is on `relayReadyLine` only, and there is a test asserting `tunnelJoinLines` does NOT
+  carry it, since those strings are reprinted by `/join` hours later. `smoke-transport` (a real
+  cloudflared, a real `trycloudflare.com` hostname, the relay respawn and the reconnect ladder)
+  re-run twice and green.
+  NOT proven: nothing asserts the 2.5 s number in CI — no smoke measures the gap between the
+  hostname landing and the first successful connect, and doing so would need exactly the probe
+  this change avoids building. The number is the campaign's measurement, cited with its log
+  timestamps in the code, the wiki and here. Prove: if it ever looks wrong, re-time it the same
+  way — `soak.mjs` with a client connecting at t=0.
 - 2026-08-30 · **F8 — the invisible state dir is visible.** A `claude-jam-<port>` directory with no
   `session.json` used to be skipped by `listRows`, so it could be neither listed nor cleaned. It is
   a new state, `incomplete`, listed and cleanable while nothing holds its port (and `no-session`,
