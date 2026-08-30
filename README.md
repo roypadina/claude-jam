@@ -46,7 +46,10 @@ from Windows.** `TESTING.md` lists each of those with the experiment that would 
 So: worth trying, not yet worth trusting. If you try it —
 
 ```powershell
-npm i -g claude-jam
+# claude-jam is NOT on npm yet, so `npm i -g claude-jam` 404s. Build the tarball first:
+git clone https://github.com/roypadina/claude-jam; cd claude-jam
+npm install; npm pack
+npm i -g .\claude-jam-0.23.0.tgz
 claude-jam join <invite-link>          # from Windows Terminal, not the legacy cmd.exe console
 ```
 
@@ -76,10 +79,20 @@ claude-jam join <invite-link>          # from Windows Terminal, not the legacy c
 brew install roypadina/tap/claude-jam
 ```
 
-npm installs the same thing anywhere node ≥ 22 runs, and it is the only path on Windows:
+npm installs the same thing anywhere node ≥ 22 runs, and it is the only path on Windows — **but the
+package is not on the registry yet**, so as of 0.23.0 this command 404s:
 
 ```sh
-npm i -g claude-jam
+npm i -g claude-jam            # NOT YET PUBLISHED — 404 until it is
+```
+
+Until it is published, the npm route is a local tarball, which installs the identical thing and is
+also how the Windows client would be tried today:
+
+```sh
+git clone https://github.com/roypadina/claude-jam && cd claude-jam
+npm install && npm pack        # → claude-jam-0.23.0.tgz
+npm i -g ./claude-jam-0.23.0.tgz
 ```
 
 Or from source:
