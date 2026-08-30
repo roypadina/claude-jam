@@ -7598,3 +7598,64 @@ test('v0.34 both clients demote themselves to a guest when the key file is not t
     assert.equal(/console\.(log|error)\([^)]*\bHOST_KEY\b/.test(src), false, `${f} logs the key`);
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// v0.23.4: ink refuses to paint its dynamic region when `is-in-ci` says CI, and BOTH of jam's ink
+// surfaces are dynamic-only — the client's mirror view mounts with no <Static> at all, and the
+// launcher menu has none anywhere. So any shell carrying `CI`, `CONTINUOUS_INTEGRATION` or a
+// `CI_*` variable got a blank screen that still read keys. Measured on Debian bookworm 2026-08-30:
+// `CI=true node menu.mjs` painted nothing, and smoke-lifecycle went 19/19 → 4 failed with the three
+// host-client steps timing out. It is not a platform bug — the same container is 19/19 with CI
+// unset AND with `CI=0` while CONTINUOUS_INTEGRATION/GITHUB_ACTIONS stay set.
+test('v0.23.4 ink-ci.mjs makes the REAL is-in-ci say no, whatever the environment says', async () => {
+  // The environment this is protecting against, all three of its shapes at once.
+  const was = { CI: process.env.CI, CONTINUOUS_INTEGRATION: process.env.CONTINUOUS_INTEGRATION };
+  process.env.CI = 'true';
+  process.env.CONTINUOUS_INTEGRATION = 'true';
+  process.env.CI_JAM_LINT_MARKER = '1';
+  try {
+    // The side effect IS the fix. First (and only) evaluation in this process, so the ordering
+    // this test depends on is the one the real entry points have.
+    const { restoreCi } = await import('./ink-ci.mjs');
+    assert.equal(process.env.CI, '0', 'ink-ci.mjs did not neutralise CI');
+    // The real dependency, not a re-implementation of its rule: this is what ink itself asks.
+    const { default: isInCi } = await import('is-in-ci');
+    assert.equal(isInCi, false, 'ink would suppress its dynamic region — a blank client and a blank menu');
+    // And the caller's own value comes back, because the menu shells into `claude-jam host` and
+    // claude's environment is none of ink's business.
+    restoreCi();
+    assert.equal(process.env.CI, 'true');
+  } finally {
+    delete process.env.CI_JAM_LINT_MARKER;
+    for (const [k, v] of Object.entries(was)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+});
+
+test('v0.23.4 every ink entry point neutralises CI ABOVE its ink import', () => {
+  const here = import.meta.dirname;
+  // menu.mjs imports ink statically, and `import` declarations are hoisted above the module body —
+  // so the ONLY spelling that runs in time is a side-effecting import placed above ink's. Reorder
+  // those two lines and the menu silently goes blank again in CI; this is the line that notices.
+  const menu = fs.readFileSync(path.join(here, 'menu.mjs'), 'utf8').split('\n');
+  const at = (re) => menu.findIndex((l) => re.test(l) && !l.trimStart().startsWith('//'));
+  const guard = at(/^import .*from '\.\/ink-ci\.mjs'/);
+  const ink = at(/^import .*from '(ink|@inkjs\/ui)'/);
+  assert.ok(guard >= 0, 'menu.mjs no longer imports ./ink-ci.mjs — it renders nothing under CI');
+  assert.ok(ink >= 0, 'menu.mjs no longer imports ink — this lint is measuring the wrong file');
+  assert.ok(guard < ink, `menu.mjs imports ink (line ${ink + 1}) before ./ink-ci.mjs (line ${guard + 1})`);
+  // client.mjs loads its renderer with a DYNAMIC import, so the ordering it needs is only that the
+  // guard is awaited first — and that the renderer is still loaded dynamically, since a static
+  // import of client-ink.mjs would be hoisted above the guard exactly like menu.mjs's ink import.
+  const client = fs.readFileSync(path.join(here, 'client.mjs'), 'utf8');
+  assert.match(client, /const \{ restoreCi \} = await import\('\.\/ink-ci\.mjs'\);\nawait import\(basic \? '\.\/client-basic\.mjs' : '\.\/client-ink\.mjs'\);/,
+    'client.mjs no longer loads ./ink-ci.mjs immediately before its renderer');
+  assert.equal(/^import .*from '\.\/client-ink\.mjs'/m.test(client), false,
+    'client.mjs imports its renderer statically — that is hoisted above the CI guard');
+  // And nothing else in the repo may import ink without the guard: one rule, every surface.
+  for (const f of fs.readdirSync(here).filter((n) => n.endsWith('.mjs'))) {
+    const src = fs.readFileSync(path.join(here, f), 'utf8');
+    if (!/^import .*from '(ink|@inkjs\/ui)'/m.test(src)) continue;
+    assert.ok(f === 'menu.mjs' || /from '\.\/ink-ci\.mjs'/.test(src) || f === 'client-ink.mjs',
+      `${f} imports ink without going through ./ink-ci.mjs`);
+  }
+});

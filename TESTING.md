@@ -102,6 +102,77 @@ rests on are `/tmp` being mode `1777` (universal) and `os.tmpdir()` returning `$
 directory and the attack does not apply at all. The *fix* is measured on macOS and is
 platform-independent (`lstat` + `st.uid` + `st.mode`). See the Deferred list.
 
+## `--attach` on Linux — the question the CI leg opened, ANSWERED (0.23.4, 2026-08-30)
+
+`.github/workflows/tests.yml` wired `smoke-lifecycle` to the `ubuntu-latest` leg, watched it fail
+three `--attach` steps twice in a row (deterministically, and again under a real pty via
+`script -e -q -c`), took the step back out and left the question here: *is `claude-jam host --attach`
+broken on Linux?* It matters more than one CI step, because WSL2 is the documented Windows host path
+(SPEC W2) and WSL2's platform is Linux.
+
+**No. `--attach` works on Linux. The trigger was the `CI` environment variable, on every platform.**
+
+ink asks [`is-in-ci`](https://github.com/sindresorhus/is-in-ci) whether it is running in CI, and when
+it decides yes it writes ONLY its `<Static>` output and returns — the dynamic region is never painted
+until unmount (`node_modules/ink/build/ink.js`: `if (isInCi) { … this.lastOutput = output; return; }`).
+Both of jam's ink surfaces are dynamic-only: the client's **mirror view mounts with no `<Static>` at
+all**, deliberately (`client-ink.mjs` — the alternate screen has no scrollback to reprint), and the
+**launcher menu has none anywhere**. So under `CI` both draw a completely blank screen while still
+reading keys. `smoke-lifecycle`'s three `--attach` steps wait for the stub's `fake claude` to appear
+in the mirror; it never arrives, they time out at 25 s each, and step 3 then fails as a cascade off
+the `jamlife` session the timeouts leave behind. That is exactly the four-failure shape the runner
+reported, and the `CI=true` that GitHub Actions sets is the whole of "Linux" in it. macOS never saw
+it because the suite had only ever been run from a developer shell, where `CI` is unset.
+
+The experiments, all in one Debian bookworm container (`node:22-bookworm-slim`, node 22.23.2,
+tmux 3.3a, aarch64/linuxkit, as the non-root user `runner` with passwordless sudo — a runner's shape,
+and **`docker run --init`**, see the note below):
+
+| environment | before the fix | after |
+| --- | --- | --- |
+| Linux, no CI markers | **19/19, 22 s** | 19/19, 22 s |
+| Linux, `CI=true` + `GITHUB_ACTIONS=true` | **4 failed, 88 s** — steps 5, 6, 5 timing out on the client, step 3 cascading. Identical to the runner, which took ~91 s | **19/19, 22 s** |
+| Linux, `CI=0` + `CONTINUOUS_INTEGRATION=true` + `GITHUB_ACTIONS=true` | **19/19, 22 s** | — |
+| macOS, `CI=true` | **8 failed** (the same three, plus step 2's client, plus cascades) | 19/19, 23 s |
+| `CI=true node menu.mjs`, captured with `capture-pane` | **nothing. A blank pane** where the unset run paints the five-row menu | paints, byte-identical to the unset run |
+| `CI=true node scripts/smoke-scroll.mjs` | 1 step failed | 13/13 |
+
+The third row is the control that isolates the mechanism: `CI=0` is `is-in-ci`'s own "not CI" value
+and it short-circuits before `CONTINUOUS_INTEGRATION` or any `CI_*` key is read, so that run has
+every other CI marker still set and differs from row 2 in `is-in-ci`'s verdict and nothing else.
+
+**So this is a product defect, not a harness assumption — it just is not a Linux one.** Anyone whose
+shell exports `CI`, `CONTINUOUS_INTEGRATION` or *any* `CI_*` variable (GitLab exports a dozen) got a
+client and a launcher that painted nothing and still swallowed keys. Fixed in `ink-ci.mjs`: one
+assignment, made before ink is first imported, which is why it is a module of its own — `import`
+declarations are hoisted above the module body, so the same statement written at the top of a file
+that imports ink runs too late, every time. `menu.mjs` imports it above its ink import; `client.mjs`
+awaits it immediately before its renderer, which is already a dynamic import for this reason.
+
+What carries it: `v0.23.4 ink-ci.mjs makes the REAL is-in-ci say no…` (asks the actual dependency, not
+a re-implementation of its rule, with `CI`, `CONTINUOUS_INTEGRATION` and a `CI_*` key all set) and
+`v0.23.4 every ink entry point neutralises CI ABOVE its ink import` (the hoisting trap, plus a sweep
+so a future ink surface cannot skip the guard). **Canaried both ways, 2026-08-30:** removing
+`ink-ci.mjs` reds the first; moving `menu.mjs`'s guard one line below its ink import reds the second
+with `menu.mjs imports ink (line 22) before ./ink-ci.mjs (line 23)`. Unit suite 455 → **457, 0 fail,
+and byte-identical on Linux**.
+
+**W2 is unaffected.** Nothing platform-dependent is involved, and the same container is 19/19 with
+`CI` unset both before and after the fix.
+
+**Two things this does NOT settle.** (1) The cascade is still real: one failed step leaves `jamlife`
+behind and step 3 fails on it, so a red RESULT line still overstates. Still owed, in the Deferred
+list. (2) `smoke-lifecycle` never injects a keystroke, so injection on Linux remains unproven — see
+the Linux-host entry in Deferred, which this narrows rather than closes.
+
+**A container note worth more than it looks.** `docker run` without `--init` gives PID 1 = the
+command you named, which does not reap. Killed children stay as **zombies**, `ps -p <pid>` still
+succeeds for a zombie, and `smoke-lifecycle`'s `running()` is `ps -p` — so the suite reports the
+daemon's children as still alive and times out on `ttyd (107) to exit`. Measured: `ps -eo pid,stat`
+showed `107 Z`. That is a container artifact, not a Linux one (a real runner's PID 1 reaps), and it
+is the first thing to rule out when a container run of this suite disagrees with a runner. Use
+`docker run --init`, and `docker exec -u <user>` rather than `su -c`.
+
 ## Release gates that have actually run
 
 - **0.23.2 — 2026-08-30. The second security patch in a row, gated on all nineteen.**
@@ -887,6 +958,16 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   platform seam, and the suite that would catch a Linux SOUND regression) is the obvious second,
   then `smoke-scroll`.
 
+  **0.23.4, 2026-08-30 — (1) IS ANSWERED AND THE SUITE IS 19/19 ON LINUX. (2) IS STILL OWED.**
+  It was neither the tty nor tmux 3.3a. Two things were wrong with that container, and both are
+  written up in the `--attach` section above: PID 1 was not a reaper, so the daemon's killed children
+  stayed as **zombies** that `ps -p` — i.e. this suite's `running()` — reports as alive; and the real
+  failure the CI leg later saw was `is-in-ci`, a product defect in every ink surface, not a platform
+  one. With `docker run --init` and `docker exec -u runner`, the same Debian bookworm/tmux 3.3a
+  container runs **19/19 in 22 s, with `CI=true` and with it unset**. The cascade (2) is unchanged and
+  still worth fixing on any platform. Re-adding the CI step is now a decision about gate policy
+  rather than an open question — it is Roy's to make, and it is not wired.
+
   What ran for this batch on macOS 2026-08-30: the unit suite **454 tests, 451 pass, 3
   skipped, 0 fail** (and again at `TMPDIR=/private/tmp`, the Linux `$TMPDIR` shape, unchanged);
   `check-terminal-gate`, `check-state-privacy` and `check-discovery-refusal` all clean; `npm pack
@@ -907,6 +988,17 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   Nobody has pressed F3, seen a `capture-pane` frame or watched an injection land on Linux.
   Prove: the triage in the entry above, and then one person hosting a real jam on a real Linux box
   and joining it from a mac.
+
+  **0.23.4, 2026-08-30 — NARROWED, not closed.** The triage above is done and `smoke-lifecycle` is
+  **19/19 on Linux** (Debian bookworm container, `--init`, non-root, tmux 3.3a, node 22.23.2). So
+  three of the four things this entry says nobody has done ARE now done on Linux, by that suite: F3
+  has been pressed on a real pty (step 7 attaches, sends `F3`, and the client detaches without
+  killing the session), a `capture-pane` frame has been rendered — the mirror is how steps 5 and 6
+  find the stub's `fake claude` at all — and a real host client has attached over `--attach` and run
+  `/quit` and `/end`. **Still not done on Linux:** an INJECTION landing in the pane (this suite never
+  injects — see its header), a real `claude`, and sound on a desktop. And it is a container, not a
+  Linux desktop and not the GitHub runner. Prove, reduced to: one person hosting a real jam with a
+  real `claude` on a real Linux box, typing into it from a mac.
 
 - 2026-08-30 · **0.23.3: the Linux sound resolution on a HEADLESS box, measured — and it is
   `null`.** All three kinds resolve to no sound in a Debian bookworm container, because there is no

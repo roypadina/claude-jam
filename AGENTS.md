@@ -45,6 +45,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `sessions.mjs` | tmux + fs lifecycle: list, end, clean, invite, remote, **adopt**. The only caller of `kill-session`. Imported by `host.mjs`, so there is exactly one "end". v0.33: `adopt` is the one place that talks to a tmux server jam does not own, and every call it makes there is a read. |
 | `client.mjs` | the guest/host entry point; validates argv and hands off. |
 | `client-ink.mjs` | the real client (ink). `client-basic.mjs` is the `--basic` readline fallback. |
+| `ink-ci.mjs` | one assignment, and it must run BEFORE ink is imported: ink paints only its `<Static>` region when `is-in-ci` says CI, and both ink surfaces here are dynamic-only, so a shell exporting `CI`/`CONTINUOUS_INTEGRATION`/any `CI_*` got a blank screen that still read keys. A module rather than a statement because `import` declarations are hoisted. Imported above ink's import in `menu.mjs`, awaited before the renderer in `client.mjs`; a lint pins that ordering. |
 | `menu.mjs` | the no-argument launcher menu. **Builds argv and shells into `claude-jam <subcommand>`** — it never re-implements one. |
 | `xfer.mjs` | file transfer, both directions. Pure fs; spawns nothing. |
 | `platform.mjs` | the platform seam. The **only** module allowed to spawn a platform binary (`osascript`, `pngpaste`, `afplay`, `pbcopy`, `open`, …) or to decide where `$TMPDIR`/`~/.config` are. |
