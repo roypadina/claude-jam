@@ -199,6 +199,26 @@ relay forwards frames both ways. No inbound port on the host. Not built now.
 - Messages injected while claude is mid-response are queued by Claude Code as the next turn.
 - "claude is working" is inferred; `Stop` hook is the only authoritative end-of-turn signal.
 - No per-friend auth, no rate limiting, no web client, no permission relay — phase 2+.
+- **What "no rate limiting" costs, measured 2026-08-30** (v0.34.2 protocol review, macOS, node
+  24.15, one admitted guest, fake pane). It stayed a ceiling rather than becoming a fix because
+  what to do instead — drop a slow guest, or drop frames and keep the guest — is a product
+  decision, and jam's whole point is people on flaky links.
+  - **Frames per second: no cap anywhere.** The per-frame caps below all hold; the *rate* does not.
+  - **`{t:'diff'}` is ungated and spawns two `git` processes per frame, synchronously.** 400 frames
+    took an idle 6 ms `/files` round trip to **3311 ms** — i.e. one guest can hold the whole daemon
+    (mirror, heartbeat, injection) for as long as they keep sending.
+  - **`{t:'screen-history'}` with a moving `before` misses its cache by design** and spawns one
+    `capture-pane` per frame: 400 frames → **1304 ms** of the same.
+  - **Concurrent sockets: no cap.** Every join broadcasts the roster and `send()` re-serialises per
+    socket, so N joins cost O(N³) bytes of `JSON.stringify`. 300 concurrent joins took daemon RSS
+    from 101 MB to 320 MB, and 546 MB by the time they had all left. **Sequential** join/leave churn
+    (300 of them) costs nothing and leaves no roster ghost — it is the concurrency, not the churn.
+  - **Outbound buffering: no cap.** Nothing reads `ws.bufferedAmount`. One participant that stops
+    reading makes the daemon hold everything *anybody else* says: 2000 × 19 KB of another guest's
+    chat put daemon RSS up **139–282 MB** across runs, and it grows with what is sent.
+  - What IS bounded, and correctly: bytes in flight for uploads. `uploadCommitted()` counts
+    accepted-but-unfinished uploads against `UPLOAD_QUOTA`, so under `--uploads auto` the eleventh
+    concurrent 20 MB upload falls back to `ask` at exactly 200 MB rather than being granted.
 
 ## Out of scope for v0
 

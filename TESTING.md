@@ -129,6 +129,37 @@ depth working); `neverFatal` out → the `host.mjs` lint reds; **both out, i.e. 
 step 11 reds with `timed out after 5000ms waiting for Dana: a refusal for "null"`, which is the
 daemon dying mid-step.
 
+**What the review attacked and found SOUND**, so the next pass does not repeat it. All measured
+2026-08-30 against 0.24.0 and again after the fixes; the probe scripts are in the review's scratch
+directory and are named in the report.
+
+- **The frame matrix**: 41 frame types × 9 hostile payload shapes (bare, numbers, objects, arrays,
+  `null`, prototype-polluting keys, 60 KB strings, RTL/lone-surrogate unicode, 5000-deep nesting)
+  plus eight raw non-object shapes — **377 frames, one death**, which is the `null` finding. After
+  the fix: zero. Every host-gated `t` refused a guest with its own stated reason; nothing leaked.
+- **Prototype pollution through a frame**: `JSON.parse` makes `__proto__` an own DATA property, and
+  nothing in the daemon `Object.assign`s or spreads a frame into a target, so `{"__proto__":{…}}`
+  polluted nothing. Asserted in the unit suite rather than assumed.
+- **The 128 KiB frame cap is real**: a 200 KiB frame closes the socket 1009 at the `ws` layer and
+  the daemon does not notice. `MAX_TEXT`, `UPLOAD_MAX`, `EXPORT_MAX`, `KEY_FRAME_MAX`,
+  `HISTORY_CAP`, `SCREEN_PAGE_MAX`, `MAX_PENDING`, the nudge rate limit and the 1/s `typing` limit
+  all hold under attack.
+- **State-machine abuse**: a second `hello` (admitted, and claiming host), `peertask-ack`/`-result`
+  for an id never dispatched, a `file` chunk with no grant, `/answer` with nothing on screen,
+  answering your own ladder request, `/kick`ing yourself, ending a jam you did not create, two
+  overlapping uploads — every one refused with its own reason, none of them a crash and none of
+  them a privilege change.
+- **Names**: `NAME_RE` really does turn away control bytes, tabs, newlines, NBSP, zero-width, RTL
+  overrides, combining marks, brackets, leading spaces and 25 characters. The one thing that got
+  through is the finding above.
+- **Lifetime**: 300 SEQUENTIAL join/leaves cost nothing and leave the roster clean; 40 uploads
+  granted, filled to the cap and yanked mid-flight leave nothing behind (`ws.on('close')` clears
+  `uploads`, the ladders, `pending`, the mirror and any peer task); in-flight upload bytes are
+  bounded by the quota, exactly.
+- **What is NOT bounded** — frames per second, concurrent sockets, and outbound buffering — is the
+  documented `SPEC.md` "no rate limiting" ceiling. What it actually costs is now measured and
+  written down under that ceiling rather than left as a word.
+
 **Run for this batch:** `node --test test.mjs` **475** tests / 0 fail (was 472),
 `scripts/smoke-answer.mjs` **12/12**, `smoke-knock` 15/15 (against a throwaway knock-only daemon of
 this review's own, port 7975, session `jamproto6`, removed by exact name), and — because the second
