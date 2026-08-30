@@ -4560,22 +4560,30 @@ test('v0.32 W1 secureWrite on Windows leaves an ACL with only the current user',
     // so /inheritance:r having worked is what makes this list length 1.
     assert.deepEqual(acl.principals.map((p) => p.toLowerCase()), [me.toLowerCase()],
       `icacls said:\n${acl.text}`);
-    // And the directory that holds it, with the inheritable form.
+    // And the DIRECTORY that holds it, which is a weaker guarantee — MEASURED on windows-latest
+    // 2026-08-30, not assumed. `icacls <dir> /inheritance:r /grant:r <user>:(OI)(CI)F` exits 0
+    // and still leaves three principals:
+    //
+    //   NT AUTHORITY\SYSTEM:(OI)(CI)(F)  BUILTIN\Administrators:(OI)(CI)(F)  <user>:(OI)(CI)(F)
+    //
+    // none of them carrying icacls's `(I)` inherited marker, and a second, uncached application
+    // (which reported ok:true) left it byte-identical. So the single-entry guarantee holds for a
+    // FILE and not for a directory, and this asserts what is true rather than what was intended.
+    //
+    // That is not an exposure, which is why it is asserted rather than fixed: SYSTEM and
+    // Administrators can read anything on the machine whatever the DACL says, and what MUST NOT
+    // appear is a wider principal — Users, Everyone, Authenticated Users, INTERACTIVE, a network
+    // principal. A regression that granted one of those still fails here.
     const dacl = aclPrincipals(state);
     const got = dacl.principals.map((p) => p.toLowerCase());
-    if (got.length !== 1 || got[0] !== me.toLowerCase()) {
-      // Nobody on this project has a Windows machine, so this failure has to settle
-      // product-vs-test on its own rather than send somebody guessing at icacls from a Mac.
-      // It carries what was ASKED for and what a second, uncached attempt says: icacls
-      // SUCCEEDING here and still leaving SYSTEM/Administrators behind is a fact about Windows
-      // (and the assertion is then what is wrong); icacls FAILING, or a re-apply that works, is
-      // a fact about the call secureDir makes (and the product is then what is wrong).
-      const redo = restrictToUser(state, { dir: true, again: true });
-      assert.fail(`the state dir's ACL is not one entry.\nicacls said:\n${dacl.text}\n`
-        + `argv: ${JSON.stringify(aclArgs(state, me, { dir: true }))}\n`
-        + `re-applying said: ${JSON.stringify(redo)}\n`
-        + `and the ACL then read:\n${aclPrincipals(state).text}`);
-    }
+    assert.ok(got.includes(me.toLowerCase()), `the owner is not granted:\n${dacl.text}`);
+    const allowed = new Set([me.toLowerCase(), 'nt authority\\system', 'builtin\\administrators']);
+    assert.deepEqual(got.filter((p) => !allowed.has(p)), [],
+      `a principal beyond the owner, SYSTEM and Administrators:\n${dacl.text}`);
+    // Whether a SPLIT call (`/inheritance:r`, then a separate `/grant:r`) would leave one entry
+    // is unmeasured and is carried as a deferral in TESTING.md rather than probed from here —
+    // test.mjs is exempt from the platform-binary lint, but the seam is the seam.
+    console.log(`# v0.32 W1 state dir ACL on ${os.release()}: ${JSON.stringify(dacl.principals)}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
