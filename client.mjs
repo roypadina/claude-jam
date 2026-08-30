@@ -4,7 +4,20 @@
 //   client-ink.mjs   (default) ink UI: <Static> transcript, own status row, TextInput prompt
 //   client-basic.mjs (--basic)  the readline renderer, for a terminal ink misbehaves in
 // A dynamic import, not a spawn: one process keeps the tty, the signals and the exit code.
-import { decodeInvite } from './lib.mjs';
+import { decodeInvite, terminalSupport } from './lib.mjs';
+
+// v0.32 W1: before anything else, because the alternative is a screen of escape codes. The
+// legacy Windows console cannot draw this client, and a person who lands there deserves the name
+// of the terminal that can rather than a garbled session they have to reason about. Both
+// renderers are covered by one check: --basic writes ANSI colour too, and one rule with one
+// message beats a special case nobody will maintain.
+// Both arguments are passed on purpose. The defaults are `process.platform` and `{}` — an EMPTY
+// environment — because every pure function in lib.mjs defaults that way so its tests have to
+// state what they are asking about. Calling `terminalSupport()` bare therefore refuses every
+// Windows terminal there is, which is exactly what it did on the first run of
+// scripts/check-terminal-gate.mjs.
+const term = terminalSupport(process.platform, process.env);
+if (!term.ok) { console.error(`! ${term.why}`); process.exit(2); }
 
 // v0.22B: `claude-jam join cjam1_…` is a guest's WHOLE command — the link carries the addresses,
 // their name and a per-invite secret, so there is nothing else to type. It is unpacked HERE, once,

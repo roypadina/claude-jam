@@ -38,6 +38,8 @@ import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock,
   // v0.22B/C: invite links (the address list a link carries, and what a minted one prints) and
   // the offer that follows a kick.
   INVITE_CONNECT_MS, inviteMintedLines, kickOffer,
+  // v0.32 W1: F3 attaches with tmux, and a Windows client has none.
+  canAttachTmux, NO_TMUX_ATTACH,
   // v0.20: jam's tmux lives on its own socket, so F3's attach has to name it.
   // v0.33: and an adopted jam names a pane id instead of a window of its own. `noBriefWarning`
   // is the one thing a client must say out loud when the host chose not to tell claude.
@@ -1039,6 +1041,10 @@ function sendKeys(text) {
 let f3Hint = false;
 function onF3() {
   if (store.attached) return; // stdin belongs to tmux; this cannot actually fire
+  // v0.32 W1: an attach spawns tmux on THIS machine. A Windows client never has one — and never
+  // has the session either, since host requires locality and there is no Windows host — so the
+  // key says where claude's screen actually is instead of failing to spawn a binary.
+  if (!canAttachTmux()) { if (!f3Hint) { f3Hint = true; err(NO_TMUX_ATTACH); } return; }
   // v0.33: an ADOPTED jam sends the pane id it is driving, because `<session>:claude` is jam's
   // own window naming and an adopted pane has whatever name its owner gave it.
   if (store.session?.tmuxTarget) return attachTmux(store.session.tmuxTarget);
