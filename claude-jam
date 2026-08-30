@@ -96,7 +96,7 @@ case "$cmd" in
   # menu opens on its Join screen, which starts with the jams it can see on this network.
   join) if [ "$#" -eq 0 ]; then exec node "$DIR/menu.mjs" join; fi; exec node "$DIR/client.mjs" "$@" ;;
   # v0.18: jam owns the tmux sessions it made. `sessions` lists only those, `end` ends one
-  # (marker-verified, exact name), `clean` removes orphan state dirs and nothing else.
+  # (marker-verified, exact name), `clean` removes orphan/incomplete state dirs and nothing else.
   sessions|ls) exec node "$DIR/sessions.mjs" list "$@" ;;
   # v0.23: who else is on this network. Talks to no daemon and holds no credential.
   find|discover) exec node "$DIR/sessions.mjs" find "$@" ;;

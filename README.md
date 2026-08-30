@@ -489,7 +489,7 @@ claude-jam creates the tmux session, so claude-jam cleans it up — no `tmux kil
 
 | command | what it does |
 | --- | --- |
-| `claude-jam sessions`, `claude-jam ls` | claude-jam's own sessions: tmux name, jam name, port, state, uptime, session id, who is here, which relays are on, cwd. `--json` for scripting. A `!` marks an `orphan` state dir (its tmux session is gone) or a `no-daemon` session (nothing answers on its port) |
+| `claude-jam sessions`, `claude-jam ls` | claude-jam's own sessions: tmux name, jam name, port, state, uptime, session id, who is here, which relays are on, cwd. `--json` for scripting. A `!` marks an `orphan` state dir (its tmux session is gone), a `no-daemon` session (nothing answers on its port), or an `incomplete` state dir (no `session.json` — a start that died before it claimed a session) |
 | `claude-jam find`, `claude-jam discover` | jams announcing themselves on **this network**: name, host, access mode, view, address, and the exact join command per row. `--json` for scripting. Talks to no daemon and holds no credential — and finding a jam is not being let into one |
 | `claude-jam end [name]`, `claude-jam kill` | end one jam: every client is told and exits 0, the daemon stops its children (ttyd, tunnel, popups), the tmux session is killed and its state dir removed. No name and one jam → that one; several → a numbered picker; `--all` after an explicit confirmation |
 | `claude-jam clean` | remove state dirs whose session is gone, and only those, after listing exactly what will go |

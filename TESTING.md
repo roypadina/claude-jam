@@ -291,6 +291,23 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   session `claude-jam`, so two at once make `claude-jam end <name>` ambiguous — S13's note) or a
   restructure of S7b's guest lifetime, for a third proof of a path already proven twice. Prove:
   fold a `cleared`-mode paint into S7b when that step is next touched.
+- 2026-08-30 · **F8 — the invisible state dir is visible.** A `claude-jam-<port>` directory with no
+  `session.json` used to be skipped by `listRows`, so it could be neither listed nor cleaned. It is
+  a new state, `incomplete`, listed and cleanable while nothing holds its port (and `no-session`,
+  untouched, while something does — a `--daemon` with no `session.json` is what every smoke runs).
+  Pinned by `F8 a state dir with no session.json is listed and cleanable — and nothing else
+  changed`, which also asserts the half that must NOT move: no name, so `resolveTarget` cannot
+  reach it and the v0.18 pair is never consulted. `smoke-lifecycle` — the suite that owns
+  list/end/clean, including the two decoys and the planted real-TMPDIR orphan — re-run and green
+  in 22s.
+  End to end as well as in the unit suite: `smoke-lifecycle` step 3 now PLANTS one — a state dir
+  with a `token.json` and no `session.json`, on a port below the range so nothing can ever be
+  listening on it — and asserts the whole path, `readdir` → row → offered by `clean` → `rmSync`,
+  alongside the orphan and the live jam that must survive. It also asserts the refusal:
+  `claude-jam end 7849` exits non-zero, because there is no name for `resolveTarget` to find.
+  Verified by hand on the real machine too, 2026-08-30: `claude-jam sessions` now shows
+  `! 1 — — 7777 incomplete` with its explanatory note, where it previously showed nothing.
+  **Not cleaned** — that directory is Roy's, and only he decides.
 - 2026-08-30 · **F5 — fixed, and still unrunnable on the platform it is for.** `safeBaseName` now
   renames the Windows device names (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, with
   any extension) and strips trailing dots. Pinned by `safeBaseName: the Windows device names,
