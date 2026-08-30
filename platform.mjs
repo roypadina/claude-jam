@@ -21,7 +21,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, validHostKey } from './lib.mjs';
+import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, validHostKey,
+  aclUser, aclArgs, parseIcaclsPrincipals } from './lib.mjs';
 
 export const IS_MAC = process.platform === 'darwin';
 export const IS_WINDOWS = process.platform === 'win32';
@@ -43,17 +44,52 @@ export function historyFile() { return historyFilePath(os.homedir(), process.env
 // A file only its owner may read: the join token, session.json, the invite store, the input
 // history. POSIX says 0600, and the mode is set as the file is created rather than after, so
 // there is no window where it exists world-readable.
-// TODO(W1): Windows has no mode bits that mean this — it needs an ACL granting the current user
-// only, and the security docs have to say ACL rather than pretend 0600 carried over.
+//
+// v0.32 W1: Windows has no mode bit that means this. `{ mode: 0o600 }` is not ignored there — it
+// is REINTERPRETED, as the read-only attribute and nothing else — so the port is an NTFS ACL with
+// one entry (see restrictToUser). The security docs say ACL, in those words, rather than implying
+// the mode carried over.
 export function secureWrite(file, data) {
   fs.writeFileSync(file, data, { mode: 0o600 });
+  if (IS_WINDOWS) restrictToUser(file);
   return file;
 }
 
 // The parent of a secureWrite: 0700, created only if missing.
 export function secureDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (IS_WINDOWS) restrictToUser(dir, { dir: true });
   return dir;
+}
+
+// `icacls` — a platform binary, so it is named here and nowhere else. Synchronous on purpose:
+// the point of the call is that the file is not readable by anybody else BEFORE the token it
+// holds is handed out, and an unawaited promise would put a window back in.
+//
+// A `false` is a DEGRADATION and not a hole, which is why it does not throw: the file keeps the
+// ACL it inherited from `%APPDATA%` or `%TEMP%`, both of which are inside the user's own profile
+// (current user + SYSTEM + Administrators — never other users, never a network principal). It is
+// still worth knowing about, so the reason comes back rather than a bare boolean.
+export const ICACLS = 'icacls';
+export function restrictToUser(target, { dir = false, env = process.env } = {}) {
+  const user = aclUser(env);
+  if (!user) return { ok: false, why: 'no %USERNAME% in the environment, so there is no principal to grant to' };
+  try {
+    const r = spawnSync(ICACLS, aclArgs(target, user, { dir }), { encoding: 'utf8', windowsHide: true });
+    if (r.error) return { ok: false, why: r.error.message };
+    if (r.status !== 0) return { ok: false, why: (r.stderr || r.stdout || '').trim().split('\n')[0] || `icacls exited ${r.status}` };
+    return { ok: true, user };
+  } catch (e) { return { ok: false, why: e.message }; }
+}
+
+// Read the ACL back. This is what a test asserts against, and what a human debugging "who can
+// read my token file" should run — so it hands back the parsed principals and the raw text both.
+export function aclPrincipals(target) {
+  try {
+    const r = spawnSync(ICACLS, [String(target ?? '')], { encoding: 'utf8', windowsHide: true });
+    if (r.error || r.status !== 0) return { ok: false, why: r.error?.message || `icacls exited ${r.status}`, principals: [] };
+    return { ok: true, principals: parseIcaclsPrincipals(r.stdout, String(target ?? '')), text: r.stdout };
+  } catch (e) { return { ok: false, why: e.message, principals: [] }; }
 }
 
 // v0.34: the one place the host key is read off disk — the daemon (to know what to compare

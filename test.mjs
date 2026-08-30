@@ -103,6 +103,8 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   // v0.34: host identity is a local secret, not a network address.
   HOST_KEY_FILE, HOST_KEY_BYTES, validHostKey, hostKeyPath, hostKeyMatches, hostGate,
   hostRefusal, hostKeyNotice,
+  // v0.32 W1: the Windows client, decided purely.
+  WIN_APPDATA_FALLBACK, aclUser, aclArgs, parseIcaclsPrincipals,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -116,7 +118,9 @@ import { clipboardImage, notify, playSound, SOUNDS, MAC_SOUND_DIR, soundFile,
   DNSSD_PATHS, DNSSD_MISSING, resolveDnssd, discoveryAvailable, advertiseSpawn, browseSpawn,
   browseText, BROWSE_BUF_MAX,
   // v0.34: the one place the host key is read off disk.
-  readHostKey } from './platform.mjs';
+  readHostKey,
+  // v0.32 W1: the Windows branches of the same seam.
+  restrictToUser, aclPrincipals } from './platform.mjs';
 
 // v0.34: two well-formed host keys — 32 bytes of hex each, the shape the daemon writes.
 const KEY_A = 'a'.repeat(64);
@@ -4107,6 +4111,9 @@ test('v0.21.0 the launcher usage and HOST_FLAGS name the same host flags', () =>
 const PLATFORM_BINS = ['osascript', 'pngpaste', 'afplay', 'say', 'terminal-notifier',
   'pbcopy', 'pbpaste', 'xclip', 'xsel', 'clip', 'open', 'xdg-open', 'start',
   'powershell', 'pwsh', 'cmd',
+  // v0.32 W1: the Windows ones. `icacls` is the 0600 replacement, so it is exactly the kind of
+  // call that must not be duplicated in a client where nobody will maintain it.
+  'icacls',
   'dns-sd', 'avahi-publish-service', 'avahi-publish', 'avahi-browse'];
 
 test('v0.32 W0 no module outside platform.mjs spawns a platform binary', () => {
@@ -4126,7 +4133,7 @@ test('v0.32 W0 no module outside platform.mjs spawns a platform binary', () => {
     // And the unambiguous names must not appear as a bare string at all, which catches the
     // `const cmd = ['pbcopy', []]` shape that never names the binary at the spawn itself.
     for (const bin of ['osascript', 'pngpaste', 'afplay', 'pbcopy', 'pbpaste', 'xclip', 'xdg-open', 'terminal-notifier',
-      'dns-sd', 'avahi-publish-service', 'avahi-browse']) {
+      'icacls', 'dns-sd', 'avahi-publish-service', 'avahi-browse']) {
       for (const lit of jsStringLiterals(src)) {
         assert.ok(!lit.text.split(/[\s'"`,()[\]]+/).includes(bin),
           `${f}:${lit.line} names ${bin} — that belongs in platform.mjs`);
@@ -4152,11 +4159,124 @@ test('v0.32 W0 no module outside platform.mjs spawns a platform binary', () => {
 });
 
 test('v0.32 W0 configDirPath: XDG when it is absolute, ~/.config otherwise', () => {
-  assert.equal(configDirPath('/home/roy', {}), '/home/roy/.config/claude-jam');
-  assert.equal(configDirPath('/home/roy', { XDG_CONFIG_HOME: '/xdg' }), '/xdg/claude-jam');
+  // v0.32 W1: the platform is an ARGUMENT now, so this asks for the POSIX answer by name and
+  // gets it on both CI legs. The Windows answer has its own test below.
+  assert.equal(configDirPath('/home/roy', {}, 'linux'), '/home/roy/.config/claude-jam');
+  assert.equal(configDirPath('/home/roy', { XDG_CONFIG_HOME: '/xdg' }, 'linux'), '/xdg/claude-jam');
   // A relative XDG_CONFIG_HOME is not a config home, and must not become one by concatenation.
-  assert.equal(configDirPath('/home/roy', { XDG_CONFIG_HOME: 'relative' }), '/home/roy/.config/claude-jam');
-  assert.equal(historyFilePath('/home/roy', {}), '/home/roy/.config/claude-jam/history');
+  assert.equal(configDirPath('/home/roy', { XDG_CONFIG_HOME: 'relative' }, 'linux'), '/home/roy/.config/claude-jam');
+  assert.equal(historyFilePath('/home/roy', {}, 'linux'), '/home/roy/.config/claude-jam/history');
+  assert.equal(configDirPath('/home/roy', {}, 'darwin'), '/home/roy/.config/claude-jam');
+});
+
+// ============================================ v0.32 W1: the Windows client, decided purely ====
+// Every test in this section runs on BOTH CI legs, and that is the whole design: the win32
+// answers are arguments-in/argv-out, so `macos-latest` proves the Windows decisions and
+// `windows-latest` proves them AGAIN against the real thing (%APPDATA%, a real icacls, a real
+// C:\Windows\Media). The handful of facts that need a human at a Windows keyboard — a toast being
+// seen, a knock being heard, F2 in Windows Terminal — are NOT here, and TESTING.md says so.
+
+test('v0.32 W1 configDirPath answers %APPDATA%\\claude-jam on Windows', () => {
+  const win = (home, env) => configDirPath(home, env, 'win32');
+  assert.equal(win('C:\\Users\\roy', { APPDATA: 'C:\\Users\\roy\\AppData\\Roaming' }),
+    'C:\\Users\\roy\\AppData\\Roaming\\claude-jam');
+  // No %APPDATA% (a stripped environment, a service account): the documented default, built from
+  // the home directory rather than left relative.
+  assert.equal(win('C:\\Users\\roy', {}), 'C:\\Users\\roy\\AppData\\Roaming\\claude-jam');
+  // A relative %APPDATA% is not an application-data directory, exactly as a relative XDG is not
+  // a config home. Note that this is the case a posix-flavoured isAbsolute() would get WRONG on
+  // the mac leg, which is why the path flavour follows the platform argument too.
+  assert.equal(win('C:\\Users\\roy', { APPDATA: 'Roaming' }), 'C:\\Users\\roy\\AppData\\Roaming\\claude-jam');
+  // Somebody who sets XDG_CONFIG_HOME on Windows means it — and a drive-letter path is absolute.
+  assert.equal(win('C:\\Users\\roy', { XDG_CONFIG_HOME: 'D:\\cfg', APPDATA: 'C:\\Users\\roy\\AppData\\Roaming' }),
+    'D:\\cfg\\claude-jam');
+  assert.equal(historyFilePath('C:\\Users\\roy', {}, 'win32'),
+    'C:\\Users\\roy\\AppData\\Roaming\\claude-jam\\history');
+  assert.equal(WIN_APPDATA_FALLBACK.join('/'), 'AppData/Roaming');
+  // The seam's own answer on the machine actually running this must be the platform's answer.
+  assert.equal(configDir(), configDirPath(os.homedir(), process.env, process.platform));
+});
+
+test('v0.32 W1 aclUser: DOMAIN\\user in a domain, bare user otherwise, null when there is none', () => {
+  assert.equal(aclUser({ USERNAME: 'roy', USERDOMAIN: 'REECO' }), 'REECO\\roy');
+  assert.equal(aclUser({ USERNAME: 'roy' }), 'roy');
+  assert.equal(aclUser({ USERNAME: '  roy  ', USERDOMAIN: '  REECO  ' }), 'REECO\\roy');
+  // No principal is better than a made-up one: nothing to grant to means the ACL is left alone
+  // and the file keeps the profile's own (already user-only) inheritance.
+  for (const env of [{}, { USERNAME: '' }, { USERNAME: '   ' }, { USERNAME: null }]) {
+    assert.equal(aclUser(env), null, JSON.stringify(env));
+  }
+  // A "username" carrying a separator or a wildcard is not a username — it is an attempt to
+  // become a second icacls argument, or a different principal entirely.
+  for (const bad of ['roy admin', 'roy\\admin', 'roy:F', 'roy/F', '*', 'roy?', 'roy"x']) {
+    assert.equal(aclUser({ USERNAME: bad }), null, bad);
+  }
+  // A junk DOMAIN is dropped, not propagated — the user is still a valid principal on its own.
+  assert.equal(aclUser({ USERNAME: 'roy', USERDOMAIN: 'a b' }), 'roy');
+  // And the seam's refusal carries its own reason and spawns nothing: with no principal there is
+  // nothing to grant to, so the file keeps the profile's own inheritance and the caller is told.
+  const none = restrictToUser('C:\\t\\x', { env: {} });
+  assert.equal(none.ok, false);
+  assert.match(none.why, /USERNAME/);
+});
+
+test('v0.32 W1 aclArgs: one entry for a file, an inheritable one for a directory', () => {
+  assert.deepEqual(aclArgs('C:\\t\\host.key', 'REECO\\roy'),
+    ['C:\\t\\host.key', '/inheritance:r', '/grant:r', 'REECO\\roy:F']);
+  // (OI)(CI) is what makes the files created inside a state dir inherit the single entry.
+  assert.deepEqual(aclArgs('C:\\t\\claude-jam-7777', 'roy', { dir: true }),
+    ['C:\\t\\claude-jam-7777', '/inheritance:r', '/grant:r', 'roy:(OI)(CI)F']);
+  // The target is its own argv word, so a space in it stays part of the path.
+  assert.equal(aclArgs('C:\\my jams\\host.key', 'roy')[0], 'C:\\my jams\\host.key');
+  assert.equal(aclArgs('C:\\my jams\\host.key', 'roy').length, 4);
+});
+
+test('v0.32 W1 parseIcaclsPrincipals reads the entries back, and a C: is not a principal', () => {
+  // SHAPE UNVERIFIED BY A HUMAN — written to the documented format. The Windows-only test below
+  // is what checks it against the real binary's real output.
+  const text = 'C:\\t\\host.key NT AUTHORITY\\SYSTEM:(F)\r\n'
+    + '              BUILTIN\\Administrators:(F)\r\n'
+    + '              DESKTOP-9F2\\roy:(F)\r\n\r\n'
+    + 'Successfully processed 1 files; Failed processing 0 files\r\n';
+  assert.deepEqual(parseIcaclsPrincipals(text, 'C:\\t\\host.key'),
+    ['NT AUTHORITY\\SYSTEM', 'BUILTIN\\Administrators', 'DESKTOP-9F2\\roy']);
+  // The locked-down shape this project actually wants: exactly one entry.
+  const one = 'C:\\t\\host.key DESKTOP-9F2\\roy:(F)\nSuccessfully processed 1 files; Failed processing 0 files\n';
+  assert.deepEqual(parseIcaclsPrincipals(one, 'C:\\t\\host.key'), ['DESKTOP-9F2\\roy']);
+  // A directory grant carries its inheritance flags, and the principal is still the principal.
+  assert.deepEqual(parseIcaclsPrincipals('C:\\t\\d DESKTOP\\roy:(OI)(CI)(F)\n', 'C:\\t\\d'), ['DESKTOP\\roy']);
+  // Without the path argument the drive letter would be read as an entry of its own; with it,
+  // it never is. (This is the bug the argument exists to prevent, stated as a test.)
+  assert.ok(!parseIcaclsPrincipals(one, 'C:\\t\\host.key').some((p) => p.startsWith('C')));
+  assert.deepEqual(parseIcaclsPrincipals('', 'C:\\t\\x'), []);
+  assert.deepEqual(parseIcaclsPrincipals(null), []);
+  assert.deepEqual(parseIcaclsPrincipals('Failed processing 1 files\n'), []);
+});
+
+// The one Windows-ONLY test in the suite, and it is here because it is the only way this
+// project will ever find out whether its 0600 replacement actually works. It runs the real
+// icacls against a real file in a real %TEMP% and asserts the ACL that comes back grants exactly
+// one principal: this user. On macOS it does nothing — there is no ACL to read.
+test('v0.32 W1 secureWrite on Windows leaves an ACL with only the current user', { skip: process.platform !== 'win32' }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-jam-w1-'));
+  try {
+    const state = secureDir(path.join(dir, 'claude-jam-7777'));
+    const file = path.join(state, 'host.key');
+    secureWrite(file, 'a'.repeat(64));
+    assert.equal(fs.readFileSync(file, 'utf8'), 'a'.repeat(64));
+    const me = aclUser(process.env);
+    assert.ok(me, 'a Windows runner must have %USERNAME%');
+    const acl = aclPrincipals(file);
+    assert.ok(acl.ok, `icacls failed: ${acl.why}`);
+    // Exactly one entry, and it is this user. SYSTEM and Administrators are inherited entries,
+    // so /inheritance:r having worked is what makes this list length 1.
+    assert.deepEqual(acl.principals.map((p) => p.toLowerCase()), [me.toLowerCase()],
+      `icacls said:\n${acl.text}`);
+    // And the directory that holds it, with the inheritable form.
+    const dacl = aclPrincipals(state);
+    assert.deepEqual(dacl.principals.map((p) => p.toLowerCase()), [me.toLowerCase()],
+      `icacls said:\n${dacl.text}`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('v0.32 W0 secureWrite writes a file only its owner can read', () => {
