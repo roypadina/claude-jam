@@ -85,7 +85,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   quotaReached, quotaText, uploadDecision, exportDecision,
   // v0.33: adopting a pane claude-jam did not create — what it resolves, and what it refuses.
   parseTmuxEnv, SOCKET_NAME_RE, PANE_ID_RE, validPaneId, resolveAdoptTarget, PANE_FIELDS,
-  PANE_SEP, PANE_FORMAT, parsePaneInfo, paneCommandNote, claudeProjectGlobs, ADOPT_LIVE_MS,
+  PANE_QUERIES, parsePaneInfo, paneCommandNote, claudeProjectGlobs, ADOPT_LIVE_MS,
   pickAdoptSession, sessionPreview, adoptConfirmText, adoptNoTmuxText, adoptAlreadyJamText,
   adoptAlreadyAdoptedText, adoptPlan, attachTarget,
   BRIEF_NAME, buildBriefing, noBriefWarning, briefUpdates, BRIEF_UPDATE_MODES,
@@ -5815,19 +5815,56 @@ test('v0.33 resolveAdoptTarget: flags win, then the environment, then there is n
   assert.equal(SOCKET_NAME_RE.test('-leading-dash'), false);
 });
 
-test('v0.33 one display-message answers every fact the confirmation shows', () => {
-  assert.equal(PANE_FORMAT.split(PANE_SEP).length, PANE_FIELDS.length);
-  assert.ok(PANE_FORMAT.startsWith('#{pane_id}'));
-  const line = ['%23', '4242', 'node', '/Users/me/code/app', 'work', '2', '1', 'claude'].join(PANE_SEP);
-  assert.deepEqual(parsePaneInfo(line), {
+test('v0.23.5 one display-message PER FIELD answers every fact the confirmation shows', () => {
+  // The construction that makes this version-independent: every query is ONE field on its own, so
+  // there is no separator anywhere for a tmux version to rewrite. A future edit that joins them
+  // back into a single format string fails here before it reaches a Debian box.
+  assert.equal(PANE_QUERIES.length, PANE_FIELDS.length);
+  for (const q of PANE_QUERIES) assert.match(q, /^#\{[a-z_]+\}$/);
+  assert.equal(PANE_QUERIES[0], '#{pane_id}');
+  const outs = ['%23', '4242', 'node', '/Users/me/code/app', 'work', '2', '1', 'claude']
+    .map((v) => `${v}\n`);
+  assert.deepEqual(parsePaneInfo(outs), {
     paneId: '%23', pid: 4242, command: 'node', cwd: '/Users/me/code/app',
     session: 'work', windowIndex: '2', paneIndex: '1', windowName: 'claude',
   });
-  assert.deepEqual(parsePaneInfo(`${line}\n`), parsePaneInfo(line));
+  // Exactly ONE trailing newline is tmux's; a value that ends in one keeps it, and a value that
+  // CONTAINS one survives — which is the other thing no separator could have done.
+  assert.equal(parsePaneInfo(outs.map((s, i) => (i === 3 ? '/a/b\n\n' : s))).cwd, '/a/b\n');
+  assert.equal(parsePaneInfo(outs.map((s, i) => (i === 7 ? 'two\nlines\n' : s))).windowName, 'two\nlines');
   // tmux answering something else (no such pane) is null, never a half-filled record.
-  assert.equal(parsePaneInfo(''), null);
+  assert.equal(parsePaneInfo([]), null);
+  assert.equal(parsePaneInfo(['%1\n', '4242\n']), null);
   assert.equal(parsePaneInfo('can\'t find pane: %99'), null);
-  assert.equal(parsePaneInfo(['x', '1', 'node', '/p', 's', '0', '0', 'w'].join(PANE_SEP)), null);
+  assert.equal(parsePaneInfo(null), null);
+  assert.equal(parsePaneInfo(outs.map((s, i) => (i === 0 ? 'x\n' : s))), null);
+});
+
+// The regression this replaces cost `claude-jam adopt` on every Debian/Ubuntu box, so the parse is
+// pinned against REAL `display-message` output from BOTH tmux versions rather than against a
+// hand-written line. Each fixture carries the eight per-field stdouts, the parse they must produce,
+// and the single-call `joined` forms that used to be read instead — see their `note`.
+test('v0.23.5 parsePaneInfo against real display-message output, tmux 3.3a AND 3.7c', () => {
+  const load = (v) => JSON.parse(fs.readFileSync(
+    new URL(`./fixtures/pane/display-message-tmux-${v}.json`, import.meta.url), 'utf8'));
+  for (const v of ['3.3a', '3.7c']) {
+    const fx = load(v);
+    assert.deepEqual(fx.fields, PANE_FIELDS, `${v}: the fixture captured a different field list`);
+    assert.deepEqual(parsePaneInfo(fx.perField), fx.expect, `${v}: per-field parse`);
+  }
+  // And why there is no separator: on 3.3a every one of the three is rewritten to `_`, so the
+  // single call yields ONE field where 3.7c yields eight. Both directions asserted, because a
+  // fixture pair only earns its keep if it can fail on one version and pass on the other.
+  const SEP = { u0001: String.fromCharCode(1), newline: '\n', tab: '\t' };
+  const [old33, old37] = [load('3.3a').joined, load('3.7c').joined];
+  for (const k of Object.keys(SEP)) {
+    assert.equal(old33[k].replace(/\n$/, '').split(SEP[k]).length, 1,
+      `tmux 3.3a was expected to have rewritten the ${k} separator`);
+    assert.equal(old37[k].replace(/\n$/, '').split(SEP[k]).length, PANE_FIELDS.length,
+      `tmux 3.7c was expected to pass the ${k} separator through`);
+  }
+  // Nothing is left of it on 3.3a: the joined line carries no control byte at all.
+  assert.equal(/[\x00-\x08\x0b\x0c\x0e-\x1f\t]/.test(old33.u0001.replace(/\n$/, '')), false);
 });
 
 test('v0.33 the foreground command is a note, never a gate', () => {

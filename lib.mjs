@@ -4926,15 +4926,26 @@ export function resolveAdoptTarget({ pane = null, socket = null, env = {} } = {}
     socketFrom: askedSocket ? 'flag' : fromEnv?.socket ? 'environment' : 'default' };
 }
 
-// One read-only `display-message` answers everything jam needs to SHOW before it adopts. The
-// fields are separated by U+0001 rather than a tab, because a tmux window name may contain a tab
-// and a path may contain almost anything else.
+// The read-only facts jam needs to SHOW before it adopts — ONE `display-message -p` per field,
+// which is the only shape that is version-independent by construction: there is no separator in
+// the output for a tmux version to rewrite.
+//
+// It used to be one call with the fields joined by U+0001, and that was a bet on the tmux version
+// which tmux 3.3a — Debian bookworm's and Ubuntu's packaged tmux, so also WSL2's — loses.
+// Measured 2026-08-30, the same probe on both (`fixtures/pane/display-message-tmux-*.json`):
+// 3.3a's `display-message -p` FILTERS non-printable bytes out of its output, replacing each with
+// `_`, so U+0001, a newline AND a tab all come back as `_` and eight fields parse as one; tmux
+// 3.7c passes all three through. No in-band separator is safe — not a cleverer one either — and a
+// per-field read is also the only one that survives a VALUE containing a newline (a path or a
+// window name may). The cost is eight reads instead of one, once per `claude-jam adopt`:
+// measured 7.0 ms against 1.2 ms on tmux 3.3a (mean of 5), which nobody will ever notice.
 export const PANE_FIELDS = ['pane_id', 'pane_pid', 'pane_current_command', 'pane_current_path',
   'session_name', 'window_index', 'pane_index', 'window_name'];
-export const PANE_SEP = '\u0001';
-export const PANE_FORMAT = PANE_FIELDS.map((f) => `#{${f}}`).join(PANE_SEP);
-export function parsePaneInfo(text) {
-  const parts = String(text ?? '').replace(/\n+$/, '').split(PANE_SEP);
+export const PANE_QUERIES = PANE_FIELDS.map((f) => `#{${f}}`);
+// `outs` is one raw stdout per PANE_QUERIES entry, in that order. tmux terminates each with a
+// single newline and only that one is stripped, because a value may legitimately end in one.
+export function parsePaneInfo(outs) {
+  const parts = Array.isArray(outs) ? outs.map((s) => String(s ?? '').replace(/\n$/, '')) : [];
   if (parts.length < PANE_FIELDS.length) return null;
   const o = Object.fromEntries(PANE_FIELDS.map((f, i) => [f, parts[i]]));
   if (!PANE_ID_RE.test(o.pane_id)) return null;

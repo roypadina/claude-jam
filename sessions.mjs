@@ -40,7 +40,7 @@ import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verify
   tmuxSocketArgs, TMUX_DEFAULT_SOCKET,
   // v0.33: `claude-jam adopt` — every decision about WHICH pane, WHICH session and whether to
   // say yes at all. The tmux and fs calls that feed them are below, and all of them are reads.
-  resolveAdoptTarget, PANE_FORMAT, parsePaneInfo, paneCommandNote, claudeProjectGlobs,
+  resolveAdoptTarget, PANE_QUERIES, parsePaneInfo, paneCommandNote, claudeProjectGlobs,
   pickAdoptSession, sessionPreview, adoptConfirmText, adoptNoTmuxText, adoptAlreadyJamText,
   adoptAlreadyAdoptedText, adoptPlan, resolveConfigDir } from './lib.mjs';
 
@@ -599,12 +599,22 @@ async function cmdAdopt(argv) {
   }
   if (!target.ok) { console.error(target.error); return 2; }
 
+  // One read per FIELD, not one read with a separator: tmux 3.3a rewrites every non-printable
+  // byte in `display-message -p` output as `_` (measured — see PANE_QUERIES' comment), so a
+  // joined format loses every field but the first on Debian/Ubuntu's packaged tmux. Stops at the
+  // first failing call, so a pane that is not there costs one call and keeps its own stderr.
   const ftmux = (...a) => tmux(target.socket, ...a);
-  const said = ftmux('display-message', '-p', '-t', target.pane, PANE_FORMAT);
-  const info = said.status === 0 ? parsePaneInfo(said.stdout) : null;
+  const outs = [];
+  let said = null;
+  for (const q of PANE_QUERIES) {
+    said = ftmux('display-message', '-p', '-t', target.pane, q);
+    if (said.status !== 0) break;
+    outs.push(said.stdout);
+  }
+  const info = said?.status === 0 ? parsePaneInfo(outs) : null;
   if (!info) {
     console.error(`no tmux pane ${target.pane} on socket ${target.socket}`
-      + `${(said.stderr || '').trim() ? ` — ${(said.stderr || '').trim()}` : ''}\n`
+      + `${(said?.stderr || '').trim() ? ` — ${(said.stderr || '').trim()}` : ''}\n`
       + '  `tmux list-panes -a -F "#{pane_id} #{session_name}:#{window_index}"` shows what is there;\n'
       + '  --socket <name> picks a different tmux server.');
     return 1;
