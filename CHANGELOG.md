@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.23.4
+
+**One user-facing defect, and the two test-harness fixes that were standing between it and a green
+Linux CI leg.** The defect is the one to read: any shell exporting `CI`, `CONTINUOUS_INTEGRATION` or
+a `CI_*` variable got a `claude-jam` that painted a **blank screen** — both the client and the
+launcher menu — while still reading keys. Nothing in the wire protocol, the frame pipeline, the trust
+boundary or the tmux/injection half changed. Upgrading is safe and picks up the fix on restart.
+
+The rest of the release is about the tests telling the truth: a suite that reported one broken step as
+eight failures, a liveness check that called a dead process alive, and the Linux CI step those two
+were blocking, now wired.
 
 ### Fixed — the client and the launcher menu painted NOTHING in any CI-flavoured shell
 
@@ -33,6 +43,71 @@ only ever been run from a developer shell. Two new tests carry the fix (the real
 with all three env shapes set; and the import-ordering trap, swept across every ink surface), both
 canaried in each direction. **SPEC W2 (the WSL2 Windows host) is unaffected.** Full write-up, with
 the control that isolates the mechanism, in `TESTING.md`.
+
+### Fixed — a test suite that reported ONE broken step as EIGHT failures
+
+No product code involved, and it matters anyway: a red RESULT line that overstates by 8× trains
+everyone to distrust the number, and the next real multi-failure gets waved off.
+
+`scripts/smoke-lifecycle.mjs`'s steps share fixtures — the jam step S2 launches is read by five later
+steps, and eight steps launch a jam under a name an earlier step used. A failing step left its
+`jamlife` tmux session and its state dir behind, so the next launch of that name failed with
+`tmux session "jamlife" is already a jam`: a true sentence about a false situation. Two of the fixture
+reads sat *between* steps, where the only handler is the outer `catch`, so a single missing fixture
+could end the run with thirteen steps never run and nothing in the RESULT line saying so.
+
+A step now declares what it made and what it reads. `cleans` names the exact sessions and ports **that
+step** created and tears them down when it fails — exact quoted names only, never a pattern, never a
+sweep, and a jam is ended by the name its own `session.json` records. `needs` names the ids of the
+steps whose fixtures it reads: if one of those failed, the step is **BLOCKED**, printed with the id
+that blocked it, and counted apart from FAILED in the RESULT line. A blocked run is still non-zero —
+it proved nothing, and a suite that did not run is not a suite that passed.
+
+Canaried by breaking one step on purpose, `HEAD` versus the fix, same machine:
+
+| what was broken | before | after |
+| --- | --- | --- |
+| step 2 dies after it was handed a jam | **8 FAILED**, 42 s | **1 FAILED**, 23 s |
+| S2 dies before it builds the shared jam | **3 FAILED and only 6 of 19 steps ran**, 2 s | **1 FAILED · 5 BLOCKED**, the other thirteen ran and passed, 19 s |
+| `smoke-adopt` S6 dies before it adopts | **8 FAILED**, 46 s | **1 FAILED · 7 BLOCKED**, 6 s |
+
+`scripts/smoke-adopt.mjs` had the identical shape (S6 builds the pane and daemon that seven later
+steps read) and gets the identical treatment. The other eighteen suites were read for it rather than
+assumed clean: two have a *different* weakness — `smoke-transport` has no top-level `try`/`catch` at
+all and T2 reuses T1's port; `smoke-replay` builds its daemon before its guarding `try` — and both are
+recorded in `TESTING.md` rather than restructured here. The rest either own no fixture (they drive a
+daemon handed to them on argv) or build their one shared daemon inside the `try` that guards every
+step.
+
+### Fixed — `ps -p` says yes to a zombie, so four suites called a dead process alive
+
+`ps -p <pid>` succeeds for a **zombie**: a process that has already exited and whose entry is only
+waiting for a parent that never called `wait()`. So does `process.kill(pid, 0)`. Every liveness check
+in `scripts/` is used one of exactly two ways — "it was running before this" and "it has exited now" —
+and a zombie is not running by either. The checks now read the state column, which is the only thing
+that says `Z`: `ps -o stat= -p <pid>`, which is BSD and GNU both. `smoke-lifecycle` and `smoke-adopt`
+asked with bare `ps -p`; `smoke-peer` (three "the child is gone" assertions) and `smoke-view` ("the
+daemon's ttyd outlived the jam") asked with `kill(pid, 0)` and keep that as the cheap first question,
+asking `ps` only when it says yes.
+
+It fails closed where there is no `ps`: `ENOENT` answers *not running*, which reds the "was running to
+begin with" assertions rather than quietly passing the "has exited" ones. A new lint,
+`0.23.4 no smoke suite reports a ZOMBIE as a running process`, pins the count of pid-asking suites at
+four so a rename cannot turn it into a no-op, and is canaried in both directions.
+
+### CI — `smoke-lifecycle` runs on the Linux leg again
+
+`sudo apt-get install -y tmux` plus one `run:` line behind `if: runner.os == 'Linux'`, and no retry:
+a suite that needs one in CI is telling you something. It is the only thing on that workflow that
+proves a jam actually **running** on Linux — every other step exits before tmux is reached — and it
+costs ~22 s, a stub `claude` and no tokens. It starts a real daemon in a real tmux session, attaches a
+real client over a real pty, presses F3, drives the four-way launcher prompt and `/end`, and ends the
+jam. 19/19 measured on macOS and on Debian bookworm / tmux 3.3a, with `CI=true` and with it unset,
+before wiring rather than after.
+
+The state-dir privacy gate the step was originally added for is still covered separately by
+`scripts/check-state-privacy.mjs` on the same leg, so what this adds back is the attach/tmux path — on
+the platform where `/tmp` is `1777` and where WSL2 (SPEC W2) lives.
 
 ## 0.23.3
 
