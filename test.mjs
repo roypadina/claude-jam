@@ -7718,6 +7718,10 @@ test('0.23.4 no smoke suite reports a ZOMBIE as a running process', () => {
     // Whatever else it does, it reads the state column — that is the only thing that says `Z`.
     assert.match(src, /\['-o', 'stat=', '-p'/, `${f}: its liveness check cannot see a zombie`);
     assert.match(src, /\/\^\\s\*Z\//, `${f}: it asks for the state and then does not test for Z`);
+    // 0.23.6: and a box with NO `ps` must say so rather than report every process dead —
+    // node:22-bookworm-slim ships no procps, and that read as a daemon that never started.
+    assert.match(src, /r\.error\?\.code === 'ENOENT'/,
+      `${f}: a missing \`ps\` silently answers "dead" for every pid`);
     checked++;
   }
   // The four suites that ask about a pid at all. A rename must not turn this lint into a no-op.

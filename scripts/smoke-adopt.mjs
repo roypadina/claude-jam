@@ -69,6 +69,12 @@ const paneOf = (t, sess = tmux) => (sess('capture-pane', '-p', '-t', t).stdout |
 const running = (pid) => {
   if (!pid) return false;
   const r = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+  // And a box with no `ps` AT ALL answers every question with `false` — every process dead,
+  // a whole suite red, and a missing tool diagnosed as a broken daemon. Measured 2026-08-30:
+  // `node:22-bookworm-slim` ships no procps, and smoke-lifecycle then failed step 2 with
+  // "the daemon was not running to begin with" while the daemon was up. Say which it is.
+  if (r.error?.code === 'ENOENT') throw new Error('`ps` is not installed (Debian: `apt-get install procps`)'
+    + ' — this suite cannot tell a running process from a dead one without it');
   return r.status === 0 && !/^\s*Z/.test(r.stdout || '');
 };
 // One exact name per call, on the socket that name was created on, and only a name this script

@@ -175,6 +175,8 @@ harness half of this is fixed in 0.23.4** — `running()` reads the state column
 run no longer disagrees with a runner for this reason; the `--init` advice stands anyway, because an
 unreaped tree is a bad model of a runner in every other way too.
 
+**And a second container fact, measured 2026-08-30 on 0.23.5 as released:** `node:22-bookworm-slim` ships **no `ps`** (procps is not in the image), and four suites ask `ps -o stat=` whether a pid is alive. Every answer came back `false`, and `smoke-lifecycle` failed step 2 with *"daemon (1852) was not running to begin with"* while the daemon was up, listening and logging — the curl finding's exact shape, in the harness. `apt-get install -y procps` and the same tree is **19/19**, on the released tree and on this batch's. The four suites now THROW the missing tool's name rather than reporting a dead process, and a lint in `test.mjs` keeps that guard in place.
+
 **And one dependency this container run turned up, which is a real portability fact:** `host.mjs`'s
 `waitForHealth()` shells out to **`curl`**. `node:22-bookworm-slim` has none, and the whole suite
 then reads as six `daemon did not come up` failures while the daemon is up, listening and logging
