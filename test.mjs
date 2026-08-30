@@ -274,7 +274,10 @@ test('resolveClaude: JAM_CLAUDE wins, then ~/.local/bin/claude, then PATH', () =
   assert.equal(resolveClaude({ ...env, JAM_CLAUDE: '/opt/claude' }, never), '/opt/claude');
   // An explicit override is honoured even when the local install exists.
   assert.equal(resolveClaude({ ...env, JAM_CLAUDE: '/opt/claude' }, always), '/opt/claude');
-  assert.equal(resolveClaude(env, (p) => p === '/home/x/.local/bin/claude'), '/home/x/.local/bin/claude');
+  // path.join, not a literal: this suite runs on the Windows CI leg too, where the same
+  // function builds the same path with the other separator (v0.32 W1).
+  const local = path.join('/home/x', '.local', 'bin', 'claude');
+  assert.equal(resolveClaude(env, (p) => p === local), local);
   assert.equal(resolveClaude(env, never), 'claude');
   // Empty JAM_CLAUDE is not an override; no env at all must not throw.
   assert.equal(resolveClaude({ ...env, JAM_CLAUDE: '' }, never), 'claude');
@@ -600,21 +603,25 @@ test('popupKey: only a and d answer, everything else leaves the knock pending', 
 
 test('normalizeConfigDir: ~ expanded, absolute, no trailing slash', () => {
   const home = '/home/x';
-  assert.equal(normalizeConfigDir('~/.claude3', home), '/home/x/.claude3');
-  assert.equal(normalizeConfigDir('~', home), '/home/x');
+  // The expectations go through path.resolve/path.join because the function does, and this
+  // suite runs on the Windows CI leg where both spell a path differently (v0.32 W1).
+  const claude3 = path.resolve(path.join(home, '.claude3'));
+  assert.equal(normalizeConfigDir('~/.claude3', home), claude3);
+  assert.equal(normalizeConfigDir('~', home), path.resolve(home));
   // A trailing slash changes claude's keychain hash, so it must not survive.
-  assert.equal(normalizeConfigDir('~/.claude3/', home), '/home/x/.claude3');
-  assert.equal(normalizeConfigDir('/opt/prof//', home), '/opt/prof');
-  assert.equal(normalizeConfigDir('  ~/.claude3  ', home), '/home/x/.claude3');
+  assert.equal(normalizeConfigDir('~/.claude3/', home), claude3);
+  assert.equal(normalizeConfigDir('/opt/prof//', home), path.resolve('/opt/prof'));
+  assert.equal(normalizeConfigDir('  ~/.claude3  ', home), claude3);
   // '~name' is a real relative path, not a home shorthand — never expanded.
-  assert.equal(normalizeConfigDir('~other/.claude', home).endsWith('~other/.claude'), true);
+  assert.equal(normalizeConfigDir('~other/.claude', home).endsWith(path.join('~other', '.claude')), true);
   for (const v of ['', '   ', null, undefined]) assert.equal(normalizeConfigDir(v, home), null, String(v));
 });
 
 test('resolveConfigDir: the flag wins, else the launcher own env, else null', () => {
   const home = '/home/x';
-  assert.equal(resolveConfigDir('~/.claude3', { CLAUDE_CONFIG_DIR: '/env/one' }, home), '/home/x/.claude3');
-  assert.equal(resolveConfigDir(undefined, { CLAUDE_CONFIG_DIR: '/env/one/' }, home), '/env/one');
+  assert.equal(resolveConfigDir('~/.claude3', { CLAUDE_CONFIG_DIR: '/env/one' }, home),
+    path.resolve(path.join(home, '.claude3')));
+  assert.equal(resolveConfigDir(undefined, { CLAUDE_CONFIG_DIR: '/env/one/' }, home), path.resolve('/env/one'));
   assert.equal(resolveConfigDir(undefined, {}, home), null);
   assert.equal(resolveConfigDir(undefined, { CLAUDE_CONFIG_DIR: '' }, home), null);
 });
@@ -622,11 +629,11 @@ test('resolveConfigDir: the flag wins, else the launcher own env, else null', ()
 test('jsonlGlobs: the default profile always, the selected one when it differs', () => {
   const id = '550e8400-e29b-41d4-a716-446655440000';
   const home = '/home/x';
-  assert.deepEqual(jsonlGlobs(id, home), [`/home/x/.claude/projects/*/${id}.jsonl`]);
-  assert.deepEqual(jsonlGlobs(id, home, '/home/x/.claude3'),
-    [`/home/x/.claude/projects/*/${id}.jsonl`, `/home/x/.claude3/projects/*/${id}.jsonl`]);
+  const glob = (profile) => path.join(home, profile, 'projects', '*', `${id}.jsonl`);
+  assert.deepEqual(jsonlGlobs(id, home), [glob('.claude')]);
+  assert.deepEqual(jsonlGlobs(id, home, path.join(home, '.claude3')), [glob('.claude'), glob('.claude3')]);
   // Same directory named twice is one glob, not two identical scans.
-  assert.deepEqual(jsonlGlobs(id, home, '/home/x/.claude'), [`/home/x/.claude/projects/*/${id}.jsonl`]);
+  assert.deepEqual(jsonlGlobs(id, home, path.join(home, '.claude')), [glob('.claude')]);
 });
 
 test('neutralizePrefixes: a forged [Name]: line can no longer claim attribution', () => {
@@ -2513,7 +2520,7 @@ test('v0.18 parseSessionJson: anything that is not jam\'s own shape is null', ()
 });
 
 test('v0.18 the state dir is jam\'s whole namespace, and only exact names are in it', () => {
-  assert.equal(stateDirFor('/tmp', 7799), `/tmp/${STATE_PREFIX}7799`);
+  assert.equal(stateDirFor('/tmp', 7799), path.join('/tmp', `${STATE_PREFIX}7799`));
   assert.equal(portFromStateDir('claude-jam-7799'), 7799);
   assert.equal(portFromStateDir(`${STATE_PREFIX}7777`), 7777);
   // Everything else in $TMPDIR is somebody else's business.
@@ -2523,7 +2530,7 @@ test('v0.18 the state dir is jam\'s whole namespace, and only exact names are in
   }
   // The round trip is what keeps the launcher and `jam sessions` looking at the same place.
   const dir = stateDirFor('/var/folders/x', 7801);
-  assert.equal(portFromStateDir(dir.slice(dir.lastIndexOf('/') + 1)), 7801);
+  assert.equal(portFromStateDir(path.basename(dir)), 7801);
 });
 
 test('v0.18 classifyJam names every state, and only the orphan may be deleted', () => {
@@ -5225,10 +5232,10 @@ test('v0.33 the foreground command is a note, never a gate', () => {
 
 test('v0.33 transcripts are looked for by cwd, under both profiles', () => {
   const g = claudeProjectGlobs('/Users/me/code/app', '/Users/me', null);
-  assert.deepEqual(g, ['/Users/me/.claude/projects/-Users-me-code-app/*.jsonl']);
-  const both = claudeProjectGlobs('/Users/me/code/app', '/Users/me', '/Users/me/.claude-work');
+  assert.deepEqual(g, [path.join('/Users/me', '.claude', 'projects', '-Users-me-code-app', '*.jsonl')]);
+  const both = claudeProjectGlobs('/Users/me/code/app', '/Users/me', path.join('/Users/me', '.claude-work'));
   assert.equal(both.length, 2);
-  assert.equal(both[1], '/Users/me/.claude-work/projects/-Users-me-code-app/*.jsonl');
+  assert.equal(both[1], path.join('/Users/me', '.claude-work', 'projects', '-Users-me-code-app', '*.jsonl'));
   // The selected profile being the default one is not two globs.
   assert.equal(claudeProjectGlobs('/p', '/Users/me', '/Users/me/.claude').length, 1);
 });
@@ -5721,7 +5728,7 @@ test('v0.29 a task id becomes a directory name, so it is validated as one', () =
     assert.equal(validPeerId(bad), false, JSON.stringify(bad));
     assert.equal(peerScratchDir('/tmp', bad), null, JSON.stringify(bad));
   }
-  assert.equal(peerScratchDir('/tmp', 'deadbeef'), '/tmp/claude-jam-peer-deadbeef');
+  assert.equal(peerScratchDir('/tmp', 'deadbeef'), path.join('/tmp', 'claude-jam-peer-deadbeef'));
   assert.ok(PEER_ID_RE.test('0123456789abcdef'));
   // Traversal can never be built, because the id never reaches path.join unvalidated.
   assert.equal(peerScratchDir('/tmp', '../../etc'), null);
@@ -6339,7 +6346,7 @@ test('validHostKey: exactly 32 bytes of lowercase hex, and nothing else', () => 
 });
 
 test('hostKeyPath: the key lives in the state dir, beside token.json', () => {
-  assert.equal(hostKeyPath('/tmp/claude-jam-7777'), `/tmp/claude-jam-7777/${HOST_KEY_FILE}`);
+  assert.equal(hostKeyPath('/tmp/claude-jam-7777'), path.join('/tmp/claude-jam-7777', HOST_KEY_FILE));
   assert.equal(HOST_KEY_FILE, 'host.key');
 });
 
