@@ -383,6 +383,16 @@ try {
   await sleep(300);
   killMine(NAME);
   console.log(`\n${failed ? `${failed} step(s) FAILED` : 'all steps passed'}`);
-  console.log(`(state ${STATE} — left in place for inspection; TMPDIR ${TMP})`);
+  // v0.21.2 (campaign F10): kept when there is something to look at, removed when there is not.
+  // Exactly the three paths mkdtempSync handed this process, one rmSync each, after the daemon is
+  // dead — never a pattern, never a sweep of $TMPDIR, nothing this run did not create.
+  if (failed) {
+    console.log(`(state ${STATE} — left in place for inspection; TMPDIR ${TMP})`);
+  } else {
+    for (const d of [TMP, BIN, CWD]) {
+      try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    console.log(`(cleaned up: ${TMP}, ${BIN}, ${CWD})`);
+  }
 }
 process.exit(exitCode);

@@ -291,6 +291,20 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   session `claude-jam`, so two at once make `claude-jam end <name>` ambiguous — S13's note) or a
   restructure of S7b's guest lifetime, for a third proof of a path already proven twice. Prove:
   fold a `cleared`-mode paint into S7b when that step is next touched.
+- 2026-08-30 · **F10 — the suites clean up after themselves now.** `smoke-peer` (4 dirs),
+  `smoke-answer` (3), `smoke-discover` (2) and `smoke-xfer` (1) removed nothing, so `$TMPDIR` grew
+  by ~10 per full sweep forever; 158 `jam-*` directories were counted. A PASSING run now removes
+  exactly the paths its own `mkdtempSync` returned, one `rmSync` each, after its daemons are dead;
+  a FAILING run keeps them and says where. No pattern, no glob, no sweep — the same rule AGENTS.md
+  §0 states for processes and tmux sessions, and it is written down in §2 now.
+  Measured, 2026-08-30: `$TMPDIR` held 104 `jam-*` directories; `smoke-peer`, `smoke-answer` and
+  `smoke-discover` were run back to back (all green) and it held **104** afterwards. Before this
+  change those three runs would have left nine.
+  NOT run: `smoke-xfer`. It is one of the six that need a daemon of yours with a real claude, so
+  it spends tokens, and this batch's guardrail was not to. Its change is the same shape as the
+  other three — one `rmSync` of one `mkdtempSync` path at the end of the script — and `node
+  --check` passes it, which is not the same as having run it. Prove: the next full sweep; watch
+  for `(cleaned up: …/jam-xfer-smoke-…)` on its last line.
 - 2026-08-30 · **F6 — said rather than waited for, deliberately.** The tunnel-ready line now ends
   `· give it a few seconds — the edge needs a moment before the first join works`, because
   cloudflared reports its hostname ~2.5 s before Cloudflare will route to it (soak log,

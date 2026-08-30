@@ -397,6 +397,16 @@ await step('POST /admit kind=export|file — the popup path answers both new req
 
 host.close();
 guest.close();
-console.log(`\nguest-side files left in ${GUEST_CWD} (yours to delete)`);
+// v0.21.2 (campaign F10): the guest-side directory goes with a passing run. It used to be handed
+// back as "yours to delete", which nobody ever did — $TMPDIR was found holding 158 `jam-*`
+// directories. A FAILING run still keeps it, since the files it received are the evidence.
+// Exactly the one path mkdtempSync handed this process: never a pattern, never a sweep of
+// $TMPDIR, and never the host jam's own cwd, which is not this smoke's to touch.
+if (failed) {
+  console.log(`\nguest-side files left in ${GUEST_CWD} (yours to delete)`);
+} else {
+  try { fs.rmSync(GUEST_CWD, { recursive: true, force: true }); } catch { /* best effort */ }
+  console.log(`\n(cleaned up: ${GUEST_CWD})`);
+}
 console.log(`--- RESULT --- ${failed ? `${failed} step(s) FAILED` : 'all steps passed'}`);
 process.exit(failed ? 1 : 0);
