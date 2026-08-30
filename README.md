@@ -399,6 +399,19 @@ a relayed socket has no key, whichever relay it is.
 `<state>/host.key` can already read `token.json` beside it, and is already a local user with your
 own privileges. What it stops is the *network* impersonating the filesystem.
 
+**And the state dir's privacy is now verified rather than assumed (v0.34.1).** The sentence above
+is true of a state dir claude-jam created — but the path is derived from the port
+(`$TMPDIR/claude-jam-<port>`, i.e. `/tmp/claude-jam-7777` on Linux and WSL2 with the defaults), and
+`/tmp` is mode `1777`. So on a **shared machine** another local user could compute that name and
+create the directory *first*: `mkdir` does not re-apply a mode to a directory that already exists,
+so it stayed theirs, and the daemon deliberately **reuses** an existing `host.key` (a restart must
+not demote a host client that is still running) while checking only that the file *looks* like a
+key. A planted key was therefore host authority. `claude-jam host` now refuses to start on a state
+dir that is a symlink, is owned by another user, or grants any group/other access, and refuses a
+`host.key` that fails the same test — with the reason and the way out (`--port`, or `--state`
+somewhere private). POSIX only: on Windows the mechanism is the NTFS ACL, and a `Stats` mode there
+is synthesised rather than real, so only the symlink check applies.
+
 **No key, no host — and it says so.** `claude-jam host`, `host --attach`, the launcher menu's
 attach and `claude-jam adopt` all hand the client the key's *path* (`--host-key-file`), and the
 client reads the file. Against a jam that has no key file — a daemon from before v0.34, or one

@@ -25,6 +25,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   // v0.34: host identity is a local secret, not a network address — the key file, the two-
   // condition gate and the refusal that says which condition failed.
   hostKeyPath, hostRefusal, HOST_KEY_BYTES, HOST_KEY_FILE,
+  // v0.34.1: and the check that the directory holding that key is one only its owner can reach.
+  privacyRefusal,
   // v0.18: jam owns the tmux session it made — the marker, the prompts, the way back in.
   OWNED_OPTION, SESSION_FILE, sessionInfo, parseSessionJson, exitDecision, EXIT_KEYS,
   exitPromptText, reattachLines, TAKEN_KEYS, takenPromptText, foreignSessionText, autoSessionName,
@@ -73,7 +75,7 @@ import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHeal
 // v0.32 W0: $TMPDIR, and every file that must be readable by its owner and nobody else, come
 // from the one module that knows what operating system this is.
 // v0.23: and so does mDNS — advertising is a platform binary, browsing is a platform binary.
-import { stateDir, secureDir, secureWrite, advertiseSpawn, readHostKey } from './platform.mjs';
+import { stateDir, secureDir, secureWrite, advertiseSpawn, readHostKey, assumePrivate } from './platform.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 // v0.23: what the TXT record's `v=` says. Read once, off the package.json beside this file, so
@@ -174,6 +176,19 @@ if (opts.help) {
 opts.name ||= 'Host';
 opts.cwd = path.resolve(opts.cwd || process.cwd());
 opts.state ||= stateDir(opts.port);
+// v0.34.1: the ONE gate both processes pass through — the launcher and the re-exec'd daemon each
+// run this file from the top, so verifying here covers host.key, token.json, session.json,
+// settings.json, the invite store, the peer MCP config and the outbox in one place rather than at
+// seven call sites. The state dir name is derived from the port ($TMPDIR/claude-jam-<port>), which
+// on Linux and WSL2 is /tmp/claude-jam-7777 with the defaults — a name another local user can
+// compute and create first, because /tmp is 1777. `secureDir` cannot fix that: mkdirSync does not
+// re-apply a mode to a directory that already exists. So a state dir that is not ours is a startup
+// refusal, not a warning: everything below writes secrets into it, and loadHostKey() will READ a
+// key out of it and grant host authority on the strength of it.
+{
+  const why = assumePrivate(opts.state);
+  if (why) { console.error(privacyRefusal("this jam's state dir", opts.state, why)); process.exit(2); }
+}
 // v0.20: the tmux server this jam lives on. Named per port, so two jams never share one, and
 // `--tmux-socket default` puts jam back on the user's own server (F3's bare-key binding is then
 // skipped, because on a shared server it would be theirs too).
@@ -874,7 +889,12 @@ function writeTokenFile() {
   const file = path.join(opts.state, 'token.json');
   if (opts.noTokenInContext) return fs.rmSync(file, { force: true });
   const { join, view, tunnelJoin, tunnelView } = joinInfo();
-  fs.writeFileSync(file, JSON.stringify(buildTokenFile(currentToken, join, view, tunnelJoin, tunnelView), null, 2));
+  // v0.34.1: secureWrite, not writeFileSync. This is the join token and every join URL that
+  // carries it, and it was the ONE state file written with no mode at all — so it was created
+  // 0644 under the usual umask, in a directory whose 0700 was the only thing protecting it.
+  // platform.mjs's own doc comment lists "the join token" as a file only its owner may read, and
+  // that was the single claim in it that the code did not make true.
+  secureWrite(file, JSON.stringify(buildTokenFile(currentToken, join, view, tunnelJoin, tunnelView), null, 2));
 }
 
 // -------------------------------------------------- v0.34: the host's own key ----
@@ -890,9 +910,24 @@ function writeTokenFile() {
 let HOST_KEY = null;
 function loadHostKey() {
   const file = hostKeyPath(opts.state);
+  // v0.34.1: the SECOND gate, independent of the state-dir one at the top of this file, because
+  // this is the file that grants host authority and hostGate's own rule is belt and braces. It
+  // used to log `(0600)` as a fact about a file whose mode it had never looked at — the state dir
+  // could be 0777 and the key 0644, planted by another local user, and the line still said 0600
+  // while the daemon adopted their key. A key file that is not ours is refused rather than reused:
+  // the daemon then has no key, which fails CLOSED (nobody is the host) exactly as an unwritable
+  // key file already did.
+  const why = assumePrivate(file, { kind: 'file' });
+  if (why) {
+    console.log(`[host-key] REFUSING ${file}: ${why}`);
+    console.log('[host-key] nobody can be host in this jam. Remove that file if it is yours to '
+      + 'remove, or start the jam on another --port.');
+    HOST_KEY = null;
+    return null;
+  }
   HOST_KEY = readHostKey(file);
   if (HOST_KEY) {
-    console.log(`[host-key] reusing ${file} (0600) — the host's own client proves itself with it`);
+    console.log(`[host-key] reusing ${file} (verified 0600, owned by this user) — the host's own client proves itself with it`);
     return HOST_KEY;
   }
   try {
