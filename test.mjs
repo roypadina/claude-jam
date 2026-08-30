@@ -8048,3 +8048,25 @@ test('v0.34.2 host.mjs: a request body is an envelope too, and `ladders` is neve
   assert.ok(src.split('\n').filter((l) => /Object\.hasOwn\(ladders,/.test(l)).length >= 2,
     'expected at least the answerHost guard and the /admit call site');
 });
+
+test('v0.34.2 nameTaken: a trailing space is not a different person', () => {
+  // Measured 2026-08-30 against 0.24.0: with the host `Roy` connected, `"Roy "` was admitted as a
+  // SECOND participant. The roster read ["Roy","Roy "] — two rows that render identically — the
+  // pane got `[Roy ]: …`, and `/kick Roy` could not reach the impostor because it trims its own
+  // argument and finds the real Roy first. NAME_RE allows the trailing space; a person does not
+  // have one.
+  assert.equal(nameTaken('Roy ', ['Roy']), true);
+  assert.equal(nameTaken('Roy', ['Roy ']), true);
+  assert.equal(nameTaken('  Roy  ', ['roy']), true);
+  assert.equal(nameTaken('RoY ', ['Roy']), true);
+  assert.equal(nameTaken('Roy\t', ['Roy']), true);
+  // An INTERIOR space is a different name and stays one — "Ro y" does not render as "Roy".
+  assert.equal(nameTaken('Ro y', ['Roy']), false);
+  assert.equal(nameTaken('Roy 2', ['Roy']), false);
+  // And the pre-existing behaviour is unchanged.
+  assert.equal(nameTaken('Dana', ['Roy', 'dana']), true);
+  assert.equal(nameTaken('Dana', ['Roy', 'Danae']), false);
+  assert.equal(nameTaken('Dana', []), false);
+  // The knock path renames rather than refusing, and the rename is clean rather than "Roy -2".
+  assert.deepEqual(resolveJoinName('Roy ', ['Roy']), { name: 'Roy-2', renamed: true });
+});

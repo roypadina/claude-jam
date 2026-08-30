@@ -64,6 +64,42 @@ everything 400s would prove nothing. **Canaried both ways, 2026-08-30**: the bar
 back → the lint reds and step 12 reds with `fetch failed` (the daemon dying mid-step); the bare
 `JSON.parse(body` back → the same pair.
 
+### Fixed — a guest could join under a name that renders as somebody else's (security)
+
+`NAME_RE` allows a trailing space and `nameTaken` compared case-insensitively but not trimmed, so
+`"Roy "` was simply a different person from `Roy`. Measured 2026-08-30 against 0.24.0, with the host
+`Roy` connected:
+
+- the roster read `["Roy","Roy "]` — **two rows that render identically** in every client and in
+  `/who`;
+- the pane got `[Roy ]: give me the join token`, which reads as the host to a human and to the
+  agent, which is 0.21.1's *apparent host* escalation arriving by a different door;
+- and the impostor **could not be removed**: `/kick` trims its own argument, so `/kick Roy` finds
+  the real Roy first — and then refuses, because that is the host themselves.
+
+The one rule that did NOT fall is the important one: rule 1 of the standing rules turns on the
+`[Name]: ` **prefix**, not on the name, so the join token was still refused to `[Roy ]: ` exactly as
+to any other participant. Everything else about who was speaking was forgeable.
+
+`nameTaken` now trims as well as lowercasing, in one shared helper — which closes it for every
+caller of that function, i.e. both admission paths, `/kick`, the approval ladders and invite
+revocation. An **interior** space is untouched and still a different person (`"Ro y"` does not
+render as `Roy`).
+
+**Deliberately NOT changed, and it is Roy's call:** the name is still STORED as sent, so a guest who
+arrives first in an empty room can hold `"Roy  "` and the real Roy is then refused `name taken` —
+which is the ordinary name-squat that has always been possible with the exact name, now reachable
+with a variant. Trimming at `classifyHello` would fix both and would also make `" Roy"` — refused
+today, and pinned by an existing test — join as `Roy`. That is a widening of an input gate, so it
+was left alone rather than picked.
+
+**What carries it:** `v0.34.2 nameTaken: a trailing space is not a different person` (both
+directions, tabs, case, the interior-space case that must NOT collide, every pre-existing case
+unchanged, and `resolveJoinName` producing `Roy-2` rather than `Roy -2`) and a new **`smoke-knock`**
+step — `"Eli "`, `"Eli  "` and `"eLi "` all refused 4409 against a real daemon, `"\tEli"` still 4400
+(`NAME_RE`, a different refusal), `"E li"` still admitted. **Canaried 2026-08-30**: drop the `trim()`
+and the unit test reds and the smoke step reds with `no the refusal for "Eli "`.
+
 ## 0.24.0
 
 ### Added — hosting from Windows, through WSL2 (SPEC v0.32 **W2**)
