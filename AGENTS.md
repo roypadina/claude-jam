@@ -356,12 +356,23 @@ perfectly working local install — the machine doing the release verifies green
 else is served the previous version**. A `brew upgrade` that reports the new version is therefore
 *not* evidence the tap was published.
 
-So a tap bump is done only when both are true, checked separately:
+So a tap bump is done only when both are true, checked separately — and the first check must ask
+the **server**, not a cached ref:
 
 ```sh
-git -C /opt/homebrew/Library/Taps/roypadina/homebrew-tap rev-list --count origin/main..HEAD  # must be 0
-brew style roypadina/tap/claude-jam                                                          # must be clean
+B=/opt/homebrew/Library/Taps/roypadina/homebrew-tap
+[ "$(git -C $B rev-parse HEAD)" = "$(git -C $B ls-remote origin main | cut -f1)" ] \
+  && echo published || echo NOT-published
+brew style roypadina/tap/claude-jam    # must be clean
 ```
+
+**Not `git status -sb`, and not `rev-list origin/main..HEAD`.** Both read the remote-tracking ref,
+which is a snapshot of your last `fetch` — so they describe your cache, not the remote. A push made
+**by URL** (`git push git@github-padina:… HEAD:main`, which is how the tap gets pushed, because the
+HTTPS helper resolves to `roypadina-reeco` and 403s) updates **no** `origin/*` ref at all, so
+`status -sb` keeps reporting `1 ahead` of a server that already has the commit. That is not
+hypothetical: it produced a confidently wrong "the tap was never pushed" on 2026-08-30. `ls-remote`
+asks the server. The same applies to any remote somebody else may have pushed to.
 
 And note there are **two clones**: brew's own (above), which is what `brew upgrade` reads, and
 Roy's working copy at `~/Code/Padina/homebrew-tap`. Bumping one leaves the other stale and they
