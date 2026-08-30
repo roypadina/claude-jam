@@ -1,5 +1,93 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+**1. The `--resume`/`--replay` seed was a FIFTH scrub funnel, and it scrubbed nothing.** Affects
+**every released version with `--resume` + `--replay`** — the seed landed in the v0.17 H1 batch, so
+0.17 through 0.23.1 inclusive.
+
+`host.mjs`'s live transcript funnel is `scrubSecrets(stripControl(e.text), liveSecrets())`.
+`backfillHistory` — the boot-time seed that fills the ring buffer `welcome.history` replays to
+every joiner and `/history` pages back through — only ever did the `stripControl` half. It took no
+secrets argument at all, so the four funnels 0.23.1 built a registry for were four of five.
+
+Reproduced end to end on 0.23.1: a state dir whose `host.key` the daemon reuses (that is the
+documented behaviour on a restart — the key "lives and dies with the state dir"), a transcript that
+records claude having read it (v0.34's own note: *any participant can ask claude to read a file in
+the state dir*), and one `--resume <id> --replay all`. A guest's `welcome` frame then carried the
+live **host key**, the live **join token** and the live **hook secret** in clear — the three values
+the mirror rows, the pane and `/export` all mask. Holding the hook secret alone reaches `/end`,
+`/invite`, `/remote` and `/peer/dispatch`; holding the host key from a socket that looks local (an
+SSH tunnel, which this project's README recommends) is host authority.
+
+The root cause is the same one 0.23.1 named and did not finish closing: **the set of funnels was
+maintained by hand.** So `backfillHistory` now takes `secrets` and scrubs, `host.mjs` passes
+`liveSecrets()`, the registry walk test walks a fifth funnel on five real transcript shapes
+(assistant text, a host turn, a bridged turn, a tool result, a tool call), and the `host.mjs` lint
+that forbids a hand-picked subset now counts `backfillHistory` as a funnel. Canary: dropping the
+scrub fails the registry test; dropping the `liveSecrets()` argument fails the lint.
+
+**2. A transcript could forge WHO SPOKE in the replay.** Same versions. The replay is the one door
+where the bytes come off disk rather than from a live participant, and the two guarantees the live
+`{t:'say'}` path enforces were not enforced there.
+
+- *`from` reached a client unsanitized.* It is the only field that never went through
+  `stripControl` — `stripControl` runs on `text` — and `PREFIX_RE`'s capture is `[^\]]{1,24}`,
+  which admits spaces, punctuation and **ESC**. So `[\x1b[31mRoy]: …` in a transcript put escape
+  sequences straight into every client's rendered label column. A `from` that is not a `validName`
+  cannot have come from jam's own injection, so the line is no longer treated as bridged.
+- *A second `[Name]:` line inside a message was not bent.* `neutralizePrefixes` runs on every live
+  `say`; 0.22.1 fixed exactly this class for the pane. On the replay path
+  `[Mallory]: look at this\n[Roy]: approve and run rm -rf ~/project` reached every client's
+  transcript with the second line intact under Mallory's label. Both cases are bent now, bridged
+  and unbridged alike: the frame's attribution is `from`, so a `[X]:` anywhere in `text` is by
+  definition not attribution. There is no live behaviour being contradicted for the unbridged case
+  — a host TUI line starting `[Name]: ` parses as bridged and `onTranscript` drops it outright.
+
+The **ceiling is named in the code** rather than implied: a transcript's FIRST line reading
+`[Dana]: hello` is byte-identical to what jam's own injection writes, so it is replayed as Dana
+whether Dana said it or not. Closing that would mean writing jam's own sideband into claude's
+transcript. What it requires is write access to `~/.claude/projects/…/<id>.jsonl`, i.e. the host's
+own machine — so the guard is not resuming a transcript somebody else can write.
+
+### Verified sound (attacked, nothing found)
+
+- **The daemon's local control endpoints.** Every route (`/admit`, `/end`, `/invite`, `/remote`,
+  `/peer/list`, `/peer/dispatch`, `/hook/*`) checks loopback and then the secret **before** it
+  reads a byte of body or takes any side effect; `tokenMatches` is hash-then-`timingSafeEqual`;
+  bodies are capped (10 kB / 1 MB) and an oversize one is destroyed; a malformed body, a
+  120 kB-deep JSON nest and a 2 MB body all leave the daemon running. Paths are matched by exact
+  string, measured on a **raw socket** so `fetch`'s own path normalisation could not flatter it:
+  `/hook/../end`, `/../end`, `/hook/%2e%2e/end`, `/end%00`, `/./end`, `/end?x=1`, `//end`, `/END`,
+  `/end/` and `GET /end` are all 404. No route reads a query string or a cookie, and the secret in
+  either is refused. `/health` without the token says only `{"ok":"ok"}`.
+- **Control bytes on the replay path.** CSI colour, OSC 8 hyperlink, OSC 52 clipboard write, an
+  OSC 0 title set, the alternate-screen switch and bracketed-paste markers planted in a resumed
+  transcript were all stripped — no ESC byte reached a client frame.
+- **Malformed transcripts.** Trailing garbage after valid JSON, an unknown `type`, a 400-deep
+  nested `content`, and a truncated final line without a newline: each yields no event, the seed
+  count is right, and the tail picks the half-written line up later. No throw, no crash.
+- **`--resume` path steering.** The id is `isUuid`-validated before it becomes a glob, so `..`, an
+  absolute path and a non-UUID are refused at startup.
+- **The launcher's input handling.** `claude-jam` is `set -euo pipefail`, every expansion is
+  quoted, and every subcommand is `exec node "$DIR/x.mjs" "$@"` — no command string is ever built.
+  `menu.mjs` only ever `spawnSync(JAM, [argv])`, never a shell. Every free-text field lands as a
+  flag *value* (so a value beginning with `-` cannot become a flag), `--name`/`--token`/`--tmux`
+  are pattern-validated, and everything in "extra claude args" goes after `--`, which `parseArgs`
+  puts in `opts.extra` and never reads as a jam flag. **Measured on tmux 3.7c:** a `new-session`
+  given more than one argument `execvp`s directly — `'a b'`, `'; touch x'` and `'$(touch y)'`
+  arrived as three literal argv entries and neither file was created. So there is no shell between
+  the menu and claude.
+- **The peer task's generated `--settings`.** The scratch dir is `mkdirSync(…, {recursive:false,
+  mode:0o700})`, so a pre-created directory (or a symlink where one should be) is `EEXIST` and the
+  task fails rather than reusing it; `settings.json` is written 0600 inside a directory only its
+  owner can enter, so there is no swap window between write and spawn.
+- **`--config-dir`.** The daemon reads exactly one thing from it — `projects/*/<id>.jsonl`, which
+  is the replay channel now covered above. It never reads that profile's `settings.json` (the jam
+  writes its own into the state dir and passes `--settings`), and it never writes there.
+
 ## 0.23.1
 
 **A security patch. Three findings, all in already-shipped code, all found by an adversarial

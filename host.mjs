@@ -3964,7 +3964,11 @@ function seedHistory() {
   // seeding 20000 events into a 2000-event ring would push 18000 of them straight back out and
   // then report having seeded them.
   const cap = Math.min(opts.replay, HISTORY_MAX);
-  const { events, files, total } = backfillHistory(whole, { hostName: opts.name, cap });
+  // v0.34.1: the same secrets object the live transcript funnel gets. The events this returns go
+  // straight into the ring, and the ring is what `welcome.history` and `/history` hand out — so
+  // this is a broadcast funnel and it scrubs like one. Without it a `host.key` claude had read is
+  // replayed to every joiner in clear.
+  const { events, files, total } = backfillHistory(whole, { hostName: opts.name, cap, secrets: liveSecrets() });
   const ts = Date.now();
   for (const ev of events) history.push({ ...ev, id: nextId++, ts });
   for (const [p, n] of files) for (let i = 0; i < n; i++) noteFilePath(touched, p);
