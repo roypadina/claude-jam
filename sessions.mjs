@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import net from 'node:net';
 // v0.32 W0: where $TMPDIR is, is a platform question. Everything else here is fs and tmux.
@@ -43,7 +44,10 @@ import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verify
   pickAdoptSession, sessionPreview, adoptConfirmText, adoptNoTmuxText, adoptAlreadyJamText,
   adoptAlreadyAdoptedText, adoptPlan, resolveConfigDir } from './lib.mjs';
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+// `fileURLToPath`, NOT `new URL(...).pathname` (0.23.3). On Windows the pathname of a file: URL is
+// `/C:/dir/file.mjs` — with a leading slash — so `path.dirname` and `path.resolve` both build a path
+// that does not exist (`\\C:\\dir`). `cli.mjs` already did this correctly; these did not.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 // v0.20: the socket is part of the target. It is a REQUIRED argument in spirit — every caller
 // knows which jam it is asking about — and defaults to the shared server only so a session.json
@@ -701,7 +705,7 @@ export async function cmdFind(argv) {
 }
 
 // Only when this file IS the command being run — host.mjs imports it as a module.
-if (path.resolve(process.argv[1] || '') === path.resolve(new URL(import.meta.url).pathname)) {
+if (path.resolve(process.argv[1] || '') === path.resolve(fileURLToPath(import.meta.url))) {
   const [cmd, ...rest] = process.argv.slice(2);
   const run = {
     list: cmdSessions, sessions: cmdSessions, end: cmdEnd, clean: cmdClean,

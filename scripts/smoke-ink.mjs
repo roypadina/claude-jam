@@ -13,13 +13,14 @@
 // usage: node scripts/smoke-ink.mjs <ws-url> <token> <host-tmux-session>
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const [url, token, hostSession] = process.argv.slice(2);
 if (!url || !token || !hostSession) {
   console.error('usage: node scripts/smoke-ink.mjs <ws-url> <token> <host-tmux-session>');
   process.exit(2);
 }
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.join(HERE, '..', 'client.mjs');
 const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 // v0.20: jam's tmux lives on a socket of its own, named per port. `JAM_SOCKET` overrides it for

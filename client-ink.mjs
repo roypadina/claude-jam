@@ -22,6 +22,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
@@ -1826,7 +1827,12 @@ function StatusBar({ status, typing, spin, mirror, passthrough, net, scroll }) {
 // exists: a leaf either submits its `/command` (when the command means something on its own) or
 // puts it on the input line ready for its argument. The menu is discoverability, never a second
 // implementation of anything.
-const HERE_DIR = path.dirname(new URL(import.meta.url).pathname);
+// `fileURLToPath`, NOT `new URL(...).pathname` (0.23.3). On Windows the pathname of a file: URL is
+// `/C:/dir/file.mjs` — with a leading slash — so `path.dirname` and `path.resolve` both build a path
+// that does not exist (`\\C:\\dir`). `cli.mjs` already did this correctly; these did not.
+// This one reaches a real user: HERE_DIR is how `/menu -> Help` finds MANUAL.md, and the
+// Windows client shipped in 0.23.0 could not read it.
+const HERE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 function manualLines() {
   try { return fs.readFileSync(path.join(HERE_DIR, MANUAL_FILE), 'utf8').split('\n'); }

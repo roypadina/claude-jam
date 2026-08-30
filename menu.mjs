@@ -12,6 +12,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { Box, Text, render as inkRender, useApp, useInput } from 'ink';
 import { Select, TextInput, Spinner, Alert, Badge } from '@inkjs/ui';
@@ -26,7 +27,10 @@ import { listRows } from './sessions.mjs';
 import { copyText, browseText } from './platform.mjs';
 
 const h = React.createElement;
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+// `fileURLToPath`, NOT `new URL(...).pathname` (0.23.3). On Windows the pathname of a file: URL is
+// `/C:/dir/file.mjs` — with a leading slash — so `path.dirname` and `path.resolve` both build a path
+// that does not exist (`\\C:\\dir`). `cli.mjs` already did this correctly; these did not.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 // v0.21: the real executable. `jam` is still installed beside it as a deprecated alias that
 // execs this same file, so both resolve — but nothing here, and nothing printed anywhere, uses
 // that name.
