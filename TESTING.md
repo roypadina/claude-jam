@@ -537,6 +537,18 @@ and closes **nothing** that a person has to see, hear or type. Each entry names 
 
 The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgraded past it.
 
+- 2026-08-30 · **W1: the state dir's ACL keeps SYSTEM and Administrators, and the split call is
+  unmeasured.** The first Windows CI run measured what `icacls <dir> /inheritance:r /grant:r
+  <user>:(OI)(CI)F` actually leaves on a directory: exit 0, and three principals — the owner,
+  `NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators` — none carrying the `(I)` inherited marker, with
+  a second uncached apply changing nothing. A FILE reduces to one entry; a directory does not. Not
+  an exposure (both extra principals read anything on the machine regardless, no wider principal
+  appears, and with no Windows host there is no state dir on Windows today), so the test asserts
+  the true guarantee and the docs say it. What is NOT known is whether **splitting** the call —
+  `icacls <dir> /inheritance:r`, then a separate `icacls <dir> /grant:r <user>:(OI)(CI)F` — would
+  reduce it to one entry, i.e. whether this is Windows' behaviour or this call's shape. Not probed
+  from `test.mjs` on purpose: platform binaries belong to `platform.mjs`. Prove: one CI run of the
+  two-call form on a scratch directory, printed and not asserted, the way the sound-mode line is.
 - 2026-08-30 · **W1, THE BIG ONE: no human has ever run the Windows client.** Not once, not
   partially. It has never been installed on Windows, never started, never joined a jam. Everything
   claimed about it is either a unit test on a `windows-latest` runner or a reading of Microsoft's

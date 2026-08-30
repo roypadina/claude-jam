@@ -5526,7 +5526,14 @@ PEER TASKS (this jam was started with --peer-tasks)
 // entry. `/inheritance:r` drops what the file inherited from its parent, `/grant:r <user>:F`
 // replaces any explicit grant for that user with full control, and the two together leave a
 // single principal behind. A directory adds `(OI)(CI)` so what is created inside it inherits
-// the same single entry — which is what makes a state dir's later files safe by construction.
+// the grant — which is what makes a state dir's later files safe by construction.
+//
+// MEASURED on windows-latest, 2026-08-30, because the first CI run said otherwise: the single
+// entry is a FILE's guarantee, not a directory's. On a directory this exact call exits 0 and
+// still leaves `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` beside the owner, unmarked as
+// inherited, and applying it a second time changes nothing. Both principals can read anything on
+// the machine whatever the DACL says, so this is a weaker guarantee and not a hole — but it is
+// the weaker one, and the test asserts that rather than the sentence above.
 //
 // The principal is `DOMAIN\user` when the machine is in a domain and `user` otherwise. It comes
 // from the environment, so a machine with no %USERNAME% gets `null` and the caller does nothing

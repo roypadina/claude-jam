@@ -817,7 +817,10 @@ test instead of somebody's message.
   an NTFS ACL with a single entry for the current user
   (`icacls /inheritance:r /grant:r <you>:F`, `(OI)(CI)` on a directory). It is the equivalent, not
   the same mechanism, and if it cannot be applied the file keeps its profile's inheritance rather
-  than the write failing. CI on a Windows runner checks it; no human has.
+  than the write failing. CI on a Windows runner checks it; no human has. **A directory does not
+  reduce to one entry** — measured on a Windows runner, it keeps SYSTEM and Administrators beside
+  the owner, which is what the machine's administrators can read anyway; the single-entry
+  guarantee is a file's.
 - **Host is a local file, not an address (v0.34).** `<state>/host.key` is `0600` in a `0700` dir,
   and reading it is what proves the claim; the loopback test is kept as a second, independent
   condition. A client that claims `--host` with no key file joins as a guest and says so — there
