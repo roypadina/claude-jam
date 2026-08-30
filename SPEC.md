@@ -2288,3 +2288,37 @@ Replace the inference with proof.
    a non-local address is refused; a local socket with no key is a guest; the host's own client
    still gets host over plain loopback; and the F1 probe shape — relay headers, relay address —
    is refused on both conditions independently.
+
+**What shipped (2026-08-30).** All seven, as written, in two commits.
+
+The decision is `hostGate({claimed, local, presented, expected})` in `lib.mjs`, returning the
+list of conditions that FAILED rather than a bare `false` — `locality`, `key-missing`,
+`key-mismatch`, `key-unset` — which `hostRefusal()` turns into the sentence the refused client
+is sent. `classifyHello` takes the daemon's key as a fourth argument and fails **closed** without
+it: a caller that was never updated grants host to nobody, because address-only host is the hole
+this exists to close. The effect is `loadHostKey()` in `host.mjs` (called first in `daemon()`,
+before `createServer`, because the launcher spawns the host's client the moment health answers)
+and `readHostKey()` in `platform.mjs`, the one place the file is read — by the daemon and by both
+clients.
+
+Two things the spec did not say, decided here:
+
+- **An existing key is reused, not replaced.** A daemon that restarts under a host client that is
+  already running (clients reconnect on their own) must not silently demote it. The file lives and
+  dies with the state dir.
+- **The client is handed the key's PATH, not its value** (`--host-key-file`), because an argv is
+  in `ps`. `runHostClient` is the single place that builds it, and all four surfaces — `claude-jam
+  host`, `host --attach`, the launcher menu's attach, and `claude-jam adopt` — funnel through it.
+  A unit lint asserts that (one `client.mjs` spawn in `host.mjs`, carrying both flags; none in
+  `menu.mjs` or `sessions.mjs`), because "every surface" is only provable if there is one.
+
+Cost: 407 → 422 unit tests. `smoke-knock` gained the three refusal cases, each asserted for its
+own reason and one of them over this machine's real off-box address; `smoke-slash` and
+`smoke-adopt` gained the leak proof (frames, daemon log, `/export`, the state dir); every suite
+that connects a scripted host now reads the key. Canary, run twice: breaking `hostKeyMatches`
+turned 8 `smoke-knock` steps and 5 unit tests red; removing `--host-key-file` from the launcher
+turned `smoke-lifecycle` steps 5 and 6 red plus the surfaces lint.
+
+Not done, and recorded in `TESTING.md`: the thirteen suites outside the batch scope were edited
+but not re-run (release-gate work), and Funnel's *transport* is still unverified — what changed is
+that its *host gate* no longer depends on recognising it.
