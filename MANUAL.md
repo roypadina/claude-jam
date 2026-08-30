@@ -404,8 +404,17 @@ If somebody asks **"how do I find Roy's jam?"**, this is the answer.
   runs. The row shows whether the LAN is actually being told, not merely whether it was asked for.
 - **Tunnels are never advertised.** mDNS is link-local by design, and a tunnel exists for people
   who are not here. A remote guest needs a link or a URL, as before.
-- A machine with no mDNS tool (`dns-sd`) simply skips discovery, with one line naming the fix.
-  Nothing else about the jam changes, and it is not an error.
+- A machine with no mDNS tool (`dns-sd`) cannot announce or find, and the two halves behave
+  differently — say which, because "I can't see the jam" has two very different causes:
+  - **Hosting** carries on normally. The daemon logs `announce: off — <reason>` once and the jam
+    works exactly as before; every other way in (a link, a token, a knock, a URL) is unaffected.
+  - **`claude-jam find` REFUSES** rather than reporting an empty network, and exits non-zero
+    (`--json` gives `{"ok": false, "error": …}`). *Nobody is hosting* and *this machine cannot look*
+    are different answers, and it will not conflate them.
+- **On Linux there is normally no `dns-sd` at all, so discovery is unsupported there** — it is
+  Apple's Bonjour CLI, and the avahi-native path was deliberately not built. `avahi-utils` provides
+  a compatible `dns-sd` on most distributions and is the whole fix; `JAM_DNSSD=<path>` points at one
+  somewhere else. Nothing else about hosting or joining from Linux is affected.
 
 ## Joining: invite link, token, or knock
 
