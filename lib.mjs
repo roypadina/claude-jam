@@ -123,6 +123,30 @@ export function buildTokenFile(token, join, view, tunnelJoin, tunnelView) {
   };
 }
 
+// `<state>/hook-error.json`: the one thing a stop/notification hook can do when it CANNOT reach
+// the daemon, which is the failure the report itself would have carried. hooks.sh writes this
+// file when the POST does not land and removes it when one does, so the file means exactly
+// "the last hook attempt was lost". The daemon polls it and logs `hookErrorNote` — without that
+// eye a dropped hook is silent, and silence is the defect (0.23.5 removed curl from
+// `waitForHealth`; the hooks kept it until here, so a box with no curl ran a jam that looked
+// normal while every idle signal and every turn-end nudge went nowhere).
+export const HOOK_ERROR_FILE = 'hook-error.json';
+
+// Pure: the file's text in, one daemon log line out, or null when there is nothing to say.
+// Every field is a claude-side value, so each is bounded and stripped of control characters
+// before it goes anywhere near the daemon's own console.
+export function hookErrorNote(raw) {
+  let rec;
+  try { rec = JSON.parse(String(raw ?? '')); } catch { return null; }
+  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return null;
+  const clean = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, n);
+  const event = clean(rec.event, 40) || 'a';
+  const at = clean(rec.at, 40);
+  const why = clean(rec.error, 200) || 'no reason recorded';
+  return `[hook] ${event} hook did NOT reach this daemon${at ? ` at ${at}` : ''}: ${why}`
+    + ' — turn-end and attention signals are being dropped';
+}
+
 // Whether a socket's ADDRESS may be believed at all.
 //
 // Every relay claude-jam offers points at loopback — cloudflared is run as

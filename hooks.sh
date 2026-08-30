@@ -82,8 +82,52 @@ out('SessionStart', join(`This is a SHARED session bridged by claude-jam. Host: 
 JS
     ;;
   stop|notification)
-    curl -s -m 2 -X POST -H "x-jam-secret: $JAM_HOOK_SECRET" --data-binary @- \
-      "http://127.0.0.1:$JAM_PORT/hook/$EVENT" >/dev/null 2>&1 || true
+    # Posted by the daemon's OWN node (JAM_NODE), not by a curl on PATH — 0.23.5 took the same
+    # dependency out of waitForHealth() and this was the one it left. On a box without curl the
+    # jam ran normally while EVERY stop and notification hook was dropped: no idle signal, no
+    # turn-end nudge, and no error anywhere. Runtime, and silent, which is the worst pair.
+    #
+    # The `|| true` stays — a hook must never break the claude session — so the failure has to be
+    # written down instead of raised: <state>/hook-error.json, removed again by the next hook that
+    # lands, so the file means "the last attempt was lost" and nothing else. The daemon polls it
+    # and logs it (startHookWatch in host.mjs); it is the only eye there can be on this, because
+    # the thing that failed IS the report.
+    #
+    # The script is on the argv and the SECRET IS NOT: it is read from the environment the daemon
+    # already put it in. `curl -H "x-jam-secret: …"` had it in `ps` for every user on the machine.
+    # -e rather than a heredoc because stdin is the hook payload here (notification reads
+    # `payload.message`), and the heredoc the SessionStart branch uses would take stdin for itself.
+    if "${JAM_NODE:-node}" -e '
+const fs = require("fs");
+const ev = process.argv[1];
+const file = process.env.JAM_STATE + "/hook-error.json";
+let body = "";
+try { body = fs.readFileSync(0, "utf8"); } catch { /* no payload is not a failure */ }
+const landed = () => { try { fs.rmSync(file, { force: true }); } catch {} };
+const lost = (why) => { try {
+  fs.writeFileSync(file, JSON.stringify({
+    at: new Date().toISOString(), event: ev, error: String(why && why.message || why).slice(0, 200),
+  }) + "\n");
+} catch {} };
+fetch("http://127.0.0.1:" + process.env.JAM_PORT + "/hook/" + ev, {
+  method: "POST", body,
+  headers: {
+    "x-jam-secret": process.env.JAM_HOOK_SECRET,
+    "content-type": "application/json",
+    connection: "close",
+  },
+  signal: AbortSignal.timeout(2000),
+}).then((r) => (r.ok ? landed() : lost("HTTP " + r.status)), lost);
+' "$EVENT" >/dev/null 2>&1; then
+      : # posted, or the reason is in hook-error.json
+    else
+      # node itself did not run — a wrong JAM_NODE, or no node on the box at all. It is the one
+      # failure the script above cannot record, because it never started, so bash records it. A
+      # missing `date` only costs the timestamp; hookErrorNote prints the line without one.
+      printf '{"at":"%s","event":"%s","error":"could not run %s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$EVENT" "${JAM_NODE:-node}" \
+        > "$JAM_STATE/hook-error.json" 2>/dev/null || true
+    fi
     ;;
 esac
 exit 0

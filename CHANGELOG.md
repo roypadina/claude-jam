@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a jam without `curl` dropped EVERY stop and notification hook, in silence
+
+0.23.5 took `curl` out of `waitForHealth()`, so a box without one could start a jam. It could not
+run one: `hooks.sh` still posted the **stop** and **notification** hooks with
+`curl -s -m 2 … || true`, so on that machine the jam looked completely normal while every turn-end
+signal and every "claude wants your attention" was dropped. No idle state, no nudge, and **no error
+anywhere** — the thing that failed *is* the report. Runtime rather than launch, and silent, which
+is the worst pair a defect can have.
+
+The hooks post with the daemon's own node now (`JAM_NODE`, which the daemon already exports into
+claude's environment for exactly this reason), so the only binary a hook needs is the one running
+the daemon. `|| true` stays — a hook must never break the claude session — so the failure is
+**written down instead of raised**: a POST that does not land writes its reason to
+`<state>/hook-error.json`, the next hook that lands deletes the file, and the daemon polls it and
+logs
+
+```
+[hook] stop hook did NOT reach this daemon at 2026-08-30T…Z: fetch failed — turn-end and
+attention signals are being dropped
+```
+
+in the `daemon` window. If node itself cannot start, bash writes the same file, because that is the
+one failure the script above it cannot report.
+
+**One security nit fixed along the way**: `curl -H "x-jam-secret: …"` put the daemon's internal
+hook secret **on an argv**, where `ps` shows it to every user on the machine. It is read from the
+environment now, which is what AGENTS.md has always said (secrets on stdin or in a 0700 directory,
+never on an argv). It is the internal secret, not the friend-facing join token — it grants the
+loopback hook endpoints — and reaching it still required a local account on the host.
+
+`scripts/smoke-perm.mjs` polled `/health` with curl too; that is the harness rather than the
+product, and it is node's own `fetch` now as well.
+
+**What proves it**: `scripts/check-hook-post.mjs`, a fourth free non-smoke check, on every CI leg.
+It spawns the real `hooks.sh` the way Claude Code does (event on argv, payload on stdin) against an
+http server of its own — including one run with an **empty `PATH`**, which is the defect reproduced
+directly — asserts the path, the secret header and the payload arrive intact, that the marker file
+is removed when a hook lands and written when it does not, and then starts a bare `--daemon` and
+watches it log the dropped hook. Canaried against 0.23.5's `hooks.sh`: **all four delivery checks
+go red**, the second one saying `the daemon got 0 requests with no curl on PATH`.
+
 ## 0.23.5
 
 **Two portability defects, both of them Linux-shaped, and both found by running the thing on a

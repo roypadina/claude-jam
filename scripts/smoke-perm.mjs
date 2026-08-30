@@ -104,9 +104,15 @@ if (born.status !== 0) { console.error(`tmux: ${born.stderr}`); process.exit(1);
 
 // The peers cannot be built until the daemon is listening: a WebSocket refused at connect time
 // does not retry, and every later step would time out on a socket that never opened.
-await until('the daemon to answer /health', () => {
-  const r = spawnSync('curl', ['-s', '-m', '1', `http://127.0.0.1:${PORT}/health`], { encoding: 'utf8' });
-  return r.stdout?.includes('"ok"');
+// node's own fetch, not a curl on PATH — the harness half of the same portability nit
+// `waitForHealth()` fixed in 0.23.5: a container with no curl reported "the daemon did not
+// answer" while the daemon was up, listening and logging normally.
+await until('the daemon to answer /health', async () => {
+  try {
+    const r = await fetch(`http://127.0.0.1:${PORT}/health`,
+      { signal: AbortSignal.timeout(1000), headers: { connection: 'close' } });
+    return (await r.text()).includes('"ok"');
+  } catch { return false; }
 }, 30000).catch((e) => {
   console.error(`${e.message}\n--- the launcher said ---\n${pane(DRIVE)}`);
   for (const s of [SESSION, DRIVE]) tmux('kill-session', '-t', s);

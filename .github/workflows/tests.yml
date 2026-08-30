@@ -58,6 +58,14 @@ jobs:
       # answers), and on macOS it asserts the opposite direction: a machine that HAS dns-sd must
       # not be refused. Free — JAM_DNSSD points at nothing, so nothing is ever spawned.
       - run: node scripts/check-discovery-refusal.mjs
+      # 0.23.6: the stop/notification hooks used to POST with curl, so a box without one ran a jam
+      # that looked normal while every idle signal and every turn-end nudge was dropped in silence.
+      # This spawns the REAL hooks.sh the way Claude Code does (event on argv, payload on stdin),
+      # against an http server in its own process — including one run with an EMPTY PATH, which is
+      # the defect reproduced directly — and then starts a bare `--daemon` and watches it log a
+      # dropped hook. No tmux, no claude, no network off loopback. Skips whole on Windows, which has
+      # no jam host to run a bash hook.
+      - run: node scripts/check-hook-post.mjs
       # 0.23.3: what the Linux sound path actually resolves to on a real Linux box. PRINTED, not
       # asserted — a runner with no freedesktop sound theme correctly resolves to silence, and the
       # same line on a Linux DESKTOP is what discharges the rest of that deferral. Same discipline
