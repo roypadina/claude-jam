@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### The hook secret was the un-scrubbed sibling of `host.key`
+
+Also from the 2026-08-30 review. v0.34 established that **any participant can ask claude to read a
+file in the state dir**, and closed that route for `host.key` by making it a scrub needle on the
+mirror rows, the transcript funnel and `/export`. The daemon's *other* host-level credential got
+none of that treatment.
+
+`JAM_HOOK_SECRET` authenticates `POST /admit`, `/end`, `/invite`, `/remote`, `/peer/dispatch` and
+every `/hook/*`, and it is written to `<state>/session.json` as the **lower-case** field
+`"secret"` — the one shape `maskSecrets` deliberately refuses to match, because its `.env` rule is
+upper-case-only so it does not eat prose. So the exact route v0.34 documents leaked this one
+instead. Measured on a real jam: a guest's mirror frame came back carrying
+
+```
+> "secret": "HOOKSECRETcanary1234"
+```
+
+in clear, on a screen where the join token and the 64-hex host key on the adjacent rows were both
+masked (`[token removed]`, `[host key removed]`). The `JAM_HOOK_SECRET=…` env form *was* masked,
+which is what made the gap easy to miss.
+
+And the secret is sufficient on its own — no `host.key`, no join token. Against a throwaway jam:
+`POST /invite {"op":"new","name":"Mallory"}` with only `x-jam-secret` returned `200` and a working
+`cjam1_…` invite link, and `POST /end` returned `200` and the jam was gone. The `localSocket` gate
+still holds (the same POST with `x-forwarded-for` got `403 loopback only`, so the cloudflared path
+is shut by v0.34's F1 fix) — but loopback is not a hard boundary for a guest on the `ssh -L
+7777:127.0.0.1:7777` tunnel the README itself recommends.
+
+Fixed by threading the secret as a third needle through the four funnels that already carry the
+other two: `scrubSecrets`, `scrubRowJoins` (so a wrapped secret is caught — 24 characters wraps on
+an 80-column pane 29% of the time), `sanitizeFrameRow` and `stripTokenBlock`. The mirror row now
+reads `"secret": "[hook secret removed]"`.
+
+**Not fixed, and left for a decision:** whether `session.json` should carry the secret at all.
+`claude-jam end` reads it from there, but `host.key` — 0600, never written anywhere else, already
+a scrub needle — could authenticate those endpoints instead, which would delete the leak class
+rather than masking it. That changes the auth model of five HTTP endpoints, so it is Roy's call.
+
 ### The browser view was never actually read-only — two ways
 
 Found by the 2026-08-30 adversarial review of `--view`, the surface documented "read-only" in
