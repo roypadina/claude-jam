@@ -1171,6 +1171,17 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   moved (`clipboardPngMac()` was extracted so both platforms share one tail), which is what
   `smoke-xfer` step "a clipboard PNG round-trips" covers. Prove: `smoke-ink` + `smoke-xfer` at the
   next release gate.
+- 2026-08-30 · **0.23.5: seventeen of the nineteen suites were not re-run.** What ran, on BOTH
+  platforms and both with and without `CI=true`: the unit suite (**459 tests, 456 pass, 3 skipped,
+  0 fail**), `smoke-adopt` (the suite that owns the changed read path — 16/16 on macOS/3.7c and
+  16/16 in the 3.3a container) and `smoke-lifecycle` (the suite that launches real jams through
+  `waitForHealth` — 19/19 on both). The judgement: the diff is one pure function's INPUT SHAPE
+  (`parsePaneInfo` takes an array of per-field stdouts instead of one joined string), its one caller
+  in `sessions.mjs`, and the health poll in `host.mjs`. Nothing in the frame pipeline, the WS
+  admission path, the trust boundary, transfers, invites, discovery, the peer executor or either
+  client was touched, and every jam any suite starts goes through `waitForHealth`, so a regression
+  there would have shown as a dead suite rather than a subtle one. Prove: the full sweep at the
+  release gate.
 
 ## The 2026-08-30 vacuity audit — every suite, for tests that cannot fail
 
