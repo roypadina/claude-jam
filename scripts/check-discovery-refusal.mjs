@@ -96,9 +96,10 @@ if (process.platform === 'darwin') {
     console.log(`      NOTE  this Linux box HAS dns-sd at ${native.bin} (avahi's compat package), so `
       + 'the native path here is the working one, not the refusing one');
   } else {
-    check('Linux: the native answer is the documented refusal, naming avahi-utils as the fix', () => {
+    check('Linux: the native answer is the documented refusal, and it says what DOES work', () => {
       ok(native.why === DNSSD_MISSING, `the refusal is not DNSSD_MISSING: ${native.why}`);
-      ok(/avahi-utils/.test(native.why), 'the message does not say how to get one on Linux');
+      // Not "install avahi-utils": measured 2026-08-30, that package provides no dns-sd at all.
+      ok(/invite link/.test(native.why), 'the message does not say what to do instead');
       const { status, out } = find(['--json'], process.env); // no override: the real thing
       ok(status === 1, `native \`find --json\` exited ${status}, wanted 1\n${out}`);
       const parsed = JSON.parse(out);

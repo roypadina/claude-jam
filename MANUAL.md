@@ -411,10 +411,13 @@ If somebody asks **"how do I find Roy's jam?"**, this is the answer.
   - **`claude-jam find` REFUSES** rather than reporting an empty network, and exits non-zero
     (`--json` gives `{"ok": false, "error": …}`). *Nobody is hosting* and *this machine cannot look*
     are different answers, and it will not conflate them.
-- **On Linux there is normally no `dns-sd` at all, so discovery is unsupported there** — it is
-  Apple's Bonjour CLI, and the avahi-native path was deliberately not built. `avahi-utils` provides
-  a compatible `dns-sd` on most distributions and is the whole fix; `JAM_DNSSD=<path>` points at one
-  somewhere else. Nothing else about hosting or joining from Linux is affected.
+- **LAN discovery is macOS-only.** `dns-sd` is Apple's Bonjour CLI, shipped in `/usr/bin` on macOS
+  and not packaged for Linux or Windows. Do not tell anybody to install `avahi-utils`: measured
+  2026-08-30, it provides `avahi-browse` / `avahi-publish-service` and **no `dns-sd`**, so it does
+  not help. The avahi-native path was deliberately not built (a different output format, and no
+  avahi anywhere on this project to verify a parser against). `JAM_DNSSD=<path>` points at a
+  compatible binary for somebody who has built one. Nothing else about hosting or joining from
+  Linux or Windows is affected — an invite link or a `ws://` address is the way in.
 
 ## Joining: invite link, token, or knock
 
