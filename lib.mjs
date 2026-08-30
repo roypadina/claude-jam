@@ -5656,3 +5656,54 @@ export function winSoundPlan(kind, exists = () => false, env = {}) {
     ? { mode: 'wav', file, args: [...PS_ARGS, PS_PLAY_WAV], env: { [PS_ENV_FILE]: file } }
     : { mode: 'beep', file: null, args: [...PS_ARGS, winBeepScript(k)], env: {} };
 }
+
+// ------------------------------------------------- which terminal, and which keyboard, on Windows --
+// The client draws a full-screen mirror in the ALTERNATE screen buffer and reads raw keys. The
+// legacy Windows console (`cmd.exe` on conhost) has neither by default: no alternate buffer, and
+// VT processing off unless a program turns it on. Running there does not produce an error, it
+// produces a screen full of `←[2J←[H` — which reads as "this tool is broken" rather than as
+// "wrong terminal", and costs the person their session to find out.
+//
+// So it is refused, and the refusal NAMES the terminal to use. Windows Terminal ships with
+// Windows 11 and is a free Store install on Windows 10; it sets WT_SESSION, which is how it is
+// recognised. mintty (Git Bash), ConEmu and VS Code's terminal all announce themselves too, and
+// they are all fine. JAM_ASSUME_ANSI is the escape hatch for a terminal none of this knows —
+// an internal JAM_* variable like the rest, and the message says it, because a person who is
+// certain should not have to read the source to get past a guess.
+export const WINDOWS_TERMINAL_HINT = 'claude-jam draws a full-screen view and needs a terminal '
+  + 'with ANSI and an alternate screen buffer. This looks like the legacy Windows console '
+  + '(cmd.exe on conhost), which has neither, and would give you a screen of escape codes rather '
+  + 'than a jam.\n'
+  + '  Use Windows Terminal — it ships with Windows 11, and is a free install from the Microsoft '
+  + 'Store on Windows 10. Git Bash (mintty), ConEmu and the VS Code terminal work too.\n'
+  + '  If you are certain this terminal handles ANSI, JAM_ASSUME_ANSI=1 skips this check.';
+
+export function terminalSupport(platform = process.platform, env = {}) {
+  if (platform !== 'win32') return { ok: true, why: null, terminal: null };
+  // Every one of these is set by a terminal that speaks VT. WT_SESSION / WT_PROFILE_ID are
+  // Windows Terminal's; TERM is set by mintty, cygwin and anything unix-flavoured; TERM_PROGRAM
+  // by VS Code and Hyper; ConEmuANSI=ON by ConEmu when its ANSI layer is on (and OFF when it is
+  // not, which is exactly the case that must not pass).
+  const named = [
+    ['WT_SESSION', 'Windows Terminal'], ['WT_PROFILE_ID', 'Windows Terminal'],
+    ['TERM_PROGRAM', null], ['TERM', null],
+  ];
+  for (const [key, label] of named) {
+    const v = String(env[key] ?? '').trim();
+    if (v && v !== 'dumb') return { ok: true, why: null, terminal: label || v };
+  }
+  if (String(env.ConEmuANSI ?? '').trim().toUpperCase() === 'ON') return { ok: true, why: null, terminal: 'ConEmu' };
+  if (String(env.JAM_ASSUME_ANSI ?? '').trim()) return { ok: true, why: null, terminal: 'JAM_ASSUME_ANSI' };
+  return { ok: false, why: WINDOWS_TERMINAL_HINT, terminal: null };
+}
+
+// F3's attach runs `tmux attach` on the machine the CLIENT is on. That is always the machine the
+// daemon is on — being the host requires locality (see hostGate), and a relayed socket is never
+// the host — and there is no Windows host (W3, dropped 2026-08-29). So a Windows client is a
+// guest, it has no tmux, and F3 must say that instead of spawning something that is not there.
+// The decision lives here because it is a decision; the client only obeys it.
+export function canAttachTmux(platform = process.platform) { return platform !== 'win32'; }
+export const NO_TMUX_ATTACH = 'F3 attaches the real TUI through tmux, on the machine running it — '
+  + 'and this one is Windows, which has no tmux and cannot host a jam. claude\'s screen is on the '
+  + 'host\'s machine: F2 shows it live, /answer answers it, and a /command goes to the host for '
+  + 'approval.';

@@ -107,6 +107,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   WIN_APPDATA_FALLBACK, aclUser, aclArgs, parseIcaclsPrincipals,
   PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, PS_PLAY_WAV,
   WIN_MEDIA_SOUNDS, WIN_BEEPS, winBeepScript, winSoundPlan,
+  terminalSupport, WINDOWS_TERMINAL_HINT, canAttachTmux, NO_TMUX_ATTACH,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -4370,6 +4371,87 @@ test('v0.32 W1 clipboardImage on Windows refuses cleanly when there is no image'
   }
   const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('claude-jam-paste-')).length;
   assert.equal(after, before, 'the mkdtemp directory must be gone whether it worked or not');
+});
+
+test('v0.32 W1 terminalSupport: Windows Terminal in, the legacy console out, by name', () => {
+  // Nothing changes off Windows — this check must never be able to refuse a mac or a Linux box.
+  for (const platform of ['darwin', 'linux', 'freebsd']) {
+    assert.deepEqual(terminalSupport(platform, {}), { ok: true, why: null, terminal: null });
+  }
+  // Windows Terminal, recognised the way it identifies itself.
+  assert.equal(terminalSupport('win32', { WT_SESSION: 'a-guid' }).ok, true);
+  assert.equal(terminalSupport('win32', { WT_SESSION: 'a-guid' }).terminal, 'Windows Terminal');
+  assert.equal(terminalSupport('win32', { WT_PROFILE_ID: '{guid}' }).terminal, 'Windows Terminal');
+  // The other terminals that do work, and they name themselves in the answer so a bug report
+  // says which one it was.
+  assert.equal(terminalSupport('win32', { TERM: 'xterm-256color' }).terminal, 'xterm-256color');
+  assert.equal(terminalSupport('win32', { TERM_PROGRAM: 'vscode' }).terminal, 'vscode');
+  assert.equal(terminalSupport('win32', { ConEmuANSI: 'ON' }).terminal, 'ConEmu');
+  assert.equal(terminalSupport('win32', { ConEmuANSI: 'on' }).terminal, 'ConEmu');
+  // The bare legacy console: nothing set at all. This is the case the whole check exists for.
+  const bad = terminalSupport('win32', {});
+  assert.equal(bad.ok, false);
+  assert.equal(bad.terminal, null);
+  assert.equal(bad.why, WINDOWS_TERMINAL_HINT); // one message, so the docs and the client agree
+  // And the refusal has to be USEFUL: what is wrong, which terminal to use, where to get it,
+  // and the way past it for somebody who knows better.
+  assert.match(bad.why, /Windows Terminal/);
+  assert.match(bad.why, /Microsoft Store/);
+  assert.match(bad.why, /cmd\.exe/);
+  assert.match(bad.why, /JAM_ASSUME_ANSI/);
+  // ConEmu with its ANSI layer OFF is exactly the garbled screen this refuses, and 'dumb' is
+  // the terminfo way of saying the same thing. Neither may sneak through on truthiness.
+  assert.equal(terminalSupport('win32', { ConEmuANSI: 'OFF' }).ok, false);
+  assert.equal(terminalSupport('win32', { TERM: 'dumb' }).ok, false);
+  assert.equal(terminalSupport('win32', { TERM: '   ' }).ok, false);
+  assert.equal(terminalSupport('win32', { WT_SESSION: '' }).ok, false);
+  // The escape hatch works, and it is an internal JAM_* like the rest.
+  assert.equal(terminalSupport('win32', { JAM_ASSUME_ANSI: '1' }).ok, true);
+  assert.equal(terminalSupport('win32', { JAM_ASSUME_ANSI: '1' }).terminal, 'JAM_ASSUME_ANSI');
+  assert.equal(terminalSupport('win32', { JAM_ASSUME_ANSI: '' }).ok, false);
+});
+
+test('v0.32 W1 F3 is not offered on Windows — there is no tmux on that machine to attach to', () => {
+  assert.equal(canAttachTmux('darwin'), true);
+  assert.equal(canAttachTmux('linux'), true);
+  assert.equal(canAttachTmux('win32'), false);
+  // The refusal says where claude's screen actually IS and what does work instead, because "F3
+  // does nothing" is otherwise indistinguishable from a broken client.
+  assert.match(NO_TMUX_ATTACH, /tmux/);
+  assert.match(NO_TMUX_ATTACH, /Windows/);
+  assert.match(NO_TMUX_ATTACH, /F2/);
+  // And the block a Windows client is actually shown never mentions F3: it is a GUEST block,
+  // because being the host needs the key file AND locality, and no jam is hosted on Windows.
+  const guest = onboardingLines('Dana', false).join('\n');
+  assert.ok(!/\bF3\b/.test(guest), guest);
+  assert.match(onboardingLines('Roy', true).join('\n'), /\bF3\b/); // the host's, on a host platform
+});
+
+test('v0.32 W1 the keys Windows Terminal sends decode to the actions they mean', () => {
+  // TABLE FROM DOCUMENTATION, NOT FROM A CAPTURE: nobody on this project has pressed a key in
+  // Windows Terminal. What is asserted is that jam's decoder handles the xterm-compatible
+  // spellings WT is documented to send — so if the table is right, the keys work, and if a key
+  // turns out to send something else, this is the list to add it to. TESTING.md records the
+  // capture that would settle it.
+  const wt = [
+    ['\x1bOQ', 'mirror'], // F2 — SS3, which is what WT sends for F1-F4
+    ['\x1b[5~', 'pageup'], ['\x1b[6~', 'pagedown'],
+    ['\x1b[1;2A', 'lineup'], ['\x1b[1;2B', 'linedown'], // Shift+arrow
+    ['\x1b[1;5A', 'lineup'], ['\x1b[1;5B', 'linedown'], // Ctrl+arrow
+    ['\x1b[A', 'histprev'], ['\x1b[B', 'histnext'], // plain arrows: input recall
+    ['\x1b[H', 'scrolltop'], ['\x1b[F', 'scrolllive'], // Home / End
+    ['\x1b[13;2u', 'newline'], // Shift+Enter, once it is BOUND to CSI-u in settings.json
+  ];
+  for (const [seq, action] of wt) {
+    assert.deepEqual(extractKeys(seq), { keys: [action], text: '', hold: '' }, JSON.stringify(seq));
+  }
+  // Esc is passed through as itself and never swallowed — the one key a held tail must not eat.
+  assert.deepEqual(extractKeys('\x1b'), { keys: [], text: '\x1b', hold: '' });
+  // Windows Terminal's DEFAULT Shift+Enter is a bare CR, indistinguishable from Enter, which is
+  // why the docs point at `\` and at the settings.json binding rather than promising the key.
+  assert.deepEqual(extractKeys('\r'), { keys: [], text: '\r', hold: '' });
+  // A chunk that arrives split mid-sequence is held, not typed — the same rule as everywhere.
+  assert.deepEqual(extractKeys('\x1b[1;2'), { keys: [], text: '', hold: '\x1b[1;2' });
 });
 
 // The one Windows-ONLY test in the suite, and it is here because it is the only way this

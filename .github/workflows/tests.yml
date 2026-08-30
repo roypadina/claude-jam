@@ -31,6 +31,11 @@ jobs:
           node-version: '22' # package.json engines says >=22; this is the floor, so test the floor
       - run: npm ci
       - run: node --test test.mjs
+      # The one end-to-end check that needs no tmux, no daemon and no claude: it spawns the real
+      # client entry point with a controlled environment and asserts the terminal gate refuses a
+      # bare Windows console and lets Windows Terminal through. A pure-function test cannot see
+      # whether the client ASKS correctly — this found exactly that bug on its first run.
+      - run: node scripts/check-terminal-gate.mjs
       # A client is the whole Windows story, and `npm i -g claude-jam` is how it gets there — so
       # the tarball is built on both platforms too. It must not need tmux or claude to pack.
       - run: npm pack --dry-run
