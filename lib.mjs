@@ -4288,7 +4288,12 @@ export function discoveredJams(records = []) {
   });
 }
 
-export const FIND_COLS = ['#', 'jam', 'host', 'access', 'view', 'address'];
+// v0.23.1: the ADDRESS leads, because it is the only field on this listing an attacker cannot
+// forge into a match. Every other column comes out of a TXT record anybody on the network can
+// write — reproduced 2026-08-30: a `dns-sd -R` of one's own, claiming `jam=<the real name>`,
+// `host=<the real host>`, `access=token`, `view=yes`, listed beside the real jam and identical to
+// it in every column except this one.
+export const FIND_COLS = ['#', 'address', 'jam', 'host', 'access', 'view'];
 export const FIND_EMPTY = 'no jams on this network — mDNS is link-local, so this only ever sees '
   + 'the LAN you are on. A jam started with --no-announce is there but silent, and a jam behind '
   + 'a tunnel is reached by its URL rather than by discovery.';
@@ -4296,20 +4301,33 @@ export const FIND_EMPTY = 'no jams on this network — mDNS is link-local, so th
 // and that difference is the whole security story of this feature.
 export const FIND_GATE = 'finding a jam is not being let into it: a knock still waits for the '
   + 'host, a token jam still wants its token, and an invite-only jam still wants a link.';
+// The OTHER direction, which is the one that bites, and which this listing used to say nothing
+// about while printing `--token <token>` under every token jam. An mDNS advertisement is
+// unauthenticated by construction: there is no signature, no identity and nothing to check, so
+// anybody on this network can publish a jam that looks exactly like somebody else's. Discovery is
+// therefore an ADDRESS HINT and never a destination for a credential.
+export const FIND_SPOOF = 'and a jam you found may not be the jam you think: an advertisement is '
+  + 'unauthenticated — anybody on this network can publish one — so the address above is the only '
+  + 'field that cannot be faked. Confirm it with the host before you type a token into it, or ask '
+  + 'for an invite link (cjam1_…), which is bound to the host\'s own address and is useless to '
+  + 'anybody else.';
 
 export function findTable(rows = [], { bin = 'claude-jam' } = {}) {
   if (!rows.length) return FIND_EMPTY;
-  const cells = [FIND_COLS, ...rows.map((r, i) => [String(i + 1), r.jam, r.host,
-    r.access, r.view ? 'yes' : 'no', r.address])];
+  const cells = [FIND_COLS, ...rows.map((r, i) => [String(i + 1), r.address, r.jam, r.host,
+    r.access, r.view ? 'yes' : 'no'])];
   const w = FIND_COLS.map((_, c) => Math.max(...cells.map((row) => String(row[c] ?? '').length)));
   const out = cells.map((row) => row.map((v, c) => String(v ?? '')
     .padEnd(c === row.length - 1 ? 0 : w[c])).join(' ').trimEnd());
-  // The command per row, so the listing is the thing that TEACHES the join — the same promise
-  // the launcher menu makes about the command line.
-  const how = rows.map((r) => `  ${r.jam}: ${bin} join ${r.url} --name <you>`
-    + (r.access === 'token' ? ' --token <token>' : '')
+  // The command per row, so the listing is the thing that TEACHES the join. It NEVER teaches
+  // `--token <token>` any more: a printed command is an instruction, and instructing somebody to
+  // send their shared token to an address that came out of an unauthenticated broadcast is the
+  // vulnerability, whatever the human does next. A token jam gets pointed at an invite link
+  // instead, which cannot be replayed against an attacker's host.
+  const how = rows.map((r) => `  ${r.address}: ${bin} join ${r.url} --name <you>`
+    + (r.access === 'token' ? '   (token jam: ask the host for an invite link, or confirm this address with them first)' : '')
     + (r.access === 'invite' ? '   (invite-only: ask for a link instead)' : ''));
-  return [...out, '', ...how, '', FIND_GATE].join('\n');
+  return [...out, '', ...how, '', FIND_GATE, FIND_SPOOF].join('\n');
 }
 
 // `claude-jam find --json`: the rows as measured, for scripting. Same facts, no layout.
@@ -4328,7 +4346,10 @@ export function joinRows(found = [], { bin = 'claude-jam' } = {}) {
   const rows = found.map((r, i) => ({
     value: `found:${i}`,
     row: r,
-    label: `${r.jam}  — ${r.host} · ${r.access}${r.view ? ' · view' : ''} · ${r.address}`,
+    // v0.23.1: the address leads here too. Two advertisements can carry the same jam name and the
+    // same host name — one of them from anybody on the network — and this is the field that tells
+    // them apart, so it is not the last thing on the line.
+    label: `${r.address}  — ${r.jam} · ${r.host} · ${r.access}${r.view ? ' · view' : ''}`,
   }));
   rows.push({ value: JOIN_PASTE_VALUE, row: null,
     label: `paste a link or URL  — an invite link (cjam1_…) or ws://…  (${bin} join <link>)` });
@@ -4346,10 +4367,20 @@ export function joinPlanFor(row = {}, { name = '', token = '' } = {}) {
   }
   if (!validName(name)) return { ok: false, needs: 'name', error: 'a name is 1-24 chars of letters, digits, space, _ or -' };
   if (access === 'token' && !validTokenValue(token)) {
-    return { ok: false, needs: 'token', error: `${row.jam} wants its shared token: 8-64 chars of [A-Za-z0-9_-]` };
+    // v0.23.1: the one moment a human is about to hand a credential to an address that came out
+    // of an unauthenticated broadcast. It says WHERE the token is going, because the address is
+    // the only thing about a discovered row that cannot be forged (see FIND_SPOOF).
+    return { ok: false, needs: 'token',
+      error: `${row.jam} wants its shared token (8-64 of [A-Za-z0-9_-]) — and it will be sent to `
+        + `${row.address}, an address this jam broadcast on the network rather than proved. Check `
+        + 'it with the host, or ask for an invite link instead.' };
   }
   const argv = ['join', row.url, '--name', name, ...(token ? ['--token', token] : [])];
-  return { ok: true, argv, command: hostCommandLine(argv), access };
+  // `command` is for SHOWING, so the token never appears in it — the launcher prints this line and
+  // a terminal is a place things get read over a shoulder and scrolled back to. `argv` is what
+  // actually runs and carries the real value.
+  const shown = ['join', row.url, '--name', name, ...(token ? ['--token', '<your token>'] : [])];
+  return { ok: true, argv, command: hostCommandLine(shown), access };
 }
 
 // ================= v0.25: audible join events, and who gets interrupted ====

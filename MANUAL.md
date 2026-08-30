@@ -360,8 +360,8 @@ If somebody asks **"how do I find Roy's jam?"**, this is the answer.
   never used to build a path. It is NOT the same as `--tmux <name>`, which is the tmux session
   and the identifier `claude-jam end` takes.
 - **`claude-jam find`** (or `claude-jam discover`) lists the jams announcing themselves on this
-  network — name, host, access mode, whether a browser view exists, and the address — plus the
-  exact join command for each row. `--json` for a script.
+  network — **the address first**, then name, host, access mode and whether a browser view exists
+  — plus a join command for each row. `--json` for a script.
 - **`claude-jam join` with no argument** opens the launcher's Join screen, which is that same
   list: pick a jam, or take the last row, **paste a link or URL**, which never disappears
   (a link is still how you join a jam that is not on your LAN, or one that is deliberately
@@ -370,6 +370,21 @@ If somebody asks **"how do I find Roy's jam?"**, this is the answer.
   and where it is. Every door is exactly as shut as it was: a knock jam still waits for the host
   to accept you, a token jam still asks you for the token, and an invite-only jam says so and
   sends you back to the paste row. Picking a jam fills in an address; it does not admit anybody.
+- **AND `find` DOES NOT AUTHENTICATE ANYBODY — this is the half that bites (v0.23.1).** An mDNS
+  advertisement is unauthenticated by construction: no signature, no identity, nothing to check.
+  **Anybody on the network can publish a jam that looks exactly like somebody else's** — measured
+  2026-08-30, an advertisement claiming another jam's name, another host's name, `access=token`
+  and `view=yes` listed beside the real one and matched it in every column but the address.
+  So, when asked:
+  - the **address is the only field that cannot be faked**, which is why it leads every row;
+  - `find` **never prints `--token <token>`** any more. A printed command is an instruction, and
+    instructing somebody to send their shared token to an address learned from a broadcast is the
+    whole vulnerability, whatever they do next;
+  - the safe path for a token jam is an **invite link** (`cjam1_…`): its secret is per-invite and
+    bound to the host's own addresses, so a look-alike host cannot replay one;
+  - if somebody joins by URL and types a token anyway, they should confirm the address with the
+    host out of band. The launcher's token field names the address the token will be sent to, and
+    the command it prints shows `<your token>` rather than the value.
 - **What is advertised, exactly.** Six fields: the jam name, the host's display name, eight
   characters of the session id, which kind of door it is (`knock`/`token`/`invite`), whether a
   browser view exists, and the version. **Never** the token, never an invite secret, never the
