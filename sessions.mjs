@@ -224,7 +224,28 @@ export async function listRows(tmpdir = stateDir()) {
     if (port == null) continue;
     const dir = path.join(tmpdir, base);
     const info = readSessionFile(dir);
-    if (!info) continue; // no session.json of jam's: not jam's to list, and never jam's to touch
+    if (!info) {
+      // v0.21.2 (campaign F5… F8): no session.json. It used to be skipped outright, which made a
+      // start that died between `mkdir` and claimSession() invisible to `sessions` and therefore
+      // un-removable by `clean` — a directory holding a token.json that nothing on the machine
+      // could find. It is LISTED now, and cleanable when nothing holds its port.
+      //
+      // Nothing is loosened by this. There is no session name here, so there is nothing for
+      // `claude-jam end` to resolve (resolveTarget only ever considers rows with a name) and
+      // nothing that could satisfy the v0.18 pair. `clean` removes a DIRECTORY; it has never
+      // killed a session and still does not.
+      //
+      // The port is the whole gate: a daemon started with `--daemon` legitimately has no
+      // session.json of its own — that is what every smoke in scripts/ runs — and while one is
+      // listening this is `no-session`, which `clean` never touches.
+      rows.push({
+        name: null, state: classifyJam({ known: false, portAlive: await portBusy(port) }),
+        adopt: null, port, viewPort: null, cwd: null, jamName: null, sessionId: null,
+        createdAt: null, participants: [], socket: TMUX_DEFAULT_SOCKET, ...relays(dir),
+        dir, info: null,
+      });
+      continue;
+    }
     const socket = info.socket || TMUX_DEFAULT_SOCKET;
     const tmuxAlive = hasSession(info.tmux, socket);
     const marker = tmuxAlive ? sessionMarker(info.tmux, socket) : null;
@@ -304,7 +325,7 @@ async function askLine(prompt) {
 function usage() {
   console.error('usage: claude-jam sessions [--json]      list claude-jam\'s own tmux sessions and state dirs\n'
     + '       claude-jam end [name] [--all]     end one jam (or every one, after confirming)\n'
-    + '       claude-jam clean [--yes]          remove orphan state dirs and nothing else\n'
+    + '       claude-jam clean [--yes]          remove orphan/incomplete state dirs and nothing else\n'
     + '       claude-jam invite <Name> [--uses N] [--expires 24h] [--jam NAME]   mint one link\n'
     + '       claude-jam invites [--json] [--jam NAME]                           list them\n'
     + '       claude-jam invite revoke <Name|id> [--jam NAME]                    take one back\n'
@@ -375,7 +396,7 @@ async function cmdClean(argv) {
   console.log('these state dirs have no tmux session and nothing listening on their port:');
   const now = Date.now();
   for (const r of doomed) {
-    console.log(`  ${r.dir}  (port ${r.port}, session ${String(r.sessionId || '').slice(0, 8) || '?'}`
+    console.log(`  ${r.dir}  (${r.state}, port ${r.port}, session ${String(r.sessionId || '').slice(0, 8) || '?'}`
       + `${r.createdAt ? `, ${uptimeText(now - r.createdAt)} old` : ''})`);
   }
   if (others.length) console.log(`leaving ${others.length} alone: ${others.map((r) => `${r.name || r.port} (${r.state})`).join(', ')}`);

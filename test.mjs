@@ -2490,12 +2490,61 @@ test('v0.18 classifyJam names every state, and only the orphan may be deleted', 
   assert.equal(classifyJam({ tmuxAlive: true, owned: false, portAlive: false }), 'foreign');
   assert.equal(classifyJam(), 'orphan');
   // v0.33: a sixth state, and it only ever replaces `live` — see the adopt tests below.
-  assert.deepEqual([...JAM_STATES].sort(), ['adopted', 'foreign', 'live', 'no-daemon', 'no-session', 'orphan']);
+  // v0.21.2: a seventh, for a state dir with no session.json at all — see the F8 test below.
+  assert.deepEqual([...JAM_STATES].sort(),
+    ['adopted', 'foreign', 'incomplete', 'live', 'no-daemon', 'no-session', 'orphan']);
   for (const state of JAM_STATES) {
-    assert.equal(cleanable({ state }), state === 'orphan', state);
+    assert.equal(cleanable({ state }), state === 'orphan' || state === 'incomplete', state);
     assert.equal(jamMark(state), state === 'live' || state === 'adopted' ? ' ' : '!', state);
   }
   assert.equal(cleanable(undefined), false);
+});
+
+test('F8 a state dir with no session.json is listed and cleanable — and nothing else changed', () => {
+  // Campaign F8: `$TMPDIR/claude-jam-7777` held a roster, settings and a token.json but no
+  // session.json, so listRows skipped it — invisible to `claude-jam sessions` and therefore
+  // un-removable by `claude-jam clean`, while still holding a join token. A start that died
+  // between making the directory and claiming a session left something nothing could find.
+  //
+  // `known: false` is "session.json never told us which session to look for", and when it is
+  // false the other three measurements are about nothing, so the port is the only fact there is.
+  assert.equal(classifyJam({ known: false, portAlive: false }), 'incomplete');
+  // Something IS listening: `no-session`, which clean never touches. This is not a corner —
+  // a daemon started with `--daemon` legitimately has no session.json, which is what every smoke
+  // in scripts/ runs, and deleting its state dir out from under it would break the running thing.
+  assert.equal(classifyJam({ known: false, portAlive: true }), 'no-session');
+  // The measurements that CANNOT apply must not be consulted: a stale tmuxAlive/owned pair from
+  // some other row must not turn an unknown dir into a live jam.
+  for (const o of [{ tmuxAlive: true, owned: true }, { tmuxAlive: true, owned: false }, { adopted: true }]) {
+    assert.equal(classifyJam({ known: false, portAlive: false, ...o }), 'incomplete', JSON.stringify(o));
+    assert.equal(classifyJam({ known: false, portAlive: true, ...o }), 'no-session', JSON.stringify(o));
+  }
+  // `known` defaults to true, so every existing caller and every state above is unchanged.
+  assert.equal(classifyJam({ tmuxAlive: true, owned: true, portAlive: true }), 'live');
+
+  // What it is allowed to do: a DIRECTORY may go. What it is not: an incomplete row carries no
+  // session name, and resolveTarget only ever considers rows that have one — so there is nothing
+  // for `claude-jam end` to resolve and the v0.18 ownership pair is never consulted, let alone
+  // weakened.
+  assert.equal(cleanable({ state: 'incomplete' }), true);
+  assert.equal(cleanable({ state: 'no-session' }), false);
+  const rows = [{ name: null, state: 'incomplete', port: 7777, dir: '/tmp/claude-jam-7777' },
+    { name: 'jamtest', state: 'live', port: 7799, dir: '/tmp/claude-jam-7799' }];
+  assert.deepEqual(resolveTarget(rows), { ok: true, row: rows[1] },
+    'the only END-able row is the one with a name, so `end` with no argument is unambiguous');
+  assert.equal(resolveTarget(rows, '7777').ok, false, 'and it cannot be named either');
+
+  // It is listed, it is marked, and the table says what it is and what to do about it.
+  const table = sessionsTable(rows, Date.now());
+  assert.match(table, /incomplete/);
+  assert.match(table, /no session\.json/);
+  assert.match(table, /claude-jam clean/);
+  // …and --json says so too, for anything scripting this.
+  const j = sessionsJson(rows, Date.now());
+  assert.equal(j[0].state, 'incomplete');
+  assert.equal(j[0].cleanable, true);
+  assert.equal(j[0].name, null);
+  assert.equal(j[0].state_dir, '/tmp/claude-jam-7777');
 });
 
 test('v0.18 resolveTarget: one jam is unambiguous, several is a picker, a name is exact', () => {

@@ -462,15 +462,18 @@ claude-jam owns the tmux sessions it creates, so nobody has to remember a `tmux 
 - **`claude-jam host --attach`** reopens the host's client on a jam that is already running.
 - **`claude-jam sessions`** (or `claude-jam ls`) lists claude-jam's own sessions: name, port, state, uptime, session
   id, who is here, which relays are on, cwd. `claude-jam sessions --json` for scripting. A `!` marks
-  anything unhealthy — an `orphan` state dir whose tmux session is gone, or a session whose
-  daemon has died (`no-daemon`).
+  anything unhealthy — an `orphan` state dir whose tmux session is gone, a session whose daemon
+  has died (`no-daemon`), or an `incomplete` state dir with no `session.json` at all, left by a
+  start that died before it claimed a session.
 - **`claude-jam end [name]`** ends one jam: every client is told (they print `<Host> ended the jam` and
   exit), the daemon stops its children (ttyd, the tunnel, popups), the tmux session is killed and
   the state dir removed. No name and exactly one jam → that one; several → a numbered picker.
   `claude-jam kill` is the same command. **`/end` in the host's client** does the same thing from inside,
   after asking `really end this jam for everyone? [y/N]`.
-- **`claude-jam clean`** removes leftover state dirs whose session is gone, and only those, after
-  listing exactly what it will delete.
+- **`claude-jam clean`** removes leftover state dirs — `orphan` (the session it named is gone) and
+  `incomplete` (it never named one, and nothing holds its port) — and only those, after listing
+  exactly what it will delete. It removes *directories*; it has never ended a tmux session and an
+  `incomplete` dir has no session name to end in the first place.
 - **claude-jam will only ever end a session it created.** It stamps `@claude-jam-owned <state-dir>` on the tmux
   session and writes `session.json` into that dir; ending anything requires that pair to line up
   for that exact name. A tmux session of the user's own — or one carrying a hand-written marker —

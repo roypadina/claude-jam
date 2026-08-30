@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Fixed — a state dir with no `session.json` was invisible to `sessions` and `clean` (campaign F8)
+
+`listRows` skipped any `claude-jam-<port>` directory that held no `session.json`, so a start that
+died between making the directory and claiming a session left something that `claude-jam sessions`
+could not show and `claude-jam clean` therefore could not remove — while it was still holding a
+`token.json`. There is one such directory on the machine this was found on.
+
+Those rows are listed now, as a new state `incomplete`, and `clean` removes them. Nothing about
+ending a jam changed: an `incomplete` row has no session name, so there is nothing for
+`claude-jam end` to resolve and the v0.18 ownership pair (the tmux marker plus a `session.json`
+naming the same session) is still the only thing that authorises a kill. `clean` removes
+directories and never sessions.
+
+The port is the whole gate. While something is listening the row reads `no-session` and clean
+leaves it alone — a daemon started with `--daemon` legitimately has no `session.json` of its own,
+which is what every smoke in `scripts/` runs.
+
 ### Fixed — Windows device names passed the upload filter (campaign F5)
 
 `con`, `prn`, `aux`, `nul`, `com1`…`com9` and `lpt1`…`lpt9` went through `safeBaseName`

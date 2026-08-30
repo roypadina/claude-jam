@@ -10,7 +10,8 @@
 //   1   `claude-jam sessions` lists a live jam and an orphan state dir, and NOT the plain decoy
 //   2   `claude-jam end` broadcasts {t:'ending'} (a scripted client sees it and exits 0), kills the
 //       children (daemon, claude, the ttyd and cloudflared stand-ins) and removes the state dir
-//   3   `claude-jam clean` deletes the orphan and leaves the live jam's state dir alone
+//   3   `claude-jam clean` deletes the orphan AND a state dir with no session.json (v0.21.2), and
+//       leaves the live jam's state dir alone
 //   4   `claude-jam host` on a taken name drives all four choices: [c]ancel, [n]ew, [a]ttach, [e]nd
 //   5   the exit prompt: `k` keeps the jam (and prints the way back), `e` ends it
 //   6   `/end` in the host client: `n` ends nothing, `y` ends it for everybody
@@ -41,7 +42,10 @@ const TMUX = process.env.JAM_TMUX_BIN || 'tmux';
 const TOKEN = 'lifecyclesmoketoken';
 // Ports of this smoke's own: clear of jam's 7777, the shared smokes' 7799/7801,
 // smoke-transport's 7811-7819, smoke-replay's 7823/7825 and smoke-perm's 7831.
-const P = { main: 7851, orphan: 7853, live: 7855 };
+// `incomplete` is BELOW the others on purpose: nothing ever listens on it (it names a planted
+// state dir, not a jam), and step 4's [n]ew session auto-picks the next free port UPWARD from
+// `live` — 7857 — so a port under the range can never be the one a real jam lands on.
+const P = { main: 7851, orphan: 7853, live: 7855, incomplete: 7849 };
 // Every tmux session this script creates, and the only ones it ever kills.
 const S = { jam: 'jamlife', two: 'jamlifelive-2', live: 'jamlifelive', plain: 'jamlifeplain',
   decoy: 'jamlifedecoy', drive: 'jamlifedrive' };
@@ -424,13 +428,27 @@ try {
     await until('its daemon to notice', () => !running(orphan.pid), 10000);
     // …and a second, healthy jam alongside it, which must come out of this untouched.
     const live = launch(S.live, P.live);
+    // v0.21.2 (campaign F8): the OTHER leftover — a state dir jam made and never wrote a
+    // session.json into, because the start died in between. It used to be skipped by listRows
+    // outright, so it could be neither listed nor cleaned while still holding a token.json.
+    // Planted in this smoke's OWN TMPDIR, on a port nothing is listening on, and removed by the
+    // teardown's exact-path loop like every other state dir here.
+    fs.mkdirSync(stateDir(P.incomplete), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(stateDir(P.incomplete), 'token.json'),
+      `${JSON.stringify({ token: 'left-behind-by-a-start-that-died' }, null, 2)}\n`);
     const rows = jamJson();
     console.log(jam('sessions').out.split('\n').map((l) => `      ${l}`).join('\n'));
     const o = rows.find((r) => r.port === P.orphan);
     const l = rows.find((r) => r.port === P.live);
+    const inc = rows.find((r) => r.port === P.incomplete);
     if (o?.state !== 'orphan' || !o.cleanable) throw new Error(`the orphan is ${JSON.stringify(o)}`);
     if (o.name !== null) throw new Error('an orphan has no tmux session, so it has no name');
     if (l?.state !== 'live' || l.cleanable) throw new Error(`the live jam is ${JSON.stringify(l)}`);
+    if (inc?.state !== 'incomplete' || !inc.cleanable) throw new Error(`the incomplete dir is ${JSON.stringify(inc)}`);
+    if (inc.name !== null || inc.sessionId !== null) throw new Error('there is no session.json, so there is no name and no session id');
+    // And it cannot be ENDED — no name to resolve, so the v0.18 pair is never even reached.
+    const cannot = jam('end', String(P.incomplete));
+    if (cannot.code === 0) throw new Error(`\`claude-jam end ${P.incomplete}\` should have refused`);
     // Without an answer, nothing is deleted: stdin is not a tty here, so the question cannot be
     // put, and `claude-jam clean` treats that as no.
     const asked = jam('clean');
@@ -438,11 +456,13 @@ try {
     if (asked.code === 0) throw new Error('clean deleted something with nobody to confirm it');
     if (!/nothing deleted/.test(asked.out)) throw new Error('clean did not say it was leaving things alone');
     if (!new RegExp(stateDir(P.orphan)).test(asked.out)) throw new Error('the orphan was not offered');
+    if (!new RegExp(stateDir(P.incomplete)).test(asked.out)) throw new Error('the incomplete dir was not offered');
     if (new RegExp(`${stateDir(P.live)}\\b`).test(asked.out.split('leaving')[0])) throw new Error('the live jam was on the delete list');
     const done = jam('clean', '--yes');
     console.log(done.out.split('\n').filter(Boolean).map((l2) => `      ${l2}`).join('\n'));
     if (done.code !== 0) throw new Error(`clean --yes exited ${done.code}`);
     if (fs.existsSync(stateDir(P.orphan))) throw new Error('the orphan state dir is still there');
+    if (fs.existsSync(stateDir(P.incomplete))) throw new Error('the incomplete state dir is still there');
     if (!fs.existsSync(stateDir(P.live))) throw new Error('clean removed a LIVE jam\'s state dir');
     if (!alive(S.live)) throw new Error('clean killed a live session');
     // The decoys are still standing, having been offered to nothing at all.

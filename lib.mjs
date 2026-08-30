@@ -2095,8 +2095,18 @@ export function verifyOwned(name, marker, session) {
 //   no-session no tmux session but something IS on that port — flagged, never cleaned, because
 //              whatever holds the port is not ours to remove
 //   foreign    the tmux session exists and does NOT verify: shown, never touched, ever
-export const JAM_STATES = ['live', 'adopted', 'no-daemon', 'orphan', 'no-session', 'foreign'];
-export function classifyJam({ tmuxAlive = false, owned = false, portAlive = false, adopted = false } = {}) {
+//   incomplete v0.21.2: the state dir is jam's own `claude-jam-<port>` but holds no session.json,
+//              so there is no session NAME to look for and nothing that could ever authorise an
+//              `end` — a start that died between making the directory and claiming a session.
+//              Listed and cleanable when the port is dead; when something holds the port it is
+//              `no-session` like any other, because a running `--daemon` (which is what every
+//              smoke in scripts/ is) legitimately has no session.json of its own.
+export const JAM_STATES = ['live', 'adopted', 'no-daemon', 'orphan', 'no-session', 'foreign', 'incomplete'];
+export function classifyJam({ tmuxAlive = false, owned = false, portAlive = false, adopted = false,
+  known = true } = {}) {
+  // `known` is "session.json told us which session to look for". Without it the other three
+  // measurements are about nothing, so they are not consulted: the port is the only fact there is.
+  if (!known) return portAlive ? 'no-session' : 'incomplete';
   if (!tmuxAlive) return portAlive ? 'no-session' : 'orphan';
   if (!owned) return 'foreign';
   // `adopted` only ever replaces `live`: when the daemon is gone or the session is, the
@@ -2109,9 +2119,13 @@ export function classifyJam({ tmuxAlive = false, owned = false, portAlive = fals
 // is healthy — it is a different KIND of jam, not a broken one.
 export function jamMark(state) { return state === 'live' || state === 'adopted' ? ' ' : '!'; }
 
-// `claude-jam clean` removes state dirs and nothing else, and only in the one state that means the
-// session behind them is provably gone.
-export function cleanable(row) { return row?.state === 'orphan'; }
+// `claude-jam clean` removes state dirs and nothing else, and only in the states that mean there
+// is provably nothing behind them: `orphan` (jam knows which session it was, and that session is
+// gone) and `incomplete` (jam never got as far as recording one, and nothing holds the port).
+// Both are about a DIRECTORY. Neither can authorise ending a tmux session — that still needs the
+// v0.18 pair, the marker and a session.json naming the same session, and an `incomplete` row has
+// no name for `claude-jam end` to resolve in the first place.
+export function cleanable(row) { return row?.state === 'orphan' || row?.state === 'incomplete'; }
 
 // `claude-jam end` with no name. Exactly one jam is unambiguous; several is a numbered picker; none is
 // an error. A name is matched EXACTLY against jam's own verified rows — no prefix, no case
@@ -2286,6 +2300,10 @@ export function sessionsTable(rows = [], now = 0) {
       + '`claude-jam end` stops the daemon and leaves that pane, its tmux session and claude alone');
   }
   if (rows.some((r) => r.state === 'orphan')) notes.push('! orphan = the tmux session is gone; `claude-jam clean` removes those state dirs');
+  if (rows.some((r) => r.state === 'incomplete')) {
+    notes.push('! incomplete = a state dir with no session.json — a start that died before it claimed a '
+      + 'session, so there is no name to end; `claude-jam clean` removes those too');
+  }
   if (rows.some((r) => r.state === 'no-daemon')) notes.push('! no-daemon = the session is up but nothing answers on its port; `claude-jam end <name>` clears it');
   if (rows.some((r) => r.state === 'no-session')) notes.push('! no-session = no tmux session, but something still holds that port — claude-jam leaves it alone');
   if (rows.some((r) => r.state === 'foreign')) notes.push('! foreign = that name is somebody else\'s tmux session; claude-jam will never touch it');
