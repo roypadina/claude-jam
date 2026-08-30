@@ -180,7 +180,8 @@ unreaped tree is a bad model of a runner in every other way too.
 then reads as six `daemon did not come up` failures while the daemon is up, listening and logging
 normally (measured 2026-08-30 — the fix was `apt-get install -y curl`). `ubuntu-latest` and macOS
 both ship curl, so CI and every developer box are unaffected; a slim container is not. Listed in
-Deferred as a product nit rather than fixed here.
+Deferred as a product nit rather than fixed here. **Fixed in 0.23.5** — `waitForHealth()` is node's
+own `fetch` now, and the same container runs `smoke-lifecycle` 19/19 with no curl installed.
 
 ## Release gates that have actually run
 
@@ -1134,11 +1135,32 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   (168) are built before the guarding `try` (174), and a second daemon block (374-406) runs after
   that `try`'s `finally` has closed. Fix: the same `try`/`catch` + per-step `cleans` treatment the
   other two got. Prove: break each one's first daemon on purpose and read the RESULT line.
-- 2026-08-30 · **`host.mjs` needs `curl` on `PATH` to start** (`waitForHealth()` shells out to it).
+- ~~2026-08-30 · **`host.mjs` needs `curl` on `PATH` to start** (`waitForHealth()` shells out to it).
   A slim container without curl reports `daemon did not come up` six times while the daemon is up
   and listening — measured. macOS, `ubuntu-latest` and Debian-with-curl are all fine, so this is a
   portability nit, not a live bug: node's own `fetch` would remove the dependency. Prove: replace
-  the `spawnSync('curl'…)` poll with `fetch` and re-run `smoke-lifecycle` on both platforms.
+  the `spawnSync('curl'…)` poll with `fetch` and re-run `smoke-lifecycle` on both platforms.~~
+  **DISCHARGED — 0.23.5, 2026-08-30.** `waitForHealth()` is node 22's global `fetch`, and the two
+  `spawnSync`es (`curl`, and a `sleep` for the retry gap) are gone with it. The timing is unchanged
+  on purpose: a 10 s total deadline, `AbortSignal.timeout(1000)` per attempt where curl had `-m 1`,
+  300 ms between attempts. `connection: close` is on the request because undici would otherwise hold
+  a keep-alive socket and delay the launcher's own exit.
+  Measured on the same curl-less Debian bookworm container, before and after, with `smoke-lifecycle`:
+  **`HEAD` = 6 FAIL + 9 BLOCKED with `daemon did not come up` printed exactly 6 times, in 69 s →
+  19/19 in 22 s** after, and 19/19 again with `CI=true`. macOS (which has curl, so this half is the
+  no-regression check) 19/19 both ways.
+  **The failure path was measured too, rather than reasoned about**, because a health check that
+  reports a fetch stack trace would be worse than the shell-out: a jam launched on a port already
+  held by another listener, on the curl-less box, exits **1** after **10.54 s** with the same single
+  line `daemon did not come up; check the tmux daemon window` and **zero** stack-trace frames.
+  **Two `curl` shell-outs are left, both deliberately out of scope for that batch** and neither on
+  this code path. (1) `hooks.sh` line 85 — the `stop`/`notification` hooks POST to the daemon with
+  `curl … || true`, so on a box with no curl a jam runs but every stop/notification hook is silently
+  dropped (no idle signal, no turn-finished nudge). It is the bigger of the two, because it is
+  runtime rather than launch and it fails **silently**; the fix is cheap — the same file's
+  `SessionStart` branch already runs node, and `JAM_NODE` is exported into the hook environment for
+  exactly this reason. (2) `scripts/smoke-perm.mjs` line 108 polls `/health` through `curl` in the
+  harness. Prove: a jam hosted on a curl-less box, `/who` showing a participant going idle.
 - 2026-08-30 · **W1: `smoke-ink` and `smoke-xfer` were not re-run for this batch.** Both need a
   daemon with a real `claude` and spend tokens, and this batch was told not to. What did run:
   `smoke-nudge` 16/16 (the platform seam's sounds through stub binaries, real clients, the whole
