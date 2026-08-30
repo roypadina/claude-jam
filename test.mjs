@@ -105,6 +105,8 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   hostRefusal, hostKeyNotice,
   // v0.32 W1: the Windows client, decided purely.
   WIN_APPDATA_FALLBACK, aclUser, aclArgs, parseIcaclsPrincipals,
+  PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, PS_PLAY_WAV,
+  WIN_MEDIA_SOUNDS, WIN_BEEPS, winBeepScript, winSoundPlan,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -4251,6 +4253,123 @@ test('v0.32 W1 parseIcaclsPrincipals reads the entries back, and a C: is not a p
   assert.deepEqual(parseIcaclsPrincipals('', 'C:\\t\\x'), []);
   assert.deepEqual(parseIcaclsPrincipals(null), []);
   assert.deepEqual(parseIcaclsPrincipals('Failed processing 1 files\n'), []);
+});
+
+test('v0.32 W1 nothing external is ever inside a PowerShell script — it goes in the environment', () => {
+  // The whole safety argument for the Windows branches, as three assertions. A filename, a
+  // notification title and a notification body are all attacker-influenced in principle (a
+  // guest's name is in a nudge title; a path will one day come from somewhere else), and
+  // PowerShell's `-Command` takes a SCRIPT, so the only defence that holds is for the data never
+  // to be in it.
+  for (const script of [PS_CLIP_PNG, PS_TOAST, PS_PLAY_WAV]) {
+    assert.equal(typeof script, 'string');
+    assert.ok(script.length < 2000, 'a script this long is not a constant, it is a program');
+  }
+  // Each script reads exactly the environment variables the seam sets, and nothing is templated:
+  // there is no %FILE% / ${…} / + concatenation hole to fill.
+  assert.match(PS_CLIP_PNG, new RegExp(`\\$env:${PS_ENV_FILE}\\b`));
+  assert.match(PS_PLAY_WAV, new RegExp(`\\$env:${PS_ENV_FILE}\\b`));
+  assert.match(PS_TOAST, new RegExp(`\\$env:${PS_ENV_TITLE}\\b`));
+  assert.match(PS_TOAST, new RegExp(`\\$env:${PS_ENV_BODY}\\b`));
+  for (const script of [PS_CLIP_PNG, PS_TOAST, PS_PLAY_WAV]) {
+    assert.ok(!script.includes('%FILE%'), script); // the macOS AppleScript's shape, deliberately not copied
+  }
+  // The interpreter flags: no profile (a user's $PROFILE must not be able to change what these
+  // do), non-interactive (nothing may ever wait for input under a TUI), and -Command LAST so the
+  // script is the final word.
+  assert.deepEqual(PS_ARGS, ['-NoProfile', '-NonInteractive', '-Command']);
+  assert.equal(PS_ARGS.at(-1), '-Command');
+  // The clipboard read tells "no image" apart from "it broke", which is what makes the message a
+  // human sees the true one.
+  assert.match(PS_CLIP_PNG, /exit 3/);
+  assert.match(PS_CLIP_PNG, /Get-Clipboard -Format Image/);
+  // The toast tries BurntToast first and the WinRT notifier second, in one child.
+  assert.match(PS_TOAST, /BurntToast/);
+  assert.match(PS_TOAST, /ToastNotificationManager/);
+  assert.ok(PS_TOAST.indexOf('BurntToast') < PS_TOAST.indexOf('ToastNotificationManager'));
+});
+
+test('v0.32 W1 winSoundPlan: a real .wav when there is one, a distinct beep PATTERN when not', () => {
+  const win = { WINDIR: 'C:\\Windows' };
+  const all = () => true;
+  const none = () => false;
+  // Three kinds, three DIFFERENT files — the point of having three sounds is telling them apart.
+  const files = ['knock', 'join', 'nudge'].map((k) => winSoundPlan(k, all, win).file);
+  assert.equal(new Set(files).size, 3, files.join(' '));
+  for (const f of files) assert.match(f, /^C:\\Windows\\Media\\[^\\]+\.wav$/);
+  assert.equal(winSoundPlan('knock', all, win).mode, 'wav');
+  // %WINDIR% is honoured (a Windows install is not always on C:), and its absence is not a crash.
+  assert.match(winSoundPlan('join', all, { WINDIR: 'D:\\WinNT' }).file, /^D:\\WinNT\\Media\\/);
+  assert.match(winSoundPlan('join', all, {}).file, /^C:\\Windows\\Media\\/);
+  // Preference order, one candidate at a time: the second choice is used only when the first is
+  // missing, so a Windows 7 or a stripped image still gets a sound rather than silence.
+  const second = winSoundPlan('knock', (f) => f.endsWith(WIN_MEDIA_SOUNDS.knock[1]), win);
+  assert.equal(second.file, `C:\\Windows\\Media\\${WIN_MEDIA_SOUNDS.knock[1]}`);
+  // Nothing there at all: the beep fallback, and the three patterns are still three patterns.
+  const beeps = ['knock', 'join', 'nudge'].map((k) => winSoundPlan(k, none, win));
+  assert.deepEqual(beeps.map((b) => b.mode), ['beep', 'beep', 'beep']);
+  assert.equal(new Set(beeps.map((b) => b.args.at(-1))).size, 3);
+  for (const b of beeps) {
+    assert.match(b.args.at(-1), /^\[console\]::beep\(\d{2,5},\d{2,4}\)/);
+    assert.equal(b.file, null);
+    assert.deepEqual(b.env, {});
+  }
+  // The knock is the one that has to carry "somebody is WAITING": two thuds, not one click.
+  assert.equal(WIN_BEEPS.knock.length, 2);
+  assert.equal(winBeepScript('knock').split(';').length, 2);
+  // A kind that is not one of the three has no plan and no script — never a spawn, never a throw.
+  for (const bad of ['leave', '', null, undefined, 'KNOCK']) {
+    assert.equal(winSoundPlan(bad, all, win), null, JSON.stringify(bad));
+    assert.equal(winBeepScript(bad), null, JSON.stringify(bad));
+  }
+  // No filename is shared between two kinds — that would silently collapse two sounds into one.
+  const named = Object.values(WIN_MEDIA_SOUNDS).flat();
+  assert.equal(new Set(named).size, named.length);
+  assert.deepEqual(Object.keys(WIN_MEDIA_SOUNDS), Object.keys(SOUNDS));
+  assert.deepEqual(Object.keys(WIN_BEEPS), Object.keys(SOUNDS));
+});
+
+// On the Windows CI leg the same call runs against a REAL %WINDIR%\Media, which is the only way
+// this project finds out whether the filename table is real. It asserts the OUTCOME rather than
+// the branch, because falling back to the beep is a correct answer and not a failure — what it
+// refuses to accept is a plan naming a file that is not there.
+test('v0.32 W1 winSoundPlan against the real Windows media directory', { skip: process.platform !== 'win32' }, () => {
+  const modes = {};
+  for (const kind of ['knock', 'join', 'nudge']) {
+    const plan = winSoundPlan(kind, fs.existsSync, process.env);
+    modes[kind] = plan.mode;
+    if (plan.mode === 'wav') {
+      assert.ok(fs.existsSync(plan.file), plan.file);
+      assert.equal(plan.env[PS_ENV_FILE], plan.file);
+    } else {
+      assert.equal(plan.args.at(-1), winBeepScript(kind));
+    }
+  }
+  assert.equal(Object.keys(modes).length, 3);
+  // Recorded rather than asserted: which branch a real windows-latest image lands on is a FACT
+  // this project does not know yet, and the run log is where it gets written down.
+  console.log(`# v0.32 W1 sound modes on ${os.release()}: ${JSON.stringify(modes)}`);
+});
+
+// The clipboard, on the real thing. A CI runner has no image on its clipboard, so what this
+// proves is the whole failure path end to end: powershell.exe is found and run, the script parses
+// and executes, "there is no image" comes back as the ordinary sentence a human should see, and
+// the temp directory is removed on the way out. That is every part of /paste except the pixels.
+test('v0.32 W1 clipboardImage on Windows refuses cleanly when there is no image', { skip: process.platform !== 'win32' }, () => {
+  const before = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('claude-jam-paste-')).length;
+  let threw = null;
+  let got = null;
+  try { got = clipboardImage(); } catch (e) { threw = e; }
+  if (got) {
+    // Somebody left an image on the runner's clipboard. Then it must be a real PNG, not a lie.
+    assert.match(got.name, /^paste-\d{8}-\d{6}\.png$/);
+    assert.ok(got.data.length > 0);
+    assert.equal(got.data.subarray(1, 4).toString('latin1'), 'PNG');
+  } else {
+    assert.match(threw.message, /^no image on the clipboard \(/);
+  }
+  const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('claude-jam-paste-')).length;
+  assert.equal(after, before, 'the mkdtemp directory must be gone whether it worked or not');
 });
 
 // The one Windows-ONLY test in the suite, and it is here because it is the only way this

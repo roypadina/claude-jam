@@ -5563,3 +5563,96 @@ export function parseIcaclsPrincipals(text, target = '') {
   }
   return out;
 }
+
+// --------------------------------------------------------------- the three PowerShell scripts --
+// Each one is a CONSTANT. The data it works on — the temp path to save into, the notification
+// title and body, the .wav to play — arrives in the child's environment, so there is no
+// interpolation anywhere and no quoting rule for a caller to get wrong. `/paste`'s filename is
+// the one that matters most: it is built from a mkdtemp directory, and a filename is exactly the
+// kind of value that turns a "script" into an injection when somebody later makes it
+// user-supplied. It cannot here, because the script never contains it.
+export const PS_ARGS = ['-NoProfile', '-NonInteractive', '-Command'];
+export const PS_ENV_FILE = 'JAM_PS_FILE'; // where /paste saves, and which .wav playSound plays
+export const PS_ENV_TITLE = 'JAM_PS_TITLE';
+export const PS_ENV_BODY = 'JAM_PS_BODY';
+
+// `Get-Clipboard -Format Image` → a PNG on disk. Windows PowerShell 5.1 only: `-Format` does not
+// exist in PowerShell 7 (it is documented as 5.1-only), which is why the seam runs powershell.exe
+// and not pwsh. Exit 3 is "there was no image", told apart from a crash so the message a human
+// gets is the true one.
+export const PS_CLIP_PNG = [
+  '$ErrorActionPreference = "Stop"',
+  'Add-Type -AssemblyName System.Drawing',
+  '$img = Get-Clipboard -Format Image',
+  'if ($null -eq $img) { exit 3 }',
+  '$img.Save($env:JAM_PS_FILE, [System.Drawing.Imaging.ImageFormat]::Png)',
+].join('; ');
+
+// A toast. BurntToast when the module is installed (it handles the AppId registration that makes
+// a toast from a console process actually appear), else the WinRT notifier directly. The AppId in
+// the fallback is Windows PowerShell's own well-known one: a toast raised under an AppId that is
+// not registered on the machine is silently dropped, and PowerShell's is registered wherever
+// PowerShell is.
+// UNVERIFIED: no human on this project has seen either branch put a toast on a screen. What CI
+// proves is the argv and that neither the title nor the body is inside the script.
+export const PS_TOAST_APPID = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';
+export const PS_TOAST = [
+  '$t = $env:JAM_PS_TITLE; $b = $env:JAM_PS_BODY',
+  'if (Get-Module -ListAvailable -Name BurntToast) '
+    + '{ Import-Module BurntToast; New-BurntToastNotification -Text $t, $b; exit 0 }',
+  '$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]',
+  '$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent('
+    + '[Windows.UI.Notifications.ToastTemplateType]::ToastText02)',
+  '$n = $x.GetElementsByTagName("text")',
+  '$null = $n.Item(0).AppendChild($x.CreateTextNode($t))',
+  '$null = $n.Item(1).AppendChild($x.CreateTextNode($b))',
+  `[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("${PS_TOAST_APPID}")`
+    + '.Show([Windows.UI.Notifications.ToastNotification]::new($x))',
+].join('; ');
+
+// A .wav, played to the end so a 300 ms knock is not cut off by the child exiting.
+export const PS_PLAY_WAV = '(New-Object System.Media.SoundPlayer $env:JAM_PS_FILE).PlaySync()';
+
+// The three sounds on Windows, in the same spirit as the macOS trio (Submarine / Glass / Hero):
+// knock is the low slow one that means somebody is WAITING for you, join is one short chime,
+// nudge is the one that means a person asked for you by name. Candidates in preference order,
+// and no filename appears under two kinds — two variations on the same click would give up the
+// entire point of having three.
+// The paths are UNVERIFIED as a set: `%WINDIR%\Media` has held the legacy names (chimes, chord,
+// tada, notify, ding) since XP and the `Windows Notify *` ones since Windows 8, but nobody here
+// has listed that directory on a real machine. Whatever is missing falls through to the beep,
+// which is why the fallback is a pattern per kind and not one tone.
+export const WIN_MEDIA_SOUNDS = {
+  knock: ['Windows Notify Messaging.wav', 'chord.wav', 'ringout.wav'],
+  join: ['chimes.wav', 'Windows Notify Calendar.wav', 'ding.wav'],
+  nudge: ['tada.wav', 'Windows Notify System Generic.wav', 'notify.wav'],
+};
+
+// The fallback, and it is a PATTERN rather than a pitch: a machine with no media files still has
+// to let somebody tell a knock from a join without looking. Two low thuds, one high ping, three
+// quick mid taps. Numbers only, and they come from this table — nothing external is ever in this
+// script (see the header above).
+export const WIN_BEEPS = {
+  knock: [[262, 220], [262, 220]],
+  join: [[988, 120]],
+  nudge: [[659, 90], [659, 90], [659, 90]],
+};
+export function winBeepScript(kind) {
+  const seq = WIN_BEEPS[String(kind ?? '')];
+  if (!seq) return null;
+  return seq.map(([hz, ms]) => `[console]::beep(${hz},${ms})`).join('; ');
+}
+
+// Which of the two a kind gets on this machine, decided by whether the file is there. `exists`
+// and `env` are arguments so the answer is testable on any OS — and on the Windows CI leg the
+// same call, with the real fs.existsSync, says which branch a real Windows image lands on.
+export function winSoundPlan(kind, exists = () => false, env = {}) {
+  const k = String(kind ?? '');
+  const names = WIN_MEDIA_SOUNDS[k];
+  if (!names) return null;
+  const dir = `${env.WINDIR || 'C:\\Windows'}\\Media`;
+  const file = names.map((n) => `${dir}\\${n}`).find((f) => exists(f)) || null;
+  return file
+    ? { mode: 'wav', file, args: [...PS_ARGS, PS_PLAY_WAV], env: { [PS_ENV_FILE]: file } }
+    : { mode: 'beep', file: null, args: [...PS_ARGS, winBeepScript(k)], env: {} };
+}

@@ -11,18 +11,24 @@
 // the tool's actual dependencies, they are spelled the same everywhere, and they stay where they
 // are used.
 //
-// Today every implementation here is the macOS one, moved unchanged from where it used to live.
-// TODO(W1 — native Windows client): add the win32 branch to each function — PowerShell
-// `Get-Clipboard -Format Image` for clipboardImage, a BurntToast/WinRT toast for notify,
-// `System.Media.SoundPlayer` for playSound, `%TEMP%`/`%APPDATA%\claude-jam` for the paths, an
-// ACL that grants only the current user in place of chmod 600, and `start` for openExternal.
-// Each of those is a branch inside one of these functions and nothing else has to change.
+// v0.32 W1 filled in the win32 side of every function here: PowerShell `Get-Clipboard -Format
+// Image` for clipboardImage, a BurntToast/WinRT toast for notify, `System.Media.SoundPlayer` (or a
+// beep pattern) for playSound, `%TEMP%`/`%APPDATA%\claude-jam` for the paths, an `icacls` ACL
+// granting only the current user in place of chmod 600, `start` for openExternal. Exactly as W0
+// predicted, each one was a branch inside one of these functions and nothing above the seam moved.
+//
+// HOW THOSE BRANCHES ARE VERIFIED, since nobody working on this project has a Windows machine:
+// every DECISION they make lives in lib.mjs as a pure function (which argv, which principal,
+// which .wav, which refusal) and is asserted on the `windows-latest` CI leg as well as here.
+// What remains unverified is what only a person at a Windows keyboard can see or hear — a toast
+// appearing, a knock sounding — and TESTING.md lists each one with the experiment that settles it.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, validHostKey,
-  aclUser, aclArgs, parseIcaclsPrincipals } from './lib.mjs';
+  aclUser, aclArgs, parseIcaclsPrincipals,
+  PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, winSoundPlan } from './lib.mjs';
 
 export const IS_MAC = process.platform === 'darwin';
 export const IS_WINDOWS = process.platform === 'win32';
@@ -114,7 +120,35 @@ export function readHostKey(file) {
 // cost a frame or throw.
 export const NOTIFY_TITLE_MAX = 60;
 export const NOTIFY_BODY_MAX = 200;
+
+// v0.32 W1: powershell.exe, not pwsh. `Get-Clipboard -Format Image` is documented as Windows
+// PowerShell 5.1 only, and the WinRT type accelerator the toast fallback uses needs the same
+// runtime — so all three Windows capabilities go through the one interpreter that has both, and
+// it is the one that ships with Windows.
+const POWERSHELL = 'powershell.exe';
+
+// Fire and forget, same contract as the macOS branch: never awaited, output dropped, every
+// failure swallowed, and `false` when it did nothing. The title and body go in the ENVIRONMENT —
+// PS_TOAST is a constant, so a body containing a quote, a `$` or a newline cannot become script.
+function notifyWindows(title, body) {
+  try {
+    const child = spawn(POWERSHELL, [...PS_ARGS, PS_TOAST], {
+      stdio: 'ignore',
+      windowsHide: true,
+      env: {
+        ...process.env,
+        [PS_ENV_TITLE]: String(title ?? 'claude-jam').slice(0, NOTIFY_TITLE_MAX),
+        [PS_ENV_BODY]: String(body ?? '').slice(0, NOTIFY_BODY_MAX),
+      },
+    });
+    child.on('error', () => { /* no powershell, or toasts are off: the bell still rang */ });
+    child.unref();
+    return true;
+  } catch { return false; }
+}
+
 export function notify(title, body) {
+  if (IS_WINDOWS) return notifyWindows(title, body);
   if (!IS_MAC) return false;
   try {
     const child = spawn('osascript', ['-e', 'on run argv',
@@ -146,8 +180,8 @@ export const MAC_SOUND_DIR = '/System/Library/Sounds';
 // freedesktop .oga set that ships with most desktops; `aplay` is ALSA and plays WAV only, so it
 // gets its own candidate list rather than being handed an .oga it would reject. Neither present,
 // or no file found: silence, which is an acceptable answer and never an error a user sees.
-// TODO(W1 — native Windows client): `System.Media.SoundPlayer` over a .wav, or the WinRT
-// notification sound; one more branch in soundFile()/playSound() and nothing else changes.
+// v0.32 W1 took the other branch: `System.Media.SoundPlayer` over a .wav from `%WINDIR%\Media`,
+// and a per-kind `[console]::beep()` PATTERN when there is none — see winSoundPlan in lib.mjs.
 const FD = '/usr/share/sounds/freedesktop/stereo';
 const LINUX_SOUNDS = {
   paplay: { knock: [`${FD}/message-new-instant.oga`, `${FD}/bell.oga`],
@@ -170,7 +204,14 @@ export function soundFile(kind) {
     if (IS_MAC) {
       const f = `${MAC_SOUND_DIR}/${SOUNDS[k]}.aiff`;
       if (fs.existsSync(f)) hit = { bin: 'afplay', file: f };
-    } else if (!IS_WINDOWS) {
+    } else if (IS_WINDOWS) {
+      // v0.32 W1: a .wav out of %WINDIR%\Media through System.Media.SoundPlayer, or — on a
+      // machine that has none of them — a per-kind BEEP PATTERN, so a knock is still not a join.
+      // Which one it is, and which file, is winSoundPlan's decision and is unit-tested; this is
+      // only the spawn. Remembered like every other kind: no stat per frame.
+      const plan = winSoundPlan(k, fs.existsSync, process.env);
+      if (plan) hit = { bin: POWERSHELL, file: plan.file, args: plan.args, env: plan.env, mode: plan.mode };
+    } else {
       for (const bin of ['paplay', 'aplay']) {
         const found = (LINUX_SOUNDS[bin][k] || []).find((f) => fs.existsSync(f));
         // The binary is on PATH or it is not; spawn's 'error' handler is what finds out, and a
@@ -187,7 +228,13 @@ export function playSound(kind) {
   const s = soundFile(kind);
   if (!s) return false;
   try {
-    const child = spawn(s.bin, [s.file], { stdio: 'ignore' });
+    // `args` is the Windows plan's (a PowerShell script, with the .wav in the environment);
+    // afplay/paplay/aplay take the file and nothing else, which is what the default spells.
+    const child = spawn(s.bin, s.args ?? [s.file], {
+      stdio: 'ignore',
+      windowsHide: true,
+      ...(s.env ? { env: { ...process.env, ...s.env } } : {}),
+    });
     child.on('error', () => { /* no player installed: silence is acceptable */ });
     child.unref();
     return true;
@@ -212,23 +259,42 @@ const OSASCRIPT_PNG = [
 
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
 
+// pngpaste when it is installed, else osascript. Both write the file themselves; what comes back
+// is only whether one of them managed it, and why not.
+function clipboardPngMac(file) {
+  const png = spawnSync('pngpaste', [file], { encoding: 'utf8' });
+  if (!png.error && png.status === 0) return { ok: true };
+  const as = spawnSync('osascript', ['-e', OSASCRIPT_PNG.replace('%FILE%', file)], { encoding: 'utf8' });
+  if (!as.error && as.status === 0) return { ok: true };
+  return { ok: false, why: (as.stderr || png.stderr || '').trim().split('\n')[0] || 'nothing to paste' };
+}
+
+// v0.32 W1: the same answer through Windows PowerShell. The path rides in the ENVIRONMENT and the
+// script is a constant — see PS_CLIP_PNG. Exit 3 is the script's own "there was no image", which
+// is the ordinary case and deserves the ordinary sentence rather than a stack trace.
+function clipboardPngWindows(file) {
+  const r = spawnSync(POWERSHELL, [...PS_ARGS, PS_CLIP_PNG], {
+    encoding: 'utf8', windowsHide: true, env: { ...process.env, [PS_ENV_FILE]: file },
+  });
+  if (r.error) return { ok: false, why: r.error.message };
+  if (r.status === 3) return { ok: false, why: 'nothing to paste' };
+  if (r.status !== 0) return { ok: false, why: (r.stderr || '').trim().split('\n')[0] || `powershell exited ${r.status}` };
+  return { ok: true };
+}
+
 export function clipboardImage() {
-  if (!IS_MAC) {
-    throw new Error('/paste reads a PNG off the macOS clipboard — on this platform use /send <path>');
+  if (!IS_MAC && !IS_WINDOWS) {
+    throw new Error('/paste reads an image off the clipboard, which claude-jam can only do on '
+      + 'macOS and Windows — on this platform use /send <path>');
   }
-  // mkdtemp, so the path is ours and has no character AppleScript or a shell could read as
-  // anything but a path (there is no shell here either: spawnSync with an argv).
+  // mkdtemp, so the path is ours and has no character AppleScript, PowerShell or a shell could
+  // read as anything but a path (there is no shell in either branch either: spawnSync with an
+  // argv, and on Windows the filename is not in the script at all).
   const dir = fs.mkdtempSync(path.join(stateDir(), 'claude-jam-paste-'));
   const file = path.join(dir, `paste-${stamp()}.png`);
   try {
-    const png = spawnSync('pngpaste', [file], { encoding: 'utf8' });
-    if (png.error || png.status !== 0) {
-      const as = spawnSync('osascript', ['-e', OSASCRIPT_PNG.replace('%FILE%', file)], { encoding: 'utf8' });
-      if (as.error || as.status !== 0) {
-        const why = (as.stderr || png.stderr || '').trim().split('\n')[0] || 'nothing to paste';
-        throw new Error(`no image on the clipboard (${why})`);
-      }
-    }
+    const got = IS_MAC ? clipboardPngMac(file) : clipboardPngWindows(file);
+    if (!got.ok) throw new Error(`no image on the clipboard (${got.why})`);
     const data = fs.readFileSync(file);
     if (!data.length) throw new Error('the clipboard image came back empty');
     if (data.length > UPLOAD_MAX) throw new Error(`${humanBytes(data.length)} is over the ${humanBytes(UPLOAD_MAX)} upload cap`);
@@ -262,7 +328,9 @@ export function openExternal(url) {
   if (!/^https?:\/\//.test(u)) return false; // never a file:// or a scheme handler
   const cmd = IS_MAC ? ['open', [u]] : IS_WINDOWS ? ['cmd', ['/c', 'start', '', u]] : ['xdg-open', [u]];
   try {
-    const child = spawn(cmd[0], cmd[1], { stdio: 'ignore', detached: false });
+    // windowsHide: a console flashing up for a quarter of a second under a full-screen TUI is
+    // the kind of thing that reads as a crash.
+    const child = spawn(cmd[0], cmd[1], { stdio: 'ignore', detached: false, windowsHide: true });
     child.on('error', () => { /* no opener: the URL was printed anyway */ });
     child.unref();
     return true;
