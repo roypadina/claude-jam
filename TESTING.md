@@ -60,6 +60,48 @@ already holds 7941/7943).
 
 Not yet run as part of a release gate; the gate record below is 0.23.0's, which predates it.
 
+## The v0.34.1 security review — two findings, and what carries them (2026-08-30)
+
+An adversarial pass over four surfaces nothing had attacked: transcript resume/replay, the hook
+callback endpoints, the launcher's own input handling, and profiles / `--config-dir`. Two findings,
+both in shipped code, both in the CHANGELOG's `Unreleased` section. What proves each fix:
+
+| finding | unit tests | behavioural |
+| --- | --- | --- |
+| the `--resume`/`--replay` seed was an unscrubbed FIFTH funnel | the registry walk now walks `backfillHistory` on five real transcript shapes; the `host.mjs` funnel lint counts it | `smoke-replay` 17/17 (unchanged suite, re-run); the finding itself was reproduced with a throwaway daemon before the fix and the same probe comes back clean after |
+| a transcript could forge WHO SPOKE in the replay | `v0.34.1 backfillHistory: a transcript cannot forge WHO SPOKE in the replay` — six bad `from` shapes, ESC included, plus both bent-body cases | same probe: `from` is the host's, the second `[Roy]:` line arrives bent |
+| the state dir's privacy was assumed, never checked (a local user could become the host) | `pathPrivacy` (three reasons × both kinds × the Windows skip), `assumePrivate + secureWrite` against the real filesystem, and a `host.mjs` lint for both gate call sites | **`smoke-lifecycle` S4 and S4b are new** — see below |
+
+`smoke-lifecycle` is 17 steps → **19**. The two new ones are there because the unit half can only
+lint that `host.mjs` *calls* `assumePrivate`, and this project has already been bitten twice by a
+test that could not fail:
+
+- **S4** runs the real launcher against a `0777` state dir holding a planted `host.key`, and against
+  a **symlink** where the state dir belongs (the case `stat` cannot see and `lstat` can). Both must
+  exit non-zero with the refusal — and the load-bearing half is that **nothing was written into
+  either one** (no `session.json`, `settings.json` or `token.json`) and **no tmux session was
+  built**. A refusal that still left files in somebody else's directory would prove nothing.
+- **S4b** is the second, independent gate: a `0700` state dir that is genuinely ours, holding a
+  `0644` planted key. The launcher starts (the directory is fine), the daemon logs
+  `[host-key] REFUSING …`, and a socket presenting that key over loopback gets a welcome with
+  **no host-only fields**. Fail closed: the jam has no host at all.
+
+**Canary, verified 2026-08-30.** Replace the state-dir gate with `null` → S4 fails
+(`the launcher STARTED on a state dir that is 0777, with a planted host.key`). Replace the key-file
+gate → S4 fails (`a tmux session was built anyway`). Both also fail the `host.mjs` lint in
+`test.mjs`. Removing `token.json`'s `secureWrite`, or `secureWrite`'s chmod, each turns one unit
+test red. Ports 7845/7847, session `jamlifepriv`, all inside the suite's own `$TMPDIR`; the first
+canary run showed S4's failure leaving a session behind and cascading into S4b, so S4 now removes
+it by exact name before it throws.
+
+**What this review did NOT prove, and it matters for finding 3:** the state-dir takeover was
+reproduced **as one uid**, by pre-creating the directory and the key exactly as a second uid would
+have left them. Nobody ran it as two real users on a real Linux box. The two facts the Linux claim
+rests on are `/tmp` being mode `1777` (universal) and `os.tmpdir()` returning `$TMPDIR || '/tmp'`
+(node, POSIX) — neither measured here, because this is macOS, where `$TMPDIR` is a per-user `0700`
+directory and the attack does not apply at all. The *fix* is measured on macOS and is
+platform-independent (`lstat` + `st.uid` + `st.mode`). See the Deferred list.
+
 ## Release gates that have actually run
 
 - **0.23.1 — 2026-08-30. The security patch, and the first gate with nineteen suites.**
@@ -628,6 +670,19 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   **DECIDED AND DISCHARGED — 0.22.1: Roy chose ordering over silence.** The name check moved below
   the authentication gate, a knocker's clash is settled at admission by `resolveJoinName`, and a
   source lint fails if it ever moves back. See the CHANGELOG's 0.22.1 section.
+- 2026-08-30 · The v0.34.1 state-dir takeover was reproduced **as one uid** (the directory and the
+  planted `host.key` created first, exactly as a second uid would leave them), not as two real
+  users. The Linux exposure rests on two unmeasured-here facts: `/tmp` is mode `1777`, and
+  `os.tmpdir()` is `$TMPDIR || '/tmp'`. This machine is macOS, where `$TMPDIR` is a per-user `0700`
+  directory and the attack does not apply. Prove: on the Linux run the campaign already owes, create
+  `/tmp/claude-jam-7777` as a second user with a planted `host.key`, then start a jam as the first —
+  it must refuse. (The FIX is measured on macOS and is platform-independent.)
+- 2026-08-30 · `pathPrivacy`'s Windows branch (uid `null` → the owner and mode questions are skipped
+  and only the symlink check runs) is asserted by unit test and has never executed on Windows. It is
+  reached there through `assumePrivate`, whose `process.getuid` check is the only thing selecting it.
+  Prove: the `windows-latest` CI leg runs the unit test; a human at a Windows keyboard starting a jam
+  is what would prove `assumePrivate` does not refuse a normal `%TEMP%` directory. Until then the
+  honest line is "green on macOS, and the Windows leg will say".
 
 ### v0.32 W1 — the Windows client (2026-08-30)
 

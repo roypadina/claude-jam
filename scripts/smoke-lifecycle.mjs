@@ -7,6 +7,11 @@
 //       created before the rename stays listable and endable
 //   S3  the live `jam` session on :7777, if one is running, is proved unkillable READ-ONLY:
 //       no marker, absent from `claude-jam sessions`, refused by name. Nothing about it is touched
+//   S4  v0.34.1: a state dir another local user could have created first — group/world-writable,
+//       or a symlink — is a startup REFUSAL, and nothing is written into it and no tmux session is
+//       built. The state dir name is derived from the port, and on Linux/WSL2 $TMPDIR is /tmp (1777)
+//   S4b and a PLANTED host.key in an otherwise-private state dir is refused rather than reused, so
+//       presenting it does not make you the host: the jam has no host at all (fail closed)
 //   1   `claude-jam sessions` lists a live jam and an orphan state dir, and NOT the plain decoy
 //   2   `claude-jam end` broadcasts {t:'ending'} (a scripted client sees it and exits 0), kills the
 //       children (daemon, claude, the ttyd and cloudflared stand-ins) and removes the state dir
@@ -32,7 +37,9 @@ import { fileURLToPath } from 'node:url';
 import { ownedSession } from '../sessions.mjs';
 // v0.21: the marker was renamed, and the old name is still read. Both come from the one place
 // that defines them, so this smoke cannot drift from the code it is proving.
-import { OWNED_OPTION, OWNED_OPTION_LEGACY, OWNED_OPTIONS } from '../lib.mjs';
+import { OWNED_OPTION, OWNED_OPTION_LEGACY, OWNED_OPTIONS,
+  // v0.34.1: the file whose privacy the daemon now verifies instead of assuming.
+  HOST_KEY_FILE } from '../lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -45,10 +52,14 @@ const TOKEN = 'lifecyclesmoketoken';
 // `incomplete` is BELOW the others on purpose: nothing ever listens on it (it names a planted
 // state dir, not a jam), and step 4's [n]ew session auto-picks the next free port UPWARD from
 // `live` — 7857 — so a port under the range can never be the one a real jam lands on.
-const P = { main: 7851, orphan: 7853, live: 7855, incomplete: 7849 };
+const P = { main: 7851, orphan: 7853, live: 7855, incomplete: 7849,
+  // v0.34.1's two hostile state dirs. BELOW `incomplete` for the same reason it is: step 4's
+  // [n]ew session auto-picks upward from `live`, so a port under the range is never one a real
+  // jam lands on. Their view ports (+1) are 7846 and 7848, also below 7849.
+  priv: 7845, priv2: 7847 };
 // Every tmux session this script creates, and the only ones it ever kills.
 const S = { jam: 'jamlife', two: 'jamlifelive-2', live: 'jamlifelive', plain: 'jamlifeplain',
-  decoy: 'jamlifedecoy', drive: 'jamlifedrive' };
+  decoy: 'jamlifedecoy', drive: 'jamlifedrive', priv: 'jamlifepriv' };
 // A session name that is not one of ours is a bug in this script, and a bug in this script
 // must never become a tmux session called `undefined`.
 for (const [k, v] of Object.entries(S)) if (typeof v !== 'string' || !v.startsWith('jamlife')) throw new Error(`S.${k} is ${v}`);
@@ -293,6 +304,95 @@ try {
     if (r.code === 0) throw new Error('claude-jam end accepted the live session');
     if (dtmux('has-session', '-t', '=jam').status !== 0) throw new Error('THE LIVE JAM IS GONE — this is the thing that must never happen');
     console.log('      still alive, still attached to whatever it was doing');
+  });
+
+  // v0.34.1: the state dir is a name derived from the PORT, so on a shared machine another local
+  // user can create it before the jam does. On Linux and WSL2 that is /tmp/claude-jam-7777 with
+  // the defaults, and /tmp is 1777. This step is the behavioural half of that fix: a unit test can
+  // only lint that host.mjs CALLS assumePrivate, which is exactly the kind of proof this project
+  // has been burned by. So the launcher is actually run against each hostile shape.
+  //
+  // One uid, deliberately: the smoke cannot become a second user, and it does not need to — what a
+  // second uid leaves behind is a directory whose mode or type is wrong, and that is what is
+  // planted here. The owner half of pathPrivacy is unit-tested. (TESTING.md records the limit.)
+  await step('S4 REFUSAL a state dir another local user could have made first', async () => {
+    const shapes = [];
+    // 1. group- and world-writable, holding a planted host.key: the reproduced takeover.
+    const wide = stateDir(P.priv);
+    fs.mkdirSync(wide, { recursive: true });
+    fs.chmodSync(wide, 0o777);
+    fs.writeFileSync(path.join(wide, 'host.key'), `${'ab'.repeat(32)}\n`);
+    fs.chmodSync(path.join(wide, 'host.key'), 0o644);
+    shapes.push(['0777, with a planted host.key', wide, P.priv]);
+    // 2. a SYMLINK where the state dir belongs — the case `stat` cannot see and `lstat` can.
+    const target = path.join(TMP, 'somewhere-else');
+    fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+    const link = stateDir(P.priv2);
+    fs.symlinkSync(target, link);
+    shapes.push(['a symlink to a 0700 directory', link, P.priv2]);
+
+    for (const [what, dir, port] of shapes) {
+      const r = spawnSync(process.execPath, [HOST_MJS, '--tmux', S.priv, '--port', String(port),
+        '--view-port', String(port + 1), '--name', 'Host', '--token', TOKEN, '--cwd', ROOT,
+        '--tmux-socket', SOCKET, '--no-attach', '--no-popup'], { encoding: 'utf8', env: ENV });
+      const out = `${r.stdout || ''}${r.stderr || ''}`;
+      console.log(`      ${what} → exit ${r.status}: ${out.trim().split('\n')[0]}`);
+      if (r.status === 0) throw new Error(`the launcher STARTED on a state dir that is ${what}`);
+      if (!/refusing to use this jam's state dir/.test(out)) throw new Error(`no refusal in: ${out.slice(0, 300)}`);
+      // The load-bearing half: it refused BEFORE it wrote anything. A refusal that still left
+      // session.json and settings.json in somebody else's directory would prove nothing.
+      for (const f of ['session.json', 'settings.json', 'token.json']) {
+        if (fs.existsSync(path.join(dir, f))) throw new Error(`${f} was written into a refused state dir`);
+      }
+      if (tmux('has-session', '-t', `=${S.priv}`).status === 0) {
+        // Removed before throwing, by the exact name this step would have created: a leftover
+        // session makes S4b below fail for the wrong reason, which is how a canary run reads as
+        // two findings instead of one. Measured while canarying this step.
+        killMine(S.priv);
+        throw new Error('a tmux session was built anyway');
+      }
+    }
+    // And the planted key is still exactly as planted — nothing read it, nothing replaced it.
+    const planted = fs.readFileSync(path.join(wide, 'host.key'), 'utf8').trim();
+    if (planted !== 'ab'.repeat(32)) throw new Error('the planted key changed');
+    console.log('      nothing was written into either one, and no tmux session was built');
+    // Removed by the two exact paths this step created, and only those.
+    fs.rmSync(wide, { recursive: true, force: true });
+    fs.rmSync(link, { force: true });
+  });
+
+  await step('S4b a PLANTED host.key in an otherwise fine state dir makes nobody the host', async () => {
+    // The second, independent gate. The directory here is 0700 and ours, so the launcher starts —
+    // and the key inside it is 0644, which no daemon of jam's ever wrote. It must be refused
+    // rather than reused, which leaves the jam with no host at all (fail closed).
+    const dir = stateDir(P.priv);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+    const key = 'cd'.repeat(32);
+    fs.writeFileSync(path.join(dir, HOST_KEY_FILE), `${key}\n`);
+    fs.chmodSync(path.join(dir, HOST_KEY_FILE), 0o644);
+    launch(S.priv, P.priv);
+    try {
+      // The daemon's own window is its log. It says which file it refused and why.
+      const log = await until('the daemon to say what it did with the key', () => {
+        const t = tmux('capture-pane', '-p', '-S', '-200', '-t', `${S.priv}:daemon`).stdout || '';
+        return /\[host-key\]/.test(t) ? t : null;
+      }, 20000);
+      const said = log.split('\n').filter((l) => /\[host-key\]/.test(l)).join(' ');
+      console.log(`      ${said.slice(0, 200)}`);
+      if (!/REFUSING/.test(said)) throw new Error(`the daemon adopted a planted key: ${said}`);
+      // And the proof that matters: presenting it does NOT make you the host.
+      const frames = [];
+      const ws = new WebSocket(`ws://127.0.0.1:${P.priv}`);
+      ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'Mallory', host: true, hostKey: key, token: TOKEN })));
+      ws.addEventListener('message', (m) => { try { frames.push(JSON.parse(m.data)); } catch { /* */ } });
+      const w = await until('a welcome', () => frames.find((f) => f.t === 'welcome'), 20000);
+      console.log(`      welcome for "Mallory": host-only fields ${w.session?.tmux ? 'PRESENT' : 'absent'}`);
+      if (w.session?.tmux || w.session?.join) throw new Error('a planted key was granted host authority');
+      ws.close();
+    } finally {
+      jam('end', S.priv);
+    }
   });
 
   // ============================================================== the live jam ====
@@ -629,7 +729,7 @@ try {
   console.log(String(e.stack || "").split("\n").slice(1, 4).join("\n"));
 } finally {
   // Exact names, and only the ones this script created.
-  for (const name of [S.drive, S.two, S.jam, S.live, S.plain, S.decoy]) killMine(name);
+  for (const name of [S.drive, S.two, S.jam, S.live, S.plain, S.decoy, S.priv]) killMine(name);
   for (const port of Object.values(P)) fs.rmSync(stateDir(port), { recursive: true, force: true });
   fs.rmSync(TMP, { recursive: true, force: true });
   fs.rmSync(BIN, { recursive: true, force: true });
