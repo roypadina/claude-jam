@@ -348,8 +348,10 @@ refuses everybody, standing `always` grants and the host's own `/paste` included
 **What never relaxes, in any policy** — these are the actual protections, not the prompt:
 sanitized basename with traversal refused (and Windows device names — `con`, `nul`, `com1`… —
 renamed, because they are not files) · the 20 MB per-file cap · one transfer in flight per
-client · writes only under `<cwd>/jam-uploads/` · nothing executed, nothing auto-opened · an
-announced-vs-actual byte mismatch drops the upload. `scripts/smoke-nudge.mjs` proves each of
+client · writes only under `<cwd>/jam-uploads/`, created exclusively so a symlink planted under
+that name is refused rather than followed · nothing executed, nothing auto-opened · an
+announced-vs-actual byte mismatch drops the upload · and the session quota counts grants in
+flight, so several senders at once cannot overshoot it. `scripts/smoke-nudge.mjs` proves each of
 those still refuses **while the policy is `auto`**.
 
 **The guard `auto` makes necessary:** a session quota of **40 files or 200 MB**, whichever comes

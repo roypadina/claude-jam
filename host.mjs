@@ -3369,6 +3369,24 @@ function sendExport(rec) {
 const UPLOAD_DIR = 'jam-uploads';
 const uploads = new Map(); // ws -> {name, detail, size, caption, xfer, parts, got, seq}
 
+// What the session has SPENT, for the quota decision — which is what has landed plus what has
+// already been promised. The budget is spent in writeUpload (bytes that actually arrive, never
+// bytes that were announced), and the "one at a time" guard is per SOCKET, so before this the
+// check and the spend had a gap every other client could walk through: measured 2026-08-30, four
+// clients firing in the same tick against a 2-file quota were all granted and all four files
+// landed, with no approval and no error. Counting the grants in flight closes it without a
+// reservation to refund — a dropped or failed upload simply leaves `uploads`, and the budget
+// goes back with it.
+// ponytail: a grant contributes its ANNOUNCED size, which is the only figure that exists yet;
+// over-announcing therefore makes a client's own next transfer ask sooner, never anybody else's
+// land unasked. Reserve-and-refund if that ever needs to be exact.
+function uploadCommitted() {
+  let files = uploadUsed.files;
+  let bytes = uploadUsed.bytes;
+  for (const up of uploads.values()) { files++; bytes += Number(up.size) || 0; }
+  return { files, bytes };
+}
+
 // A caption rides into claude's prompt, so it is sanitized exactly like a message — one line,
 // no forged `[Name]:` attribution, short.
 function fileCaption(v) {
@@ -3389,7 +3407,7 @@ function onUpload(ws, me, m) {
   if (size > UPLOAD_MAX) return sendError(ws, `${name} is ${humanBytes(size)}, over the ${humanBytes(UPLOAD_MAX)} upload cap`);
   const rec = { detail: name, size, caption: fileCaption(m.caption) };
   const d = uploadDecision({ policy: opts.uploads, trusted: trusted(me), standing: standing('file', me),
-    used: uploadUsed, quota: uploadQuota });
+    used: uploadCommitted(), quota: uploadQuota });
   if (d.allow === 'refuse') return sendError(ws, d.why);
   // The quota is spent: say so ONCE, to everybody, because the change of behaviour is what needs
   // explaining — the next transfer suddenly asking is otherwise read as a bug.
@@ -3474,7 +3492,14 @@ function writeUpload(who, up, data) {
     // [A-Za-z0-9._-] with no separator in it, so this join cannot leave the directory.
     name = uniqueName(up.detail, (n) => fs.existsSync(path.join(dir, n)));
     if (!name) return sendError(up.ws, `too many files are already called ${up.detail}`);
-    fs.writeFileSync(path.join(dir, name), data, { mode: 0o644 });
+    // `wx` is what makes the join CANNOT above true of the filesystem and not just of the name.
+    // `existsSync` FOLLOWS symlinks, so a DANGLING link at jam-uploads/notes.txt read as "does not
+    // exist", uniqueName handed the name straight back, and the write went THROUGH the link to
+    // whatever it pointed at — measured 2026-08-30, a guest's bytes landed outside jam-uploads/
+    // with nobody told. O_CREAT|O_EXCL refuses a symlink whether or not its target exists, and
+    // uniqueName has already proved the plain-file case is free, so this flag can only ever fire
+    // on that attack — and it fires CLOSED, with the errno told to the uploader.
+    fs.writeFileSync(path.join(dir, name), data, { mode: 0o644, flag: 'wx' });
   } catch (e) { return sendError(up.ws, `could not write ${UPLOAD_DIR}/${up.detail}: ${e.message}`); }
   // v0.27: the budget is spent where the bytes actually land, never where they were announced —
   // an announced-vs-actual mismatch drops the upload above this line, and a dropped upload must
