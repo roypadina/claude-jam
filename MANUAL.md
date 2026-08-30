@@ -94,7 +94,14 @@ answer is one of:
   end the jam and start it again (`claude-jam end <session>`, then `claude-jam host`), not to pass
   a flag;
 - **they connected through a relay** (`--tunnel` / `--funnel` URL) instead of over loopback. The
-  host's own client connects to `ws://127.0.0.1:<port>`; a relay URL is for guests.
+  host's own client connects to `ws://127.0.0.1:<port>`; a relay URL is for guests;
+- **the daemon refused the key file** (v0.34.1). It says `[host-key] REFUSING <path>: …` and then
+  nobody in that jam is the host. That means the file is a symlink, is owned by another user, or is
+  not `0600` — on a shared machine somebody else may have created `$TMPDIR/claude-jam-<port>` before
+  the jam did, and a planted key would otherwise have been adopted as host authority. The daemon
+  refuses the whole **state dir** on the same three tests and will not start at all if it fails
+  them. The fix is to remove that path if it is theirs to remove, or to use another `--port`, or to
+  point `--state` at a directory only they can reach.
 
 The daemon's refusal names which of the two failed. **Never read the key file out, never quote it,
 never put it in a message** — it is a credential exactly like the join token, and there is no

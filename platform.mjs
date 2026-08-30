@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, validHostKey,
+import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, validHostKey, pathPrivacy,
   aclUser, aclArgs, parseIcaclsPrincipals,
   PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, winSoundPlan } from './lib.mjs';
 
@@ -55,9 +55,18 @@ export function historyFile() { return historyFilePath(os.homedir(), process.env
 // is REINTERPRETED, as the read-only attribute and nothing else — so the port is an NTFS ACL with
 // one entry (see restrictToUser). The security docs say ACL, in those words, rather than implying
 // the mode carried over.
+// v0.34.1: `{ mode }` applies only when writeFileSync CREATES the file. On a file that already
+// exists it is ignored and the existing mode stands — measured 2026-08-30: 0666 in, 0666 out, with
+// the secret written into it. Every state file goes through here, and a pre-created world-readable
+// inode of somebody else's choosing is exactly the shape the state-dir finding took, so the mode is
+// re-applied afterwards as well as asked for at creation. The `assumePrivate` gate below is the
+// primary defence; this is the second one, and it costs one syscall on a path that runs at most a
+// few times per jam (the input-history file is the exception, and chmod on an unchanged mode is
+// cheap).
 export function secureWrite(file, data) {
   fs.writeFileSync(file, data, { mode: 0o600 });
   if (IS_WINDOWS) restrictToUser(file);
+  else { try { fs.chmodSync(file, 0o600); } catch { /* it is ours and just written; nothing to do */ } }
   return file;
 }
 
@@ -66,6 +75,24 @@ export function secureDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (IS_WINDOWS) restrictToUser(dir, { dir: true });
   return dir;
+}
+
+// v0.34.1: is this path safe to put secrets in? `null` = yes (including "it does not exist yet",
+// which is the normal case and is the caller's job to create). A string = the reason it is not,
+// for the caller to refuse with.
+//
+// lstat, never stat: a symlink where the state dir belongs is one of the three things this exists
+// to catch, and stat would follow it and report the target as a fine private directory.
+//
+// POSIX only, and it says so instead of pretending: `process.getuid` does not exist on Windows and
+// a POSIX mode there is reinterpreted rather than honoured (see secureWrite), so on win32 the
+// owner and mode questions have no answer here and restrictToUser's ACL is the mechanism. The TYPE
+// check still runs everywhere — a symlink is a symlink.
+export function assumePrivate(target, { kind = 'directory' } = {}) {
+  let st;
+  try { st = fs.lstatSync(target); } catch { return null; } // does not exist: nothing to distrust
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  return pathPrivacy(st, uid, { kind });
 }
 
 // `icacls` — a platform binary, so it is named here and nowhere else. Synchronous on purpose:

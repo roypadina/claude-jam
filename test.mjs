@@ -4,6 +4,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
   exportFileName, resumeInstructions, scrubSecrets, stripTokenBlock, clientCommand,
   scrubRowJoins, secretNeedles, SECRET_REGISTRY, SECRET_KEYS, FIND_SPOOF,
+  pathPrivacy, privacyRefusal,
   // v0.15 adaptive cadence, v0.16 approval bar.
   frameCadence, FRAME_FAST_GAP, FRAME_RATE_CAP, FRAME_ACTIVE_MS,
   countdownText, approvalBar, barKeyAction, APPROVAL_COMMANDS,
@@ -123,6 +124,8 @@ import { clipboardImage, notify, playSound, SOUNDS, MAC_SOUND_DIR, soundFile,
   browseText, BROWSE_BUF_MAX,
   // v0.34: the one place the host key is read off disk.
   readHostKey,
+  // v0.34.1: and the check that the directory holding it is one only its owner can reach.
+  assumePrivate,
   // v0.32 W1: the Windows branches of the same seam.
   restrictToUser, aclPrincipals } from './platform.mjs';
 
@@ -7231,6 +7234,102 @@ test('readHostKey: only a well-formed 0600 file is a key, everything else is nul
   } finally {
     fs.rmSync(dir, { recursive: true, force: true }); // the exact path this test made
   }
+});
+
+// v0.34.1 — the state dir was ASSUMED private and never checked. $TMPDIR/claude-jam-<port> is
+// /tmp/claude-jam-7777 on Linux and WSL2 with the defaults, /tmp is 1777, and mkdirSync does not
+// re-apply a mode to a directory that already exists. Reproduced on 0.23.1: a pre-created 0777
+// state dir holding a planted host.key made the planter the HOST over loopback, welcome handed
+// them the join line, and `{t:'key'}` typed into the real claude pane.
+test('v0.34.1 pathPrivacy: the three reasons a path is not somewhere secrets may go', () => {
+  const st = (over = {}) => ({
+    mode: 0o40700, uid: 501, isDirectory: () => true, isFile: () => false,
+    isSymbolicLink: () => false, ...over,
+  });
+  // The normal case, and the one that must not be refused: a 0700 directory we own.
+  assert.equal(pathPrivacy(st(), 501), null);
+  assert.equal(pathPrivacy(st({ mode: 0o40500 }), 501), null); // any all-owner mode is fine
+  // Does not exist yet: the caller's job to create, nothing to distrust.
+  assert.equal(pathPrivacy(null, 501), null);
+  assert.equal(pathPrivacy(undefined, 501), null);
+  // 1. TYPE — a symlink where the state dir belongs is somebody else choosing where jam writes.
+  //    lstat is what sees this at all; stat follows the link and reports a fine 0700 directory.
+  assert.match(pathPrivacy(st({ isSymbolicLink: () => true }), 501), /not a directory/);
+  assert.match(pathPrivacy(st({ isDirectory: () => false }), 501), /not a directory/);
+  // 2. OWNER — another uid can rename or replace anything inside it whatever the mode says.
+  assert.match(pathPrivacy(st({ uid: 502 }), 501), /owned by uid 502/);
+  // 3. MODE — every group and other bit, named as group or other so the message is actionable.
+  assert.match(pathPrivacy(st({ mode: 0o40777 }), 501), /mode is 777.*the group/);
+  assert.match(pathPrivacy(st({ mode: 0o40750 }), 501), /mode is 750.*the group/);
+  assert.match(pathPrivacy(st({ mode: 0o40701 }), 501), /mode is 701.*other users/);
+  assert.match(pathPrivacy(st({ mode: 0o40704 }), 501), /mode is 704.*other users/);
+  // The host.key gate is the same function with the other kind — a DIRECTORY named host.key is
+  // refused, and so is a symlink to somebody else's file.
+  const f = (over = {}) => st({ mode: 0o100600, isDirectory: () => false, isFile: () => true, ...over });
+  assert.equal(pathPrivacy(f(), 501, { kind: 'file' }), null);
+  assert.match(pathPrivacy(f({ isSymbolicLink: () => true }), 501, { kind: 'file' }), /not a file/);
+  assert.match(pathPrivacy(f({ mode: 0o100644 }), 501, { kind: 'file' }), /mode is 644/);
+  assert.match(pathPrivacy(st(), 501, { kind: 'file' }), /not a file/);
+  // uid null is Windows: no getuid(), and a POSIX mode there is reinterpreted rather than honoured,
+  // so the owner and mode questions have no answer and restrictToUser's ACL is the mechanism. The
+  // TYPE check still runs, because a symlink is a symlink everywhere.
+  assert.equal(pathPrivacy(st({ uid: 502, mode: 0o40777 }), null), null);
+  assert.match(pathPrivacy(st({ isSymbolicLink: () => true }), null), /not a directory/);
+});
+
+test('v0.34.1 assumePrivate + secureWrite: the real filesystem, and the mode that did not stick', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-privacy-'));
+  const state = path.join(dir, 'claude-jam-7777');
+  try {
+    // Nothing there yet.
+    assert.equal(assumePrivate(state), null);
+    // What secureDir makes is accepted.
+    secureDir(state);
+    assert.equal(assumePrivate(state), null);
+    if (process.platform === 'win32') return; // no mode, no getuid: pathPrivacy's own test covers it
+    // What another local user leaves behind is not. secureDir CANNOT fix this — mkdirSync ignores
+    // `mode` on a directory that already exists, which is the measured fact behind the finding.
+    fs.chmodSync(state, 0o777);
+    secureDir(state);
+    assert.equal(fs.statSync(state).mode & 0o777, 0o777, 'mkdirSync re-applied the mode — this test is now vacuous');
+    assert.match(String(assumePrivate(state)), /mode is 777/);
+    // A symlink where the state dir belongs, seen only because assumePrivate lstats.
+    const real = path.join(dir, 'elsewhere');
+    fs.mkdirSync(real, { mode: 0o700 });
+    const link = path.join(dir, 'claude-jam-7778');
+    fs.symlinkSync(real, link);
+    assert.match(String(assumePrivate(link)), /not a directory/);
+    // And secureWrite RE-APPLIES 0600 to a file that already existed, because writeFileSync's
+    // `mode` applies only at creation: measured 0666 in, 0666 out, with the secret inside it.
+    const tok = path.join(real, 'token.json');
+    fs.writeFileSync(tok, '{}');
+    fs.chmodSync(tok, 0o666);
+    secureWrite(tok, '{"token":"joinTokenABCDEFGH"}');
+    assert.equal(fs.statSync(tok).mode & 0o777, 0o600, 'secureWrite left a pre-created file world-readable');
+    assert.equal(assumePrivate(tok, { kind: 'file' }), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true }); // the exact path this test made
+  }
+});
+
+test('v0.34.1 host.mjs verifies the state dir and the key file, and does not claim 0600 unchecked', () => {
+  // Both gates are in host.mjs, and the state-dir one is at the TOP so the launcher and the
+  // re-exec'd daemon each pass it — a check in launch() alone would leave the daemon reading a
+  // planted host.key out of a directory nobody vetted.
+  const src = fs.readFileSync(path.join(import.meta.dirname, 'host.mjs'), 'utf8');
+  assert.match(src, /assumePrivate\(opts\.state\)/, 'host.mjs no longer verifies the state dir');
+  assert.match(src, /assumePrivate\(file, \{ kind: 'file' \}\)/, 'host.mjs no longer verifies host.key');
+  const gate = src.indexOf('assumePrivate(opts.state)');
+  assert.ok(gate > 0 && gate < src.indexOf('function loadHostKey'),
+    'the state-dir gate must run before loadHostKey can read a key out of it');
+  // The log line used to assert a mode it had never looked at. It may only say 0600 now that
+  // assumePrivate has proved it.
+  assert.equal(/reusing \$\{file\} \(0600\)/.test(src), false,
+    'host.mjs is back to printing (0600) as a claim rather than as a verified fact');
+  // token.json was the one state file written with no mode at all -> 0644 under the usual umask,
+  // while platform.mjs's own comment lists the join token as owner-only.
+  assert.equal(/fs\.writeFileSync\(file, JSON\.stringify\(buildTokenFile/.test(src), false,
+    'token.json is back on a plain writeFileSync — it must go through secureWrite');
 });
 
 test('reattachLines: the raw host command carries the key FILE, never the key', () => {

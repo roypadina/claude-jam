@@ -52,6 +52,63 @@ whether Dana said it or not. Closing that would mean writing jam's own sideband 
 transcript. What it requires is write access to `~/.claude/projects/…/<id>.jsonl`, i.e. the host's
 own machine — so the guard is not resuming a transcript somebody else can write.
 
+**3. The state dir's privacy was assumed, never checked — so on a shared Linux or WSL2 machine
+another local user could become the host.** Affects **every released version with a host key**
+(v0.34 shipped it, so 0.22.0 through 0.23.1); the weaker half of it — every state file landing in
+somebody else's directory — goes back to the first version that had a state dir.
+
+The state dir is `$TMPDIR/claude-jam-<port>`, which with the defaults on Linux and WSL2 is
+`/tmp/claude-jam-7777`: a name any other local user can compute, and `/tmp` is mode `1777`, so they
+can create it first. Three things then line up:
+
+- `secureDir` is `mkdirSync(dir, { recursive: true, mode: 0o700 })`, and **`mkdirSync` does not
+  re-apply the mode to a directory that already exists** — measured 2026-08-30, `0777` in, `0777`
+  out. A pre-created directory stays the planter's.
+- `loadHostKey` **reuses** an existing `host.key` on purpose (a restart must not demote a host
+  client that is already running), and `readHostKey` checks only the *shape* — 64 hex characters —
+  never the owner, never the mode. Its log line said `(0600)` about a file whose mode it had never
+  looked at.
+- `writeFileSync`'s `{ mode }` applies only when it **creates** the file — measured the same day,
+  `0666` in, `0666` out, with the secret written into it. So a pre-created world-readable
+  `token.json` / `session.json` / `invites.json` is where the join token, the hook secret and the
+  invite store land.
+
+Reproduced end to end on 0.23.1 with a daemon started exactly as documented: a `0777` state dir
+holding a planted `host.key`, and `[host-key] reusing … (0600)` in the log. A socket claiming
+`host: true` with that key was granted host — `welcome` handed it the token-bearing join line and
+the tmux target — and one `{t:'key'}` frame typed **`echo PWNED` into the real claude pane**. On a
+live jam that pane is Claude Code, so it is arbitrary keystrokes into somebody else's agent. The
+README's own argument for why the key grants nothing new ("anyone who can read `host.key` … is
+already a local user with the host's own privileges") is exactly what stops being true when the
+attacker is a *different* user who got there first.
+
+Fixed by verifying instead of assuming, at two independent gates — which is `hostGate`'s own
+belt-and-braces rule applied one layer down:
+
+- `pathPrivacy` (pure, in `lib.mjs`) names the three reasons a path is not somewhere secrets may go:
+  it is not that kind of object (`lstat`, never `stat`, so a **symlink** where the state dir belongs
+  is seen), it is owned by another uid, or it grants any group/other bit at all. `assumePrivate` in
+  `platform.mjs` is the `lstat` half.
+- `host.mjs` gates the **state dir** at the top of the file, which both the launcher and the
+  re-exec'd daemon run, so one check covers `host.key`, `token.json`, `session.json`,
+  `settings.json`, the invite store, the peer MCP config and the outbox. Failing it is a startup
+  refusal naming the path, the reason and the way out (`--port`, or `--state` somewhere private).
+- `loadHostKey` gates the **key file** separately and refuses rather than reuses. With no key nobody
+  is the host — the same fail-closed state an unwritable key file already produced.
+- `secureWrite` re-applies `0600` after the write, and `token.json` goes through it. It was the one
+  state file written with no mode at all (so `0644` under the usual umask), while `platform.mjs`'s
+  own comment lists "the join token" among the files only their owner may read.
+
+POSIX only, and it says so rather than implying otherwise: `process.getuid` does not exist on
+Windows and `fs.Stats.mode` there is synthesised (every writable file reads `0o666`), so the owner
+and mode questions have no answer and `restrictToUser`'s NTFS ACL remains the mechanism. The
+symlink check runs everywhere.
+
+Canary, run on all four parts: remove the state-dir gate, the key-file gate, `token.json`'s
+`secureWrite` or `secureWrite`'s chmod, and a test goes red for each. The end-to-end probe that
+took the jam over now prints the refusal and the daemon exits 2; a legitimate `0700` dir with a
+legitimate `0600` key still makes a host.
+
 ### Verified sound (attacked, nothing found)
 
 - **The daemon's local control endpoints.** Every route (`/admit`, `/end`, `/invite`, `/remote`,

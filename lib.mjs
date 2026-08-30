@@ -179,6 +179,19 @@ export function localSocket(ip, headers = {}) {
 // `token.json` beside it, and is already a local user with the host's own privileges. The key
 // grants nothing filesystem access did not already grant; it stops the NETWORK impersonating
 // the filesystem.
+//
+// v0.34.1: that paragraph is true of a state dir jam CREATED, and the whole argument turned on an
+// assumption nobody had checked — that the state dir is private. It is
+// `os.tmpdir()/claude-jam-<port>`, which is `/tmp/claude-jam-7777` on Linux and WSL2 with the
+// default port: a name any other local user can compute and, since /tmp is mode 1777, create
+// first. `secureDir` is `mkdirSync(dir, {recursive:true, mode:0o700})`, and mkdirSync does NOT
+// re-apply the mode to a directory that already exists (measured 2026-08-30: 0777 in, 0777 out) —
+// so a pre-created 0777 directory stayed 0777 and jam wrote its whole state into it. Worse,
+// `loadHostKey` REUSES an existing host.key by design (a restart must not demote a running host
+// client) and `readHostKey` checks only the SHAPE, never the owner or the mode. Reproduced on
+// 0.23.1: a planted host.key made the planter the host over loopback, welcome handed them the
+// join line, and one `{t:'key'}` frame typed `echo PWNED` into the real claude pane.
+// So privacy is verified rather than assumed, at both gates, and pathPrivacy is that check.
 export const HOST_KEY_FILE = 'host.key';
 export const HOST_KEY_BYTES = 32;
 const HOST_KEY_RE = /^[0-9a-f]{64}$/; // HOST_KEY_BYTES as hex, exactly — a short or odd file is not one
@@ -194,6 +207,58 @@ export function hostKeyPath(state) {
 // not a well-formed key — a truncated or half-written file must never compare equal to itself.
 export function hostKeyMatches(given, current) {
   return validHostKey(given) && validHostKey(current) && tokenMatches(given, current);
+}
+
+// v0.34.1: is this path one only its owner can reach? Pure — it is handed the `lstat` (lstat, not
+// stat: a symlink where the state dir should be is the whole point) and the caller's own uid, and
+// returns the REASON it is not private, or null. Three independent conditions, each named, because
+// "your jam refused to start" is otherwise an unanswerable bug report:
+//
+//   type   — a symlink, a fifo or a plain file where a directory belongs is somebody else saying
+//            where jam's secrets go. lstat is what sees it; stat follows the link and cannot.
+//   owner  — another uid owns it, so they can rename, replace or delete anything inside it
+//            whatever the mode says.
+//   mode   — any group or other bit at all. A 0700 directory is the guarantee the whole host-key
+//            argument rests on; 0750 is already enough for a group member to read the key.
+//
+// `uid` null means "there is no POSIX identity on this filesystem", which is what Windows passes:
+// there is no getuid() there, and `fs.Stats.mode` is SYNTHESISED rather than a real mode — every
+// writable file reads 0o666 — so a group/other test would refuse every directory on the platform.
+// Both the owner and the mode question are therefore unanswerable there and are skipped together;
+// the port on win32 is restrictToUser's NTFS ACL and this function is not the gate. The TYPE check
+// still runs everywhere, because a symlink is a symlink. Said out loud rather than degraded quietly.
+export function pathPrivacy(st, uid = null, { kind = 'directory' } = {}) {
+  if (!st) return null; // it does not exist yet: nothing to distrust, and the caller creates it
+  const want = kind === 'directory' ? 'isDirectory' : 'isFile';
+  if (typeof st[want] !== 'function' || !st[want]() || (st.isSymbolicLink?.() ?? false)) {
+    return `it is not a ${kind} owned by this process — a symlink or another kind of file here `
+      + 'means somebody else chose where these bytes go';
+  }
+  if (uid == null) return null; // no POSIX identity: neither of the two below can be asked
+  if (st.uid !== uid) {
+    return `it is owned by uid ${st.uid}, not by this process (uid ${uid}) — that user can replace `
+      + 'anything inside it whatever the mode says';
+  }
+  const extra = (st.mode ?? 0) & 0o077;
+  if (extra) {
+    return `its mode is ${((st.mode ?? 0) & 0o7777).toString(8)}, which grants `
+      + `${(extra & 0o070) ? 'the group' : 'other users'} access — `
+      + (kind === 'directory'
+        ? `jam's state dir holds ${HOST_KEY_FILE} and token.json, so it must be 0700`
+        : 'a credential this jam authenticates with must be 0600');
+  }
+  return null;
+}
+
+// The refusal a human reads when pathPrivacy says no. It names the path, the reason and the way
+// out, and it never quotes a byte of what the path contains.
+export function privacyRefusal(what, target, why) {
+  return `refusing to use ${what} ${target}: ${why}.\n`
+    + '  This path is predictable (it is derived from the port), so on a shared machine another '
+    + 'user can create it first and then own everything jam puts there — including the host key, '
+    + 'which is host authority.\n'
+    + '  Remove it if it is yours to remove, or start the jam on another --port (or point --state '
+    + 'at a directory only you can reach).';
 }
 
 // The two conditions, checked INDEPENDENTLY, either of which failing denies host. Belt and
