@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.24.0
 
 ### Added — hosting from Windows, through WSL2 (SPEC v0.32 **W2**)
 
