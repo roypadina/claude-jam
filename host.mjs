@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, nameTaken, resolveJoinName, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, scrubRowJoins, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, scrubSecrets, clientCommand,
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, VIEW_SH, buildTokenFile, classifyHello, localSocket, nameTaken, resolveJoinName, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, scrubRowJoins, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, scrubSecrets, clientCommand,
   // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
   respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
   // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
@@ -1085,24 +1085,16 @@ function rosterChanged(extra) {
 }
 
 // ------------------------------------------------------------- live view ----
-// ttyd runs this once per browser connection: a tmux session of the viewer's own, grouped
-// with the jam session (same live windows) but with its own focus — so the host switching
-// windows never yanks a viewer's screen — pinned to the claude window and destroyed the
-// moment the browser goes away. The tmux binary and session name are passed as arguments,
-// never interpolated into the script.
-// v0.9: `status off` on the viewer's OWN session (never the host's), so the browser shows
-// the Claude Code screen and nothing else — no window list, no `⚑ N waiting` badge.
-// v0.20: `-L $3` — a viewer's grouped session has to be born on the same tmux server as the
-// jam it is grouped with, so the socket is passed in as an argument like everything else.
-const VIEW_SH = 'S="$2-view-$$"; exec "$1" -L "$3" new-session -t "$2" -s "$S" ";" ' +
-  'set-option -t "$S" destroy-unattached on ";" set-option -t "$S" status off ";" ' +
-  'select-window -t "$S:claude"';
-
+// VIEW_SH — what ttyd runs per browser connection, and with it the whole read-only guarantee —
+// lives in lib.mjs so smoke-view can run the same string this does. See it for what each tmux
+// flag is for and what was measured without them.
 let viewProc = null; // our ttyd child: killed by its own pid, never by pattern
 
 function startView() {
   if (!ttyd || !viewOn || viewProc) return;
-  // ttyd >= 1.7 is read-only unless -W is given, so read-only needs no flag of its own.
+  // No `-W` and no `-R`: `-R` does not exist on ttyd >= 1.7 and passing it would stop the view
+  // booting at all. Read-only is enforced on the tmux client instead (see VIEW_SH), which holds
+  // on every ttyd version.
   const child = spawn(ttyd, ['-p', String(opts.viewPort), '-c', `jam:${viewKey}`,
     'sh', '-c', VIEW_SH, 'jam-view', TMUX, opts.tmux, SOCKET], { stdio: 'ignore' });
   viewProc = child;

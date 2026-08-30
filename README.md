@@ -478,8 +478,12 @@ anybody. Anyone attached to the jam session still gets the one-key `tmux display
 whoever answers first wins and the other closes.
 
 `--view` (needs `ttyd`) additionally serves the live TUI read-only in a browser at
-`http://jam:<token>@<host>:7778`. Each tab gets its own grouped tmux session, so viewers never
-move each other's screen.
+`http://jam:<token>@<host>:7778`. Each tab gets its own grouped tmux session, born
+`read-only,ignore-size`, so viewers never move each other's screen — and never type into yours or
+resize it either. Read-only is enforced on the tmux client rather than by a ttyd flag on purpose:
+ttyd's own default flipped in 1.7.0, and it honours a resize even when it refuses input.
+**The credential in that URL is the join token itself**, so anyone you send a view URL to can also
+join the jam — treat a view link exactly like a join link. `/token new` changes both at once.
 
 **Bind is `0.0.0.0` and the only auth is the token plus your own `/accept`** — expose this over
 Tailscale, a LAN you trust, an SSH tunnel (`ssh -L 7777:127.0.0.1:7777 host`), or a Cloudflare

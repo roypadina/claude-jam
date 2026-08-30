@@ -660,6 +660,18 @@ is still in the file, and still in your context.
   `http://jam:<key>@<host-ip>:7778` — this terminal and nothing else, no tmux chrome. Append
   `?fontSize=16` to make it bigger. `--tunnel` gives it a public `https://…trycloudflare.com`
   address too, `--funnel` a `https://…ts.net:8443` one.
+  - **`<key>` is the join token whenever one is set** — one secret, so a friend needs only one
+    thing. The consequence is the part worth knowing: a leaked view URL is a leaked join token, so
+    send a view link only to people you would let into the jam. With no token set (knock mode) the
+    view gets a generated key of its own, and it is never put into claude's context.
+  - Read-only means read-only: a viewer's grouped session is born `read-only,ignore-size`, so a
+    browser tab can neither type into the pane nor change its size. That is enforced on the tmux
+    client, not by a ttyd flag — ttyd's default flipped in 1.7.0 and it honours a resize even when
+    it refuses input, so the flag alone would have made the guarantee depend on which `ttyd` you
+    have installed.
+  - What the view does NOT do is revoke on its own: `/kick` disconnects a client but does not
+    change the view key, so someone you kick keeps the browser view until you rotate
+    (`/token new`) or turn it off (`/menu → Access → Browser view`).
 - `tmux attach -t claude-jam` on the host's machine is the raw TUI, keyboard included.
 
 ## Reaching a remote friend (`--tunnel` or `--funnel`)

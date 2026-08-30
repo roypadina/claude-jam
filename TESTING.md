@@ -38,6 +38,28 @@ Run when the feature list is done. Not a smoke re-run — an adversarial pass ov
 - Fresh-install rehearsal: `brew install` and `npm i -g` on a clean machine, following the wiki's
   `Install` and `Agent-Install` pages literally, including the agent-driven path.
 
+## The nineteenth suite — `smoke-view` (added 2026-08-30, not yet in a release gate)
+
+`scripts/smoke-view.mjs`, six steps, ~25 s, added by the adversarial review of `--view`. It is the
+**first behavioural test the browser view has ever had**: through v0.23.0 the read-only claim was
+carried entirely by a comment in `host.mjs`, and the review reproduced two ways in which the
+comment was wrong (a read-only viewer resizing the host's real claude window 150x44 → 12x4, and
+keystrokes landing in the pane under a writable ttyd, which is what ttyd ≤ 1.6.3 is by default).
+
+It needs a **real ttyd** — it is the binary under test — and skips cleanly with a SKIP line when
+there is none, so it is safe to add to the gate on any machine. Everything else is real: a real
+daemon, a real tmux server, a real host client attached in a real pty at 150x45, and real frames in
+ttyd's own websocket protocol. The pane is `cat >> <log>` rather than claude, which makes "a viewer
+typed into the host" a byte in a file.
+
+**Step 4 is the canary**: it runs the same `VIEW_SH` the daemon runs (which is why `VIEW_SH` moved
+to `lib.mjs`) under `ttyd -W`. Verified 2026-08-30 by removing `-f read-only,ignore-size`: steps 3
+and 4 go red — `got "30x8", want "150x44"` and `got "OLD_TTYD_PWN\n", want ""` — and the other four
+stay green, which is the right shape. Ports 7951/7952/7953, clear of every other suite (smoke-peer
+already holds 7941/7943).
+
+Not yet run as part of a release gate; the gate record below is 0.23.0's, which predates it.
+
 ## Release gates that have actually run
 
 - **0.23.0 — 2026-08-30. The first gate with a Windows leg, and the leg is what it was for.**

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, resolveJoinName, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
+import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, VIEW_SH, buildTokenFile, classifyHello, resolveJoinName, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
   exportFileName, resumeInstructions, scrubSecrets, stripTokenBlock, clientCommand,
   scrubRowJoins,
@@ -493,6 +493,24 @@ test('resolveTtyd: an override wins, else the Homebrew path if it exists, else n
   assert.equal(resolveTtyd(undefined, (p) => p === TTYD_DEFAULT), TTYD_DEFAULT);
   assert.equal(resolveTtyd(undefined, () => false), null);
   assert.equal(resolveTtyd(), null); // no probe at all must not throw
+});
+
+test('VIEW_SH: read-only is enforced on the tmux client, not left to ttyd\'s default', () => {
+  // The whole read-only claim used to rest on "ttyd >= 1.7 is read-only unless -W". Two measured
+  // holes in that (2026-08-30): ttyd honours a RESIZE even when it refuses INPUT, so a viewer
+  // dragged the host's real claude window from 150x44 to 12x4; and ttyd <= 1.6.3 is WRITABLE with
+  // no flag at all, while `--view-ttyd <path>` accepts any binary. Both close on the tmux side,
+  // which is version-independent — so these two flags ARE the guarantee.
+  assert.match(VIEW_SH, /new-session -f read-only,ignore-size -t "\$2"/,
+    'the viewer\'s grouped session must be born read-only and size-ignored');
+  // On the jam's session, never on the host's — a viewer must not turn off the host's status bar.
+  assert.match(VIEW_SH, /set-option -t "\$S" status off/);
+  assert.equal(/set-option -t "\$2" status off/.test(VIEW_SH), false);
+  // Still argv-only: the tmux binary, the session and the socket are $1/$2/$3, never interpolated.
+  assert.match(VIEW_SH, /exec "\$1" -L "\$3"/);
+  // And the behavioural half of this lives in scripts/smoke-view.mjs, which runs the SAME string
+  // under a real ttyd — including `ttyd -W` on purpose, which is the canary for the flags.
+  assert.equal(fs.existsSync(path.join(import.meta.dirname, 'scripts', 'smoke-view.mjs')), true);
 });
 
 test('resolveViewKey: the friend token is the view key; without one, a generated key', () => {
