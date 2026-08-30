@@ -773,8 +773,27 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
      host whose `$TMPDIR` is on `/mnt/c` would refuse to start at all — that is the outcome W2 has
      to design around, and the reason this is a precondition.
 
-  **0.23.3 — 1 and 2 are now COMMITTED to CI, and 3 is not. Read this before treating any of it as
-  measured: the `ubuntu-latest` leg has not run at the time of writing.** The three experiments were
+  **0.23.3 — EXPERIMENTS 1 AND 2 ARE MEASURED ON REAL LINUX, INCLUDING TWO REAL UIDS. 3 IS NOT.**
+  Run 2026-08-30 in a Debian bookworm container (linuxkit kernel, aarch64, node 22.23.2), **as a
+  non-root user `jamci` (uid 1001) with passwordless sudo — deliberately, because that is the shape
+  of a GitHub `ubuntu-latest` runner** and because root defeats two of the branches. It is a real
+  Linux userland with a real `1777` `/tmp` and real uids; it is **not** the GitHub runner and **not**
+  a Linux desktop, and the rows below say which claims depend on that.
+
+  What the run printed, verbatim on the two lines that matter:
+
+  ```
+  os.tmpdir() = /tmp · mode 1777 · uid 0 · world-writable: true · TMPDIR unset
+        two real uids: nobody is uid 65534, this process is uid 1001
+  ```
+
+  All six checks passed, and the unit suite is **454 tests, 451 pass, 3 skipped, 0 fail on Linux —
+  byte-identical to macOS**, which is the answer to "what will the leg find": nothing. No assertion
+  in the suite encoded a macOS fact. That is a different result from the Windows leg (four genuine
+  reds on first contact) and the reason is visible in the diff history: the Windows leg already
+  taught this suite to use `path.join` and to pass the platform as an argument.
+
+  The three experiments were
   the reason a Linux leg was added, and `scripts/check-state-privacy.mjs` is where they live. It runs
   on every leg, needs no tmux, no claude and no network (the gate is the FIRST thing `host.mjs` does
   after argument parsing, so a refusal costs one node start), and it prints `NOT EXERCISED` with a
@@ -782,9 +801,9 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
 
   | experiment | where it stands |
   | --- | --- |
-  | **2 — the false positive** | **MEASURED, and on macOS, 2026-08-30.** It did not need Linux after all, and that realisation is the useful part: the gate `lstat`s the state DIR, never its parent, so a `1777` parent is irrelevant to it — and `/private/tmp` on macOS is really mode `1777`, so the shape is reproducible here. An ordinary `secureDir`'d state dir under a genuinely world-writable parent is NOT refused, and the check `chmod`s the parent to `1777` and asserts it took, so the check cannot go vacuous. The whole unit suite was also re-run with `TMPDIR=/private/tmp` — the Linux `$TMPDIR` shape — and is unchanged at 451/0/3. |
-  | **1 — the attack, as ONE uid** | **MEASURED, 2026-08-30**, against the real `host.mjs`: a `0777` state dir with a planted 64-hex `host.key` exits 2, the refusal names `mode is 777`, it does not quote the key, and **nothing was written into the directory**. Plus the symlink case, and `EACCES` on an unsearchable parent. This is the same one-uid rehearsal 0.23.2 did, now automated on every push. |
-  | **1 — the attack, as TWO REAL UIDS** | **COMMITTED, NEVER RUN.** This is the branch macOS cannot reach and it is the point of the exercise. It needs a second uid, so it needs passwordless `sudo` — a CI runner has it, a developer's machine must not, and the check uses `sudo -n` so it can never prompt. On `ubuntu-latest` it creates the state dir as `nobody` at **mode 0700 on purpose** (a `0777` dir is refused by the mode branch before owner is ever asked, so only a tidy-umask plant tests the OWNER branch at all) and asserts the refusal names `owned by uid <n>`. On this Mac it reports `NOT EXERCISED — no passwordless sudo`, which is the honest line and is what the local run printed. |
+  | **2 — the false positive** | **MEASURED ON LINUX, 2026-08-30**, against the real `/tmp` at mode `1777`, and on macOS as well. It did not need Linux after all, and that realisation is the useful part: the gate `lstat`s the state DIR, never its parent, so a `1777` parent is irrelevant to it — and `/private/tmp` on macOS is really mode `1777`, so the shape is reproducible here. An ordinary `secureDir`'d state dir under a genuinely world-writable parent is NOT refused, and the check `chmod`s the parent to `1777` and asserts it took, so the check cannot go vacuous. The whole unit suite was also re-run with `TMPDIR=/private/tmp` — the Linux `$TMPDIR` shape — and is unchanged at 451/0/3. |
+  | **1 — the attack, as ONE uid** | **MEASURED ON LINUX AND macOS, 2026-08-30**, against the real `host.mjs`: a `0777` state dir with a planted 64-hex `host.key` exits 2, the refusal names `mode is 777`, it does not quote the key, and **nothing was written into the directory**. Plus the symlink case, and `EACCES` on an unsearchable parent — which the Linux run DID exercise, because it ran as a non-root user. Also **`smoke-lifecycle` S4 passed on Linux**, which is the launcher-level version of the same refusal (see the smoke assessment below for why the rest of that suite did not). |
+  | **1 — the attack, as TWO REAL UIDS** | **MEASURED ON LINUX, 2026-08-30. This is the branch macOS cannot reach and it is the whole point of the exercise, and it is now run.** `nobody` (uid 65534) creates `/tmp/…/claude-jam-7997` at **mode 0700 on purpose** — a `0777` dir is refused by the mode branch before owner is ever asked, so only a tidy-umask plant exercises the OWNER branch at all — and the real `host.mjs`, as uid 1001, exits 2 with `owned by uid 65534`. Canary run on Linux too: neutering `assumePrivate` turns this check red along with two others, and no jam is built. On macOS it correctly reports `NOT EXERCISED — no passwordless sudo`. |
   | **3 — WSL2 on a DrvFs mount** | **UNCHANGED, and still a W2 precondition.** No CI runner has a `/mnt/c`, so neither the `0777`-for-everything shape nor the reports-no-usable-metadata shape can be reached. `pathPrivacy`'s fail-closed branch is unit-tested against synthesised stats and nothing more. Prove: one WSL2 install, `--state /mnt/c/tmp/jam`, and a report of WHICH refusal fired. |
 
   **Two things the CI leg will not close, said here so nobody reads the green as more than it is.**
@@ -819,19 +838,42 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   **if one is running**"*, so a runner with no jam on 7777 is fine; and it brings its own `$TMPDIR`,
   its own ports (7845–7855) and its own sessions (`jamlife*`).
 
-  **It was NOT wired in this batch for one reason: it has never run on Linux, and I cannot run it.**
-  Adding an unrun nineteen-step tmux suite to the gate in the same commit as the leg itself means the
-  first Linux result mixes "the gate regressed" with "tmux 3.5a is not tmux 3.7c" and nobody can tell
-  which without a second push. This repo's comments cite measured tmux-3.7c behaviours by name
-  (*"`show-options -t` does not honour the `=` prefix"*), Ubuntu ships an older tmux, and TESTING.md's
-  own recurring lesson is that an edit which compiles is not a run. That is a reason to do it as its
-  own batch with somebody watching, not a reason not to do it.
-  Prove/do: `apt-get install -y tmux` + `node scripts/smoke-lifecycle.mjs` behind
-  `if: runner.os == 'Linux'`, pushed once on a branch and read before it goes near `main`'s gate. If
-  it is green, `smoke-nudge` (the platform seam, and the suite that would catch a Linux SOUND
-  regression) is the obvious second, then `smoke-scroll`.
+  **AND IT WAS RUN, WHICH IS WHY IT IS NOT WIRED: 13 of 19 steps FAILED on Linux.** Debian bookworm
+  container, tmux 3.3a, node 22.23.2, as the non-root user `jamci`, 2026-08-30. Wiring it on a
+  prediction would have put a 13-red suite into the gate. The failures, and what they are not:
 
-  What ran for this batch instead, all on macOS 2026-08-30: the unit suite **454 tests, 451 pass, 3
+  - **The two that looked like tmux-version differences are NOT.** `F3 is not bound to
+    detach-client on jam's socket`, and an `invalid option: @claude-jam-owned` from the S1 decoy
+    plant, both smelled like tmux 3.3a vs the 3.7c this repo's comments cite by name. Probed
+    directly on tmux 3.3a: `bind-key -T root F3 detach-client` exits 0 and `list-keys -T root` shows
+    F3, and `set-option -t <session> @foo bar` + `show-options` round-trips. **Both work.** So tmux
+    version is not the cause, and that hypothesis is closed rather than left hanging.
+  - **The real cluster is the jam not fully coming up in a container**: two launches reported
+    `daemon did not come up`, and `pids: daemon 329 · claude 0` — the pane's process was never seen
+    at all, which is also what un-bound F3 and the pty timeouts follow from. The container had no
+    controlling tty (`su jamci -c`), and four of this suite's steps drive real ptys. This is
+    evidence about the environment, not about Linux hosting: it is neither a demonstration that
+    Linux hosting works nor that it is broken.
+  - **A CASCADE turned 2 failures into 13, and that is a suite bug worth fixing on any platform.**
+    A failed launch leaves the `jamlife` session behind, and five later steps then fail with
+    `tmux session "jamlife" is already a jam.` The first genuine failure is therefore the only one
+    worth reading, and the RESULT line overstates by about 6×.
+  - **What DID pass is the part this batch cares about**: S1, S2b, **S3** (read-only against the
+    live jam), **S4** — the launcher-level state-dir refusal, printing both the `mode is 777` and
+    the symlink refusals and *"nothing was written into either one, and no tmux session was
+    built"* — step 1, and the closing decoy check.
+
+  So: wiring `smoke-lifecycle` to the Linux leg is still the right next step and still cheap, but it
+  needs an environment triage pass first, which is a batch of its own. Prove/do, in order: (1) find
+  out whether the launch failures are the missing tty by re-running under a real pty (`script -qec`
+  or a container with `-t`), (2) fix the cascade so one failed launch cannot poison five later steps
+  — it removes the session it created before it throws, which is what S4 already does, (3) then
+  `apt-get install -y tmux` + `node scripts/smoke-lifecycle.mjs` behind `if: runner.os == 'Linux'`,
+  on a branch, read once before it goes near `main`'s gate. If it goes green, `smoke-nudge` (the
+  platform seam, and the suite that would catch a Linux SOUND regression) is the obvious second,
+  then `smoke-scroll`.
+
+  What ran for this batch on macOS 2026-08-30: the unit suite **454 tests, 451 pass, 3
   skipped, 0 fail** (and again at `TMPDIR=/private/tmp`, the Linux `$TMPDIR` shape, unchanged);
   `check-terminal-gate`, `check-state-privacy` and `check-discovery-refusal` all clean; `npm pack
   --dry-run` 21 files; `smoke-nudge` **16/16 in 18 s** (the sound seam, which is what this batch
@@ -842,12 +884,24 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   the peer executor was touched — the diff is one pure function extracted, four prototype-key guards,
   two new check scripts and CI. Prove: the full sweep at the next release gate.
 
-- 2026-08-30 · **0.23.3: a Linux HOST has still never existed, and the CI leg does not change that.**
+- 2026-08-30 · **0.23.3: a Linux HOST is still unproven, and the CI leg does not change that.**
   Said as its own entry so it cannot be read out of the rows above. `ubuntu-latest` runs pure
-  functions and three real-entry-point checks that exit before tmux. Nothing has ever started a
-  daemon, built a tmux session, run `capture-pane`, injected into a pane or pressed F3 on Linux.
-  Prove: the smoke wiring in the entry above, and then one person hosting a real jam on a real Linux
-  box and joining it from a mac.
+  functions and three real-entry-point checks that all exit before tmux is reached. The one attempt
+  at more — `smoke-lifecycle` in a container — got 6 of 19 steps and is written up above: a jam
+  *partly* came up on Linux (a daemon answered `/health`, two jams listed `live`, the state-dir gate
+  refused correctly at the launcher level) and the parts needing a pane process and a pty did not.
+  Nobody has pressed F3, seen a `capture-pane` frame or watched an injection land on Linux.
+  Prove: the triage in the entry above, and then one person hosting a real jam on a real Linux box
+  and joining it from a mac.
+
+- 2026-08-30 · **0.23.3: the Linux sound resolution on a HEADLESS box, measured — and it is
+  `null`.** All three kinds resolve to no sound in a Debian bookworm container, because there is no
+  `/usr/share/sounds` directory at all (checked: the path does not exist). That is the correct
+  answer and the one `playSound` turns into `false` without spawning anything, so it confirms the
+  "nothing installed → silence" branch against a real box rather than a stubbed `exists`. It also
+  means the `ubuntu-latest` leg's printed sound line will read `[["knock",null],…]` and that is not
+  a failure. What it does NOT do is exercise `paplay`/`aplay` at all — that still needs a Linux
+  desktop with the freedesktop theme, and so does "the three are distinguishable by ear".
 
 ### v0.32 W1 — the Windows client (2026-08-30)
 
