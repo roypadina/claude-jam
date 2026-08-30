@@ -70,7 +70,7 @@ both in shipped code, both in the CHANGELOG's `Unreleased` section. What proves 
 | --- | --- | --- |
 | the `--resume`/`--replay` seed was an unscrubbed FIFTH funnel | the registry walk now walks `backfillHistory` on five real transcript shapes; the `host.mjs` funnel lint counts it | `smoke-replay` 17/17 (unchanged suite, re-run); the finding itself was reproduced with a throwaway daemon before the fix and the same probe comes back clean after |
 | a transcript could forge WHO SPOKE in the replay | `v0.34.1 backfillHistory: a transcript cannot forge WHO SPOKE in the replay` — six bad `from` shapes, ESC included, plus both bent-body cases | same probe: `from` is the host's, the second `[Roy]:` line arrives bent |
-| the state dir's privacy was assumed, never checked (a local user could become the host) | `pathPrivacy` (three reasons × both kinds × the Windows skip), `assumePrivate + secureWrite` against the real filesystem, and a `host.mjs` lint for both gate call sites | **`smoke-lifecycle` S4 and S4b are new** — see below |
+| the state dir's privacy was assumed, never checked (a local user could become the host) | `pathPrivacy` (three reasons × both kinds × the Windows skip), its **fail-closed** branch (a POSIX stat reporting no usable owner/mode), `assumePrivate`'s fail-closed branch (an `lstat` that is not ENOENT/ENOTDIR, EACCES measured against a real unsearchable parent), `assumePrivate + secureWrite` against the real filesystem, and a `host.mjs` lint for both gate call sites | **`smoke-lifecycle` S4 and S4b are new** — see below |
 
 `smoke-lifecycle` is 17 steps → **19**. The two new ones are there because the unit half can only
 lint that `host.mjs` *calls* `assumePrivate`, and this project has already been bitten twice by a
@@ -670,13 +670,28 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   **DECIDED AND DISCHARGED — 0.22.1: Roy chose ordering over silence.** The name check moved below
   the authentication gate, a knocker's clash is settled at admission by `resolveJoinName`, and a
   source lint fails if it ever moves back. See the CHANGELOG's 0.22.1 section.
-- 2026-08-30 · The v0.34.1 state-dir takeover was reproduced **as one uid** (the directory and the
-  planted `host.key` created first, exactly as a second uid would leave them), not as two real
-  users. The Linux exposure rests on two unmeasured-here facts: `/tmp` is mode `1777`, and
-  `os.tmpdir()` is `$TMPDIR || '/tmp'`. This machine is macOS, where `$TMPDIR` is a per-user `0700`
-  directory and the attack does not apply. Prove: on the Linux run the campaign already owes, create
-  `/tmp/claude-jam-7777` as a second user with a planted `host.key`, then start a jam as the first —
-  it must refuse. (The FIX is measured on macOS and is platform-independent.)
+- 2026-08-30 · **The Linux/WSL2 leg of the state-dir gate has never been run on Linux, and it is a
+  precondition for SPEC v0.32 W2 (the WSL2 Windows host), not a footnote to it.** The 0.23.2 takeover
+  was reproduced **as one uid** on macOS — the directory and the planted `host.key` created first,
+  exactly as a second uid would leave them — never as two real users. The exposure itself rests on
+  two facts not measured here: `/tmp` is mode `1777`, and `os.tmpdir()` is `$TMPDIR || '/tmp'`. This
+  machine is macOS, where `$TMPDIR` is a per-user `0700` directory and the attack does not apply at
+  all, which is exactly why it went five reviews unnoticed. The FIX is measured on macOS and is
+  platform-independent (`lstat` + `st.uid` + `st.mode`).
+
+  Three experiments settle it, all on one Linux box (or one WSL2 install), and W2 should not ship
+  without them:
+  1. **The attack.** As user B, `mkdir -m 777 /tmp/claude-jam-7777` and plant a 64-hex `host.key`.
+     As user A, `claude-jam host`. It must refuse and exit 2, naming the mode.
+  2. **The false positive.** As user A alone, `claude-jam host` on a clean `/tmp`. It must start
+     normally — the gate must not refuse an ordinary Linux jam, which is the regression this fix
+     could plausibly cause and macOS cannot detect.
+  3. **W2's own case: a `--state` (or `$TMPDIR`) on a mounted Windows drive under WSL2.** DrvFs
+     without `metadata` reports one uid and mode `0777` for everything, so experiment 1's branch
+     should fire; a mount reporting no usable owner/mode at all should hit the fail-closed branch.
+     Either refusal is correct, but which one fires is unknown until somebody runs it, and a WSL2
+     host whose `$TMPDIR` is on `/mnt/c` would refuse to start at all — that is the outcome W2 has
+     to design around, and the reason this is a precondition.
 - 2026-08-30 · `pathPrivacy`'s Windows branch (uid `null` → the owner and mode questions are skipped
   and only the symlink check runs) is asserted by unit test and has never executed on Windows. It is
   reached there through `assumePrivate`, whose `process.getuid` check is the only thing selecting it.

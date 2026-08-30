@@ -104,6 +104,28 @@ Windows and `fs.Stats.mode` there is synthesised (every writable file reads `0o6
 and mode questions have no answer and `restrictToUser`'s NTFS ACL remains the mechanism. The
 symlink check runs everywhere.
 
+**And on a POSIX platform it fails CLOSED, which matters most for WSL2 — the documented Windows
+host path.** A non-null uid is a promise that this machine has real uid/mode semantics, so a `stat`
+that then reports neither is not "probably fine": it is a filesystem jam cannot reason about, and
+the state dir does not go there. Two branches say so rather than one:
+
+- a POSIX `stat` whose `uid` or `mode` is not an integer is refused (it used to be
+  `(st.mode ?? 0) & 0o077` → `0` → *allowed*, which is the same fail-open shape as the finding
+  itself). Under WSL2 `getuid()` exists, so a `--state` or `$TMPDIR` on a mounted Windows drive is
+  a DrvFs mount with emulated metadata: without `metadata` it reports one uid and mode `0777` for
+  everything, which the mode branch already refuses, and this branch covers the mount that reports
+  nothing usable at all;
+- `assumePrivate` allows only `ENOENT`/`ENOTDIR` from `lstat` — those two mean "not there yet",
+  which is the normal case. `EACCES` on an unsearchable parent, `ELOOP`, `EIO`, a mount that has
+  gone away: each is a refusal. `catch { return null }` had called every one of them private.
+
+This makes the gate a **precondition for the WSL2 host in `SPEC.md` v0.32 W2**, not a footnote to
+it: `/tmp` on Linux and WSL2 is `1777`, so W2 inherits the exposure, and a WSL2 install whose
+`$TMPDIR` sits on `/mnt/c` will now refuse to start rather than write a host key somewhere it
+cannot vouch for. `TESTING.md` records the three experiments that settle the Linux leg — the
+attack, the *false positive* (an ordinary Linux jam must still start, which macOS cannot detect),
+and DrvFs — and says W2 should not ship without them.
+
 Canary, run on all four parts: remove the state-dir gate, the key-file gate, `token.json`'s
 `secureWrite` or `secureWrite`'s chmod, and a test goes red for each. The end-to-end probe that
 took the jam over now prints the refusal and the daemon exits 2; a legitimate `0700` dir with a

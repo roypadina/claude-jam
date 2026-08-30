@@ -7277,6 +7277,60 @@ test('v0.34.1 pathPrivacy: the three reasons a path is not somewhere secrets may
   assert.match(pathPrivacy(st({ isSymbolicLink: () => true }), null), /not a directory/);
 });
 
+test('v0.34.1 pathPrivacy FAILS CLOSED when a POSIX filesystem cannot answer', () => {
+  // uid non-null is a promise that this machine has real uid/mode semantics. A stat that then
+  // reports neither is not "probably fine" — it is a filesystem jam cannot reason about, and the
+  // old code did `(st.mode ?? 0) & 0o077` → 0 → allowed, which is the same fail-open shape as the
+  // finding this function exists to close. The case that matters is WSL2, the documented Windows
+  // host path (SPEC v0.32 W2): getuid() exists there, so uid is non-null, and a --state on a
+  // mounted Windows drive is a DrvFs mount with emulated metadata.
+  const st = (over = {}) => ({
+    mode: 0o40700, uid: 501, isDirectory: () => true, isFile: () => false,
+    isSymbolicLink: () => false, ...over,
+  });
+  for (const bad of [{ mode: undefined }, { mode: null }, { mode: NaN }, { mode: '0700' },
+    { uid: undefined }, { uid: null }, { uid: NaN }, { uid: '501' }]) {
+    const why = pathPrivacy(st(bad), 501);
+    assert.match(String(why), /does not report an owner and a mode/, `${JSON.stringify(bad)} was allowed`);
+  }
+  // A DrvFs mount that DOES report a mode reports 0777, which the mode branch already refuses —
+  // so the two branches together cover both shapes that mount takes.
+  assert.match(pathPrivacy(st({ mode: 0o40777 }), 501), /mode is 777/);
+  // And the normal POSIX answer is unchanged: mode 0 is a real mode, and it is owner-only.
+  assert.equal(pathPrivacy(st({ mode: 0o40000 }), 501), null);
+});
+
+test('v0.34.1 assumePrivate FAILS CLOSED on an lstat that cannot answer', () => {
+  // ENOENT and ENOTDIR are the only allows: they mean the path is not there yet, which is the
+  // normal case and the caller's job to create. `catch { return null }` called EVERY error private.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-failclosed-'));
+  try {
+    assert.equal(assumePrivate(path.join(dir, 'not-there')), null);              // ENOENT
+    assert.equal(assumePrivate(path.join(dir, 'not-there', 'deeper')), null);     // ENOENT
+    fs.writeFileSync(path.join(dir, 'afile'), 'x');
+    assert.equal(assumePrivate(path.join(dir, 'afile', 'under-a-file')), null);   // ENOTDIR
+    if (process.platform === 'win32') return; // no mode bits to take a parent's search right away
+    // EACCES: a parent directory jam cannot search. lstat on the child then fails with neither
+    // an owner nor a mode to judge, and the answer must be a refusal rather than a pass.
+    const locked = path.join(dir, 'locked');
+    fs.mkdirSync(locked, { mode: 0o700 });
+    fs.mkdirSync(path.join(locked, 'state'), { mode: 0o700 });
+    fs.chmodSync(locked, 0o000);
+    try {
+      const why = assumePrivate(path.join(locked, 'state'));
+      // Running as root defeats this on purpose — every mode is searchable, so lstat succeeds and
+      // the ordinary answer is correct. Say which case ran rather than asserting the wrong one.
+      if (typeof process.getuid === 'function' && process.getuid() === 0) {
+        console.log('      (running as root: EACCES is unreachable, so the ENOENT paths above are the proof)');
+      } else {
+        assert.match(String(why), /cannot be inspected \(EACCES\)/);
+      }
+    } finally { fs.chmodSync(locked, 0o700); }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true }); // the exact path this test made
+  }
+});
+
 test('v0.34.1 assumePrivate + secureWrite: the real filesystem, and the mode that did not stick', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jam-privacy-'));
   const state = path.join(dir, 'claude-jam-7777');
