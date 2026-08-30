@@ -30,6 +30,28 @@ test cannot see whether the caller *asks* correctly.
   reason and exit non-zero, in both the table and the `--json` shape. *Nobody is hosting* and *this
   machine cannot look* are different answers. On Linux that is not a branch, it is the only branch.
 
+**And it was all RUN on real Linux, not merely committed** — the CI leg cannot be pushed from here,
+so the same thing was run locally: a Debian bookworm container, node 22.23.2, as a **non-root user
+with passwordless sudo**, which is the shape of a GitHub runner and which root would have made two
+branches unreachable in. Results:
+
+- the unit suite is **454 tests, 451 pass, 3 skipped, 0 fail — identical to macOS.** Nothing in it
+  had encoded a macOS fact, which is a different outcome from the Windows leg's four first-contact
+  reds and is the Windows leg's own legacy: it already taught this suite `path.join` and
+  platform-as-an-argument;
+- `os.tmpdir() = /tmp · mode 1777 · world-writable: true` — **the two facts the whole 0.23.2 finding
+  rested on, cited from POSIX for a week and now measured**;
+- the false positive: an ordinary jam under the real `1777` `/tmp` starts. The gate does not refuse
+  Linux hosts;
+- and **the attack, as two real uids**: `nobody` (65534) plants a `0700` state dir, `host.mjs` as uid
+  1001 exits 2 naming `owned by uid 65534`. That is the experiment TESTING.md has been owed since
+  0.23.2, and it is the one macOS cannot run at all.
+
+`smoke-lifecycle` was also tried there and got **6 of 19** steps — written up in TESTING.md rather
+than summarised here, because the interesting half is that the two failures which looked like tmux
+version differences were probed on tmux 3.3a directly and both calls work, so that hypothesis is
+closed. Its S4 (the launcher-level state-dir refusal) passed on Linux.
+
 **A caution that belongs in the changelog rather than in a comment**, because it was found the hard
 way while canarying the first of those: with the privacy gate neutered, `node host.mjs` on a planted
 directory does not fail — it **builds a real jam** and detaches. The check therefore runs `host.mjs`
