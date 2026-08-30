@@ -2054,21 +2054,57 @@ export function replayCount(replay = REPLAY_DEFAULT, held = 0) {
   return Math.min(want, have);
 }
 
-export function backfillHistory(text, { hostName = 'Host', cap = REPLAY_DEFAULT } = {}) {
+// v0.34.1: the FIFTH scrub funnel, and the one that was missed. The live transcript funnel
+// (host.mjs onTranscript) is `scrubSecrets(stripControl(e.text), liveSecrets())`; this path only
+// ever did the stripControl half, so a secret claude had read off disk went into the ring buffer
+// verbatim and out to every joiner in `welcome.history`. Reproduced on 0.23.1: a state dir whose
+// `host.key` the daemon reuses (a restart on the same port), a transcript recording that read, and
+// `--resume --replay` handed the live host key, the live join token AND the live hook secret to a
+// guest in clear — the three values the mirror, the pane and `/export` all mask. `secrets` is
+// therefore not optional in spirit: host.mjs passes liveSecrets() and the registry test walks
+// this funnel with the other four.
+//
+// It is also where a transcript stops being trusted about WHO SPOKE. The replay is the one door
+// where the bytes come off disk rather than from a live participant, so the two guarantees the
+// live `say` path enforces are enforced here too:
+//   - `from` must be a name jam itself could have written. PREFIX_RE's capture is `[^\]]{1,24}`,
+//     which admits spaces, punctuation and ESC — and `from` is the only field that reaches a
+//     client WITHOUT going through stripControl, because stripControl runs on `text`. A `from`
+//     that is not a validName did not come from jam's injection, so the line is not bridged: it
+//     is replayed as the host's own, whole, prefix and all.
+//   - the body is neutralized, exactly as `{t:'say'}` does at host.mjs's say handler. A guest's
+//     own text is already bent before it is injected, so this is a no-op for anything jam wrote;
+//     what it catches is a second `[Roy]:` line inside the message, which is 0.22.1's forgery one
+//     surface over. BOTH cases are bent, bridged and not: the frame's attribution is `from`, so a
+//     `[X]:` anywhere in `text` is by definition not attribution and must not read as one. There
+//     is no live behaviour to match for the unbridged case — a host TUI line that starts
+//     `[Name]: ` parses as bridged and the live path DROPS it, so nothing was ever broadcast. The
+//     cost is that a host who really typed `[note]: mine` sees one bent bracket in the replay.
+//
+// ponytail: the CEILING, named rather than implied. A FIRST line reading `[Dana]: hello` is
+// byte-identical to what jam's own injection writes, so a transcript that contains one is replayed
+// as Dana whether Dana ever said it or not — there is no marker in the file to tell the two apart,
+// and inventing one would mean writing jam's own sideband into claude's transcript. What is closed
+// above is everything a name cannot be (`from` is a validName or the line is the host's) and
+// everything after the first line (bent). What remains needs WRITE access to
+// `~/.claude/projects/…/<id>.jsonl` — the host's own machine — so the guard that matters is not
+// resuming a transcript somebody else can write. Upgrade path if that ever stops holding: sign the
+// injected line, or keep jam's own record of who said what beside the state dir.
+export function backfillHistory(text, { hostName = 'Host', cap = REPLAY_DEFAULT, secrets = {} } = {}) {
   const events = [];
   const files = new Map();
   let results = 0; // the same per-turn `⎿` budget the live path applies (toolResultAction)
   for (const line of String(text ?? '').split('\n')) {
     for (const e of parseJsonlLine(line)) {
       noteFilePath(files, e.file);
-      const text_ = stripControl(e.text);
+      const text_ = scrubSecrets(stripControl(e.text), secrets);
       if (e.kind === 'user') {
         results = 0; // a human turn starts a turn, exactly as startTurn() does live
         // A bridged line was injected as `[Dana]: hello`, and the live broadcast of it carried
         // the name in `from` with the prefix stripped — so the replay has to look the same.
-        events.push(e.bridged
-          ? { t: 'say', from: e.from, text: text_.replace(PREFIX_RE, '') }
-          : { t: 'say', from: hostName, text: text_ });
+        events.push(e.bridged && validName(e.from)
+          ? { t: 'say', from: e.from, text: neutralizePrefixes(text_.replace(PREFIX_RE, '')) }
+          : { t: 'say', from: hostName, text: neutralizePrefixes(text_) });
       } else if (e.kind === 'text') events.push({ t: 'agent', kind: 'text', text: text_ });
       else if (e.kind === 'tool') events.push({ t: 'agent', kind: 'tool', text: text_ });
       else if (e.kind === 'tool-result') {
