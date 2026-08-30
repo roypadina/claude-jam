@@ -51,6 +51,37 @@ no longer the delimiter. JSON is untouched (no line of a JSON object starts with
 `schema` path is unaffected. Reverting the fix makes the unit test fail with the forged string
 quoted in full.
 
+### Security — the wrapped-row scrub ceiling is closed, and it was the majority case
+
+0.22.0 scrubbed the join token and the host key out of every mirror row by known literal, one row
+at a time, and recorded a secret **wrapped at the right margin** as an accepted ceiling: it matches
+in neither half. Measured on 2026-08-30, that ceiling was not an edge case. The split probability
+for a value of length *L* on a *W*-column pane is *(L−1)/W*, so the 64-hex host key splits **79% of
+the time at 80 columns**, 63% at 100, and **always** on a pane narrower than 64. Against a real jam
+with a real mirror guest at 80 columns, the whole key came across in two adjacent rows:
+
+```
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3f6021a449ff8c43d60cbcd419ecbdbb
+f0ba2044c0afab0a889c812ee69e4b80
+```
+
+`scrubRowJoins` closes it. It matches exactly the shape a wrap is — the row ends with a prefix of
+the secret and the remainder begins the next row (or spans several, which is certain on a narrow
+pane) — so there is no substring search, no cross-frame state, and no way for it to touch a row a
+secret does not reach. It runs on the **raw** rows before the per-row pass, for two measured
+reasons: `sanitizeFrameRow` appends its own `\x1b[0m` to a row carrying an escape, and tmux emits
+SGR at attribute *changes* only, so a coloured wrapped line keeps its halves contiguous at the
+boundary (`AAA…\x1b[32m<first 32>` / `<last 32>\x1b[39m` — measured).
+
+Both pane funnels get it — the live mirror and `screen-history` — and a lint in the unit suite now
+fails if a third one is added without it, which is the same class as 0.22.0's own gate finding
+(`stripTokenBlock` with one call site and two funnels). Cost on the 25-frames/s path, measured on a
+40-row coloured frame: **1.7 µs per frame**, against 10.3 µs for the per-row sanitize beside it;
+11 µs in the contrived worst case where every row ends in a character of the secret.
+
+What is still not caught, and is now the only remaining case: a value with an escape sequence
+**inside** it, which is the deny-list masker's own documented ceiling.
+
 ### Security — an upload could leave `jam-uploads/` through a symlink (0.13–0.22.0)
 
 The confinement was a **name** filter, and a name filter cannot see a filesystem. `writeUpload`

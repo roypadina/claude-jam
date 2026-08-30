@@ -777,7 +777,10 @@ test instead of somebody's message.
   credentials, `.env`-style UPPER_CASE secret `KEY=value` — applied to tool calls, tool
   results, `/diff` output and every mirror row. Anything else goes through untouched, and on a
   mirror row a value split across colour escapes will not match. Never plan around it: it is a
-  seatbelt on the way out, not a boundary.
+  seatbelt on the way out, not a boundary. (claude-jam's own two secrets — the join token and the
+  host key — are scrubbed by known literal instead, and since 0.22.1 that also catches one
+  **wrapped at the right margin**: measured, a 64-hex key splits across two mirror rows 79% of the
+  time on an 80-column pane, and always on a narrower one.)
 - `/files` only knows what a tool call announced (an Edit/Write/Read `file_path`), so a file
   changed by a shell command inside a `Bash` call is invisible to it — that is what `/diff` is
   for. `/diff` is `git diff`, i.e. the **unstaged** working tree only, capped at 120 lines, and

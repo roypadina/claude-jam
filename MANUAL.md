@@ -627,7 +627,9 @@ bearer credentials, and `.env`-style UPPER_CASE secret `KEY=value` lines.
 If somebody asks whether the jam is safe to share secrets in, the answer is **no**: this is
 best effort, not a boundary. Anything the deny-list has never heard of goes straight through, a
 value split across colour escapes on a mirror row will not match, and a message a human types is
-never masked at all. `[masked]` on someone's screen means claude-jam recognised a shape — the real value
+never masked at all. (claude-jam's own join token and host key are a different mechanism — a known
+literal, scrubbed on every way out, and since 0.22.1 also when one is **wrapped** across two
+captured rows, which for a 64-hex key on an 80-column pane happens most of the time.) `[masked]` on someone's screen means claude-jam recognised a shape — the real value
 is still in the file, and still in your context.
 
 ## Watching your screen from elsewhere

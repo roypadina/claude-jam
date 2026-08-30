@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, scrubSecrets, clientCommand,
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, scrubRowJoins, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, scrubSecrets, clientCommand,
   // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
   respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
   // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
@@ -1524,7 +1524,10 @@ function paneDims(rows) {
 function captureFrame() {
   const r = ptmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE);
   if (r.status !== 0) return null;
-  return (r.stdout || '').replace(/\n$/, '').split('\n')
+  // scrubRowJoins FIRST, on the raw rows: a secret WRAPPED at the right margin is in neither
+  // row on its own, and sanitizeFrameRow only ever sees one row (see the note there — the
+  // 64-hex host key splits 79% of the time on an 80-column pane).
+  return scrubRowJoins((r.stdout || '').replace(/\n$/, '').split('\n'), currentToken, HOST_KEY)
     .map((row) => sanitizeFrameRow(row, currentToken, HOST_KEY));
 }
 
@@ -1652,7 +1655,8 @@ function onScreenHistory(ws, m) {
     if (r.status !== 0) {
       return sendError(ws, `could not read the pane's history: ${(r.stderr || '').trim() || 'capture-pane failed'}`);
     }
-    rows = (r.stdout || '').replace(/\n$/, '').split('\n')
+    // Same order as captureFrame: the wrap join first, then the per-row pass.
+    rows = scrubRowJoins((r.stdout || '').replace(/\n$/, '').split('\n'), currentToken, HOST_KEY)
       .map((row) => sanitizeFrameRow(row, currentToken, HOST_KEY));
     screenCache = { key, at: Date.now(), rows };
   }
