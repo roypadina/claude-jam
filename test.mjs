@@ -6934,6 +6934,45 @@ test('scrubSecrets: both of the daemon\'s own secrets go, by literal and not by 
   assert.equal(scrubSecrets(`sha ${sha} sum ${other}`, null, KEY_A), `sha ${sha} sum ${other}`);
 });
 
+// 2026-08-30 review: the v0.34 work above added host.key to the scrub and left its SIBLING out.
+// The hook secret authenticates POST /admit, /end, /invite, /remote, /peer/dispatch and /hook/*
+// — host-level authority, all of it — and it is written to <state>/session.json as the lower-case
+// field `"secret"`, which is the ONE shape maskSecrets refuses to match (its .env rule is
+// UPPER-CASE-only so it does not eat prose). Reproduced on a real jam: a guest's mirror carried
+// `"secret": "HOOKSECRETcanary1234"` in clear on a screen where the token and the host key on the
+// adjacent rows were both masked, and that secret alone minted an invite and ended the jam.
+test('scrubSecrets: the hook secret is a needle too, in the shape session.json gives it', () => {
+  const HOOK = 'HOOKSECRETcanary1234';
+  // The literal row the leak came back on, and the two other shapes claude can print it in.
+  const row = `FILEROUTE "secret": "${HOOK}"`;
+  assert.equal(scrubSecrets(row, null, null, HOOK).includes(HOOK), false, 'the session.json shape');
+  assert.match(scrubSecrets(row, null, null, HOOK), /\[hook secret removed\]/);
+  assert.equal(scrubSecrets(`--hook-secret ${HOOK} --port 7777`, null, null, HOOK).includes(HOOK), false);
+  assert.equal(scrubSecrets(`x-jam-secret: ${HOOK}`, null, null, HOOK).includes(HOOK), false);
+  // Same floors as the other two needles, and no needle means no change.
+  assert.equal(scrubSecrets('short s', null, null, 'short'), 'short s');
+  assert.equal(scrubSecrets(row, null, null, null), row);
+  // maskSecrets alone does NOT cover it — that is exactly why the needle is threaded. The
+  // UPPER-CASE env shape is caught; the JSON field is not, and a test that only checked the env
+  // shape would have passed all along.
+  assert.match(maskSecrets(`JAM_HOOK_SECRET=${HOOK}`), /\[masked\]/);
+  assert.equal(maskSecrets(row).includes(HOOK), true, 'maskSecrets is not the guard here');
+});
+
+test('the mirror and the export both carry the hook-secret needle, wraps included', () => {
+  const HOOK = 'HOOKSECRETcanary1234';
+  // The per-row funnel: what a guest's mirror frame is built from.
+  assert.equal(sanitizeFrameRow(`"secret": "${HOOK}"`, null, null, HOOK).includes(HOOK), false);
+  // And the wrap, which is the majority case for a needle this long on a narrow pane: the value
+  // split across two captured rows is in neither half of the per-row pass.
+  const [a, b] = [`prefix "secret": "${HOOK.slice(0, 9)}`, `${HOOK.slice(9)}" tail`];
+  const joined = scrubRowJoins([a, b], null, null, HOOK);
+  assert.equal(joined.join('\n').includes(HOOK), false, 'a wrapped hook secret survived the row-join scrub');
+  assert.match(joined[0], /\[hook secret removed\]/);
+  // The export funnel, on the same needle.
+  assert.equal(stripTokenBlock(`transcript said ${HOOK}`, null, null, HOOK).includes(HOOK), false);
+});
+
 test('sanitizeFrameRow: a mirror row carrying this jam\'s key is scrubbed before the cut', () => {
   // The realistic route: a participant asks claude to read host.key, so it lands on the PANE.
   const row = sanitizeFrameRow(`⎿ ${KEY_A}`, 'smoketoken', KEY_A);

@@ -1034,12 +1034,12 @@ export function nextBlock(kind, current) {
 // single hint scan when a row cannot contain any of the shapes, which is nearly every row —
 // see the cost note there. Best effort only: a value split across SGR sequences will not match.
 export const FRAME_ROW_MAX = 2000;
-export function sanitizeFrameRow(row, token = null, hostKey = null) {
+export function sanitizeFrameRow(row, token = null, hostKey = null, hookSecret = null) {
   const s = scrubSecrets(maskSecrets(String(row)
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '') // OSC (title, clipboard)
     .replace(/\x1b[P^_X][^\x1b]*(?:\x1b\\)?/g, '') // DCS / PM / APC / SOS
     // C0 except ESC (0x1b) and TAB (0x09), DEL, and the 8-bit C1 range.
-    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, '')), token, hostKey)
+    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, '')), token, hostKey, hookSecret)
     // Scrub before the cut, or a secret straddling character 2000 keeps its tail.
     .slice(0, FRAME_ROW_MAX);
   return s.includes('\x1b') ? `${s}\x1b[0m` : s;
@@ -1063,13 +1063,26 @@ export function sanitizeFrameRow(row, token = null, hostKey = null) {
 // documented ceiling too.
 export const TOKEN_MASK = '[token removed]';
 export const HOST_KEY_MASK = '[host key removed]';
-export function scrubSecrets(text, token = null, hostKey = null) {
+// v0.23.1: the THIRD value, and the one the v0.34 host.key work walked straight past. The hook
+// secret authenticates `POST /admit`, `/end`, `/invite`, `/remote`, `/peer/dispatch` and every
+// `/hook/*` — host-level authority, all of it — and it is written to `<state>/session.json` as
+// the lower-case field `"secret"`, which is the one shape maskSecrets deliberately refuses to
+// match (its .env rule is UPPER-CASE-only so it does not eat prose). So the exact route the
+// comment below describes for host.key leaked this one instead: measured 2026-08-30, a guest's
+// mirror carried `"secret": "HOOKSECRETcanary1234"` in clear on a screen where the join token and
+// the host key on the adjacent rows were both masked, and that secret alone — no host.key, no
+// join token — minted an invite link and ended the jam over a loopback-looking socket.
+export const HOOK_SECRET_MASK = '[hook secret removed]';
+export function scrubSecrets(text, token = null, hostKey = null, hookSecret = null) {
   let out = String(text);
   if (typeof token === 'string' && token.length >= 8 && out.includes(token)) {
     out = out.split(token).join(TOKEN_MASK);
   }
   if (validHostKey(hostKey) && out.includes(hostKey)) {
     out = out.split(hostKey).join(HOST_KEY_MASK);
+  }
+  if (typeof hookSecret === 'string' && hookSecret.length >= 8 && out.includes(hookSecret)) {
+    out = out.split(hookSecret).join(HOOK_SECRET_MASK);
   }
   return out;
 }
@@ -1093,12 +1106,16 @@ export function scrubSecrets(text, token = null, hostKey = null) {
 // coloured frame with both needles set: 1.7 µs per frame, against 10.3 µs for the per-row
 // sanitize it sits beside — and 11 µs in the contrived worst case where every row ends in a
 // character of the needle. 0.04 ms/s at 25 frames/s.
-export function scrubRowJoins(rows, token = null, hostKey = null) {
+export function scrubRowJoins(rows, token = null, hostKey = null, hookSecret = null) {
   const out = Array.isArray(rows) ? rows.map((r) => String(r)) : [];
   if (out.length < 2) return out;
   const needles = [];
   if (typeof token === 'string' && token.length >= 8) needles.push([token, TOKEN_MASK]);
   if (validHostKey(hostKey)) needles.push([hostKey, HOST_KEY_MASK]);
+  // Three needles now, not two: the 24-character hook secret wraps on an 80-column pane 29% of
+  // the time by the same (L-1)/W the comment above works out, and a wrapped secret is in neither
+  // half of the per-row pass.
+  if (typeof hookSecret === 'string' && hookSecret.length >= 8) needles.push([hookSecret, HOOK_SECRET_MASK]);
   for (const [needle, mask] of needles) {
     const alphabet = new Set(needle);
     for (let i = 0; i + 1 < out.length; i++) {
@@ -1638,10 +1655,10 @@ export const TOKEN_BLOCK_RE = /Join token: [^"\n]{0,800}?tell them to ask the ho
 // broadcast. So this is no longer the only scrub — scrubSecrets also guards the transcript funnel
 // (host.mjs onTranscript) and the mirror rows (sanitizeFrameRow). Export still needs its own
 // pass, because a transcript on disk predates all of them.
-export function stripTokenBlock(text, token = null, hostKey = null) {
+export function stripTokenBlock(text, token = null, hostKey = null, hookSecret = null) {
   return scrubSecrets(
     String(text).replace(TOKEN_BLOCK_RE, '[claude-jam join-token block removed on export]'),
-    token, hostKey,
+    token, hostKey, hookSecret,
   );
 }
 
