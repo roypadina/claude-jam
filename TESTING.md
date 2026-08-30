@@ -80,6 +80,17 @@ Not yet run as part of a release gate; the gate record below is 0.23.0's, which 
   network (smoke-discover's own teardown check), no orphan `ttyd` or `cloudflared`, no listener
   left on any port the gate used.
 
+  **Both findings were also reproduced against the INSTALLED 0.23.0** — the Homebrew artifact
+  users actually have (`/opt/homebrew/opt/claude-jam/libexec`), not the tree — because "affects
+  released versions" is a claim that deserves a measurement rather than a code reading:
+  - the browser view: a real host client attached at 150x45, a browser opening the view at 30x8
+    took the jam's claude window to **30x8**, and one resize message took it to **12x4**;
+  - the hook secret: a guest's mirror frame came back carrying
+    `FILEROUTE "secret": "HOOKSECRETinstalled99"` in clear.
+
+  After the tap bump, the same two probes are the acceptance check on the upgraded binary: the
+  host window must not move, and that row must come back masked.
+
 - **0.23.0 — 2026-08-30. The first gate with a Windows leg, and the leg is what it was for.**
   All eighteen suites in the documented order plus the unit suite (**441 tests, 438 pass, 3 skipped,
   0 fail**), on node 24.15 / tmux 3.7c / claude 2.1.251 / cloudflared 2026.8.2 / ttyd 1.7.7, from a
