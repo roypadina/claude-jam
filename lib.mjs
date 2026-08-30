@@ -291,11 +291,18 @@ export function pathPrivacy(st, uid = null, { kind = 'directory' } = {}) {
 
 // The refusal a human reads when pathPrivacy says no. It names the path, the reason and the way
 // out, and it never quotes a byte of what the path contains.
-export function privacyRefusal(what, target, why) {
-  return `refusing to use ${what} ${target}: ${why}.\n`
+// v0.32 W2: on a Windows drive under WSL2 the last line of that advice is worse than useless —
+// `chmod` on a metadata-less DrvFs mount reports success and changes nothing, and another --port
+// lands on the same mount — so when the path is one of those, the WSL note REPLACES it. `wsl` is
+// the caller's parseWslInfo, so this stays pure and a non-WSL box is unchanged.
+export function privacyRefusal(what, target, why, { wsl = null } = {}) {
+  const head = `refusing to use ${what} ${target}: ${why}.\n`
     + '  This path is predictable (it is derived from the port), so on a shared machine another '
     + 'user can create it first and then own everything jam puts there — including the host key, '
-    + 'which is host authority.\n'
+    + 'which is host authority.';
+  const drive = wsl && wsl.wsl ? windowsDriveMount(target) : null;
+  if (drive) return head + wslDrivePrivacyNote(target, drive);
+  return `${head}\n`
     + '  Remove it if it is yours to remove, or start the jam on another --port (or point --state '
     + 'at a directory only you can reach).';
 }
@@ -1666,9 +1673,13 @@ export function tunnelJoinLines(tunnelJoin, tunnelView) {
 // (they are what you send someone who is not on your tailnet), the LAN/Tailscale ones below.
 // One helper for the daemon console, the host client's welcome, `/join` and every `/token`
 // reply, so those four can never drift — the client used to drop the tunnel lines entirely.
+// v0.32 W2: and, under WSL2, the note that says the LAN addresses above are a NAT'd VM's — with
+// the localhost line that actually works from Windows. It goes last, under the addresses it is
+// about, and it is added here so all four surfaces get it for the same reason they share the rest.
 export function inviteLines(info = {}) {
+  const wsl = info.wsl && info.wsl.wsl ? wslJoinLines(info.join, info.view, info.wsl) : [];
   return [...tunnelJoinLines(info.tunnelJoin, info.tunnelView),
-    ...joinLines(info.join, info.view, info.token)];
+    ...joinLines(info.join, info.view, info.token), ...wsl];
 }
 
 // ------------------------------- v0.12 / v0.13: export and file transfers ----
@@ -6144,3 +6155,219 @@ export function windowsCli(argv = []) {
   }
   return { action: 'usage', code: 2 }; // an unknown word is a mistake, and exits like one
 }
+
+// ---------------------------------------------- v0.32 W2: the Windows host, through WSL2 --
+// W3 decided there is no native Windows host (nothing reattaches to a running ConPTY), so this is
+// THE Windows host path: tmux and claude both run inside the WSL distribution, the daemon runs
+// there unchanged, and the human sits in Windows Terminal. The work is integration, and it lands
+// in four places — the state dir, paths across the `\\wsl$` boundary, the addresses a friend is
+// given, and the clipboard. Every decision is a pure function here, spawning stays in
+// platform.mjs, exactly as W1 did it — and for the same reason: **nobody on this project has a
+// Windows machine**, so a function that returns an argv or a path can be asserted on every CI leg
+// while a function that shells out can be asserted nowhere. `docs/COMPATIBILITY.md` records which
+// of these has been RUN on a real WSL2 install (as of this writing: none of them).
+
+// Is this process inside WSL, and which flavour? Two independent sources, because they answer
+// different questions and one of them can be absent:
+//   /proc/sys/kernel/osrelease — the kernel's own string, set by Microsoft's kernel build
+//     (`5.15.153.1-microsoft-standard-WSL2`). Process-independent: a daemon started by systemd or
+//     cron sees it too. This is what decides `wsl`.
+//   WSL_DISTRO_NAME / WSL_INTEROP — set by WSL for a shell it started. They carry the distro NAME
+//     (which `\\wsl$\<distro>\…` needs) and whether Windows-binary interop is switched on (which
+//     /paste needs); neither is reliable on its own, since a service can be started without them.
+// `v2` matters because WSL1 shares the Windows network stack (no localhost forwarding question at
+// all) while WSL2 is a VM behind NAT — the join addresses differ, so the two are not conflated.
+// A distro name goes into a path (`\\wsl$\<distro>\…`) and into messages. WSL's own rule is a
+// registry key name; this is the conservative subset that cannot carry a separator or a quote.
+const WSL_DISTRO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+export function parseWslInfo(osrelease = '', env = {}) {
+  const rel = String(osrelease ?? '');
+  const wsl = /microsoft/i.test(rel);
+  if (!wsl) return { wsl: false, v2: false, distro: '', interop: false };
+  const distro = String(env?.WSL_DISTRO_NAME ?? '').trim();
+  return {
+    wsl: true,
+    // WSL2's kernel says so in the string itself. WSL1's does not, and a missing marker is read as
+    // WSL1 rather than guessed the other way: claiming v2 on a v1 box would print a localhost note
+    // that is beside the point there.
+    v2: /WSL2/i.test(rel),
+    distro: WSL_DISTRO_RE.test(distro) ? distro : '',
+    // WSL_INTEROP is WSL's own marker for "Windows binaries can be run from here", and it is the
+    // only honest answer: WSL_DISTRO_NAME is set whether interop is on or off, so inferring from
+    // it would claim a clipboard that is not there. Reported, never used as a gate — the
+    // clipboard branch simply runs powershell.exe and lets ENOENT say so, which also covers a
+    // daemon started by systemd with neither variable in its environment.
+    interop: Boolean(env?.WSL_INTEROP),
+  };
+}
+
+
+// Where DrvFs puts the Windows drives. `/etc/wsl.conf`'s `[automount] root` can move it, and this
+// deliberately does NOT parse that file: a wrong root is caught for free one line later, because
+// every caller `stat`s the translated path and reports `no such file: /mnt/c/Users/…`, which names
+// exactly what was tried. A parser for a file this project cannot test against would be the
+// confident-wrong-fix, and the failure it would prevent is already legible.
+export const WSL_MOUNT_ROOT = '/mnt/';
+
+// Is this path on a mounted WINDOWS drive? Returns the drive letter, or null. Used for two things
+// and neither of them is a security decision: the refusal message below, and the setup page.
+export function windowsDriveMount(p, root = WSL_MOUNT_ROOT) {
+  const s = String(p ?? '');
+  const base = String(root ?? WSL_MOUNT_ROOT);
+  if (!s.startsWith(base)) return null;
+  const m = /^([a-z])(?:\/|$)/i.exec(s.slice(base.length));
+  return m ? m[1].toLowerCase() : null;
+}
+
+// THE state-dir question W2 had to answer, and the answer is: refuse, and say the true reason.
+//
+// A Windows drive under WSL2 is a DrvFs mount whose POSIX metadata is EMULATED. Mounted without
+// the `metadata` option — which is the default — every file reports mode 0777 and one uid, so
+// `pathPrivacy`'s mode branch refuses it, exactly as it refuses a world-writable /tmp directory
+// somebody else created. That refusal is correct and it is not being loosened here: a state dir
+// holds host.key, which IS host authority (0.23.2), and "it is only my own PC" is not something a
+// mode of 0777 can distinguish from the shared-machine case the gate exists for.
+//
+// What W2 adds is the message, and the message is the whole point, because the generic advice is
+// ACTIVELY WRONG on this filesystem: `chmod 700` on a metadata-less DrvFs mount reports success
+// and changes nothing, so a user following it loops forever. Nor does another `--port` help — the
+// mount is what is world-writable, not the directory. The way out is the Linux filesystem.
+export function wslDrivePrivacyNote(target, drive) {
+  return `\n  ${target} is on Windows drive ${String(drive).toUpperCase()}:, mounted into WSL as DrvFs. `
+    + 'Windows drives cannot hold a private directory here: without the `metadata` mount option '
+    + 'every file reports mode 0777 and one owner, and `chmod` on such a mount reports success and '
+    + 'changes nothing — so neither chmod nor another --port can fix this.\n'
+    + '  Keep the jam\'s state on the LINUX filesystem: run it with a $TMPDIR inside the '
+    + 'distribution (the default /tmp is), or pass --state ~/.claude-jam-state. Your project can '
+    + 'stay on the Windows drive; it is only the state dir that must not.';
+}
+
+// `C:\Users\roy\shot.png` is what Windows hands you when you copy a path out of Explorer, and
+// under WSL it resolves to a file called `C:\Users\roy\shot.png` in the current directory — so
+// `/send` said "no such file" and named a path nobody typed. Same for `\\wsl$\Ubuntu\home\roy\x`,
+// which is how Windows names a file that is already right here.
+//
+// This is NOT a widening of anything: both callers already resolve an arbitrary absolute path
+// chosen by the person typing it (`/send` in the host's client is `trusted()`-gated; a guest's
+// `/send` reads the guest's OWN filesystem), and every path this returns is one the same person
+// could have typed directly as `/mnt/c/…`. It translates a spelling, and it refuses rather than
+// guesses when it cannot.
+//
+// Returns `{ path }` when there is something to use, or `{ refuse }` with a reason. A path that is
+// already POSIX comes straight back, so the non-WSL case costs one regex.
+export function wslTranslatePath(input, { distro = '', root = WSL_MOUNT_ROOT } = {}) {
+  const raw = String(input ?? '').trim();
+  if (!raw) return { path: raw };
+  // \\wsl$\<distro>\path and \\wsl.localhost\<distro>\path — the two spellings Windows uses for a
+  // file inside a distribution. Only OUR distribution can be translated: another one is not
+  // mounted in this namespace at all, so silently dropping the prefix would hand back a path that
+  // exists here and is a DIFFERENT file. That is the one case worth refusing loudly.
+  const unc = /^\\\\wsl(?:\$|\.localhost)\\([^\\]+)(\\.*)?$/i.exec(raw);
+  if (unc) {
+    const named = unc[1];
+    const rest = (unc[2] || '\\').replace(/\\/g, '/');
+    if (distro && named.toLowerCase() !== String(distro).toLowerCase()) {
+      return { refuse: `${raw} is inside the WSL distribution "${named}", and this jam is running `
+        + `in "${distro}" — that path is not mounted here. Use the path as this distribution sees `
+        + 'it, or run the jam in that one.' };
+    }
+    return { path: rest.startsWith('/') ? rest : `/${rest}` };
+  }
+  // Any other UNC path (`\\server\share\…`) is a Windows network share. WSL does not mount it, and
+  // inventing a translation would produce a path that silently means something else.
+  if (/^\\\\/.test(raw)) {
+    return { refuse: `${raw} is a Windows network path, which is not mounted inside WSL. Copy the `
+      + 'file into the distribution, or mount the share here first.' };
+  }
+  // C:\Users\roy\x, c:/Users/roy/x, and the bare drive C:\ — DrvFs mounts each drive under the
+  // automount root as a lower-case letter.
+  const drv = /^([A-Za-z]):[\\/](.*)$/.exec(raw);
+  if (drv) {
+    const rest = drv[2].replace(/\\/g, '/');
+    return { path: `${root}${drv[1].toLowerCase()}${rest ? `/${rest}` : ''}` };
+  }
+  return { path: raw };
+}
+
+// The other direction, for a line a human reads rather than a path jam opens: how Windows names a
+// file that lives inside the distribution, so `jam-uploads/shot.png` can be opened from Explorer,
+// an editor, or anything else on the Windows side. Null when the distro is not known — a guessed
+// distro name in a path is worse than no line at all.
+export function windowsUncPath(p, distro = '') {
+  const s = String(p ?? '');
+  if (!s.startsWith('/') || !WSL_DISTRO_RE.test(String(distro))) return null;
+  const drive = windowsDriveMount(s);
+  // A file already on a Windows drive has a real Windows path; going through \\wsl$ to reach it
+  // would work but is the slow way round, and is not what a person wants pasted into Explorer.
+  if (drive) {
+    const rest = s.slice(WSL_MOUNT_ROOT.length + 1).replace(/\//g, '\\');
+    return `${drive.toUpperCase()}:${rest ? `\\${rest.replace(/^\\+/, '')}` : '\\'}`;
+  }
+  return `\\\\wsl$\\${distro}${s.replace(/\//g, '\\')}`;
+}
+
+// What the join block says when the daemon is inside WSL2, and it exists because the addresses
+// above it are, on that platform, the WRONG ONES for the most likely guest. WSL2 is a VM behind
+// NAT: `os.networkInterfaces()` reports the VM's private address (a 172.x that changes on every
+// boot), which no other machine can reach and which is not how Windows reaches it either.
+//
+// Two facts, and they are Microsoft's documented behaviour rather than anything measured here —
+// which is why this prints a NOTE beside the addresses instead of replacing them:
+//   * localhost forwarding: a service listening inside WSL2 is reachable from Windows on
+//     `localhost`. On by default (`localhostForwarding` in `.wslconfig`), and it is why the
+//     Windows-side line below is the useful one for a client on the same PC.
+//   * everything else on the LAN reaches the VM only with mirrored networking
+//     (`networkingMode=mirrored`, Windows 11 22H2+) or a `netsh interface portproxy` rule. A
+//     relay sidesteps both, because it dials OUT.
+// `join` is rewritten to localhost rather than described, because a line somebody can paste is
+// worth more than a paragraph they have to translate.
+export function wslJoinLines(join, view, { distro = '', v2 = true } = {}) {
+  if (!v2) return []; // WSL1 shares the Windows network stack: none of this applies
+  const where = distro ? `WSL2 (${distro})` : 'WSL2';
+  const lines = [];
+  const local = wslLocalhostUrl(join);
+  if (local) lines.push(`from Windows on this PC: ${local}`);
+  const viewLocal = wslLocalhostUrl(view);
+  if (viewLocal) lines.push(`view from Windows: ${viewLocal}`);
+  lines.push(`this jam runs in ${where}, so the addresses above are the VM's. Windows on this PC `
+    + 'reaches it on localhost; another machine needs mirrored networking, a portproxy, or '
+    + '--tunnel. See the wiki: Windows-WSL2-Host.');
+  return lines;
+}
+
+// Swap the host out of a ws:// or http:// URL wherever it appears in a line, keeping the port, the
+// path and any credentials. Null when there is no URL in it to rewrite.
+export function wslLocalhostUrl(line) {
+  const s = String(line ?? '');
+  if (!s) return null;
+  const re = /\b(wss?|https?):\/\/(?:([^\s/@]+)@)?([^\s/:]+)(:\d+)?(\S*)/;
+  const m = re.exec(s);
+  if (!m) return null;
+  const [, scheme, creds, host, port, rest] = m;
+  if (host === 'localhost' || host === '127.0.0.1') return null; // already the answer
+  // A relay hostname is a public address that already works from anywhere, localhost included —
+  // rewriting it would hand somebody a URL that only works on this PC.
+  if (/[a-z]/i.test(host) && !/^\d+(\.\d+)*$/.test(host)) return null;
+  return s.replace(re, `${scheme}://${creds ? `${creds}@` : ''}localhost${port || ''}${rest}`);
+}
+
+// /paste inside WSL. On Linux there is no clipboard image to read and claude-jam says so — but a
+// WSL2 terminal's clipboard IS the Windows clipboard, and Windows-binary interop means the same
+// PowerShell script W1 already ships (PS_CLIP_PNG, asserted on the windows-latest leg) can be run
+// from inside the distribution. So this is not new code so much as the W1 branch reached through
+// `powershell.exe`.
+//
+// The one genuinely new part is the FILE: PowerShell writes to a Windows path, and the reader is
+// inside WSL. `wslpath -w <linux path>` is what converts one to the other, and it ships with WSL.
+// Both halves are named here as an argv rather than a shell string, for the same reason every
+// other spawn in this project is.
+// The binary NAMES stay in platform.mjs, like every other platform binary — `powershell.exe` is
+// already declared there for W1 and is the same spelling through interop, and `wslpath` exists
+// only on WSL, which makes it one by this project's definition. What belongs here is the refusal.
+// Deliberately does not spell the binary: naming it here would trip the platform-binary lint,
+// which is doing its job — the NAME lives in platform.mjs and this is the sentence about it.
+export const WSL_NO_INTEROP = 'Windows PowerShell is not runnable from this distribution, so '
+  + 'claude-jam cannot reach the Windows clipboard. That is Windows-binary interop, and it is '
+  + 'switched off ([interop] enabled=false in /etc/wsl.conf, or binfmt_misc unregistered). '
+  + 'Use /send <path> instead, or turn interop back on.';

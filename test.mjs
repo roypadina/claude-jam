@@ -114,6 +114,9 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS,
   // 0.23.6: the hook that could not reach the daemon — the one failure a hook cannot report.
   HOOK_ERROR_FILE, hookErrorNote,
+  // v0.32 W2: the WSL2 Windows host — detection, the DrvFs refusal, the path boundary, the join note.
+  parseWslInfo, windowsDriveMount, wslTranslatePath, windowsUncPath, wslJoinLines, wslLocalhostUrl,
+  WSL_MOUNT_ROOT, WSL_NO_INTEROP,
 } from './lib.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -4226,6 +4229,11 @@ const PLATFORM_BINS = ['osascript', 'pngpaste', 'afplay', 'say', 'terminal-notif
   // v0.32 W1: the Windows ones. `icacls` is the 0600 replacement, so it is exactly the kind of
   // call that must not be duplicated in a client where nobody will maintain it.
   'icacls',
+  // v0.32 W2: and the WSL ones. Inside a distribution `process.platform` is 'linux', so a client
+  // reaching for powershell.exe or clip.exe "just for WSL" would look like ordinary Linux code
+  // and would be a third door. `wslpath` is here for the same reason it is in platform.mjs: it
+  // exists only on WSL, which makes it a platform binary by this file's definition.
+  'powershell.exe', 'clip.exe', 'wslpath', 'wsl.exe', 'explorer.exe',
   'dns-sd', 'avahi-publish-service', 'avahi-publish', 'avahi-browse'];
 
 test('v0.32 W0 no module outside platform.mjs spawns a platform binary', () => {
@@ -4245,7 +4253,7 @@ test('v0.32 W0 no module outside platform.mjs spawns a platform binary', () => {
     // And the unambiguous names must not appear as a bare string at all, which catches the
     // `const cmd = ['pbcopy', []]` shape that never names the binary at the spawn itself.
     for (const bin of ['osascript', 'pngpaste', 'afplay', 'pbcopy', 'pbpaste', 'xclip', 'xdg-open', 'terminal-notifier',
-      'icacls', 'dns-sd', 'avahi-publish-service', 'avahi-browse']) {
+      'icacls', 'powershell.exe', 'clip.exe', 'wslpath', 'dns-sd', 'avahi-publish-service', 'avahi-browse']) {
       for (const lit of jsStringLiterals(src)) {
         assert.ok(!lit.text.split(/[\s'"`,()[\]]+/).includes(bin),
           `${f}:${lit.line} names ${bin} — that belongs in platform.mjs`);
@@ -7775,5 +7783,172 @@ test('0.23.6 no hook, and no smoke harness, depends on a curl being installed', 
     const src = fs.readFileSync(path.join(here, 'scripts', f), 'utf8').replace(/^\s*\/\/.*$/gm, '');
     assert.equal(/spawnSync\('curl'|spawn\('curl'/.test(src), false,
       `${f}: shells out to curl — node's own fetch reaches the same loopback port`);
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// v0.32 W2 — the Windows host, through WSL2. Every one of these is a decision a pure function
+// makes, for the reason W1 established: nobody on this project has a Windows machine, so a
+// function that returns a path or an argv can be asserted on every CI leg while one that shells
+// out can be asserted nowhere. What is NOT proven here is anything that needs a real WSL install;
+// docs/COMPATIBILITY.md says which is which, and TESTING.md carries the experiments.
+
+test('v0.32 W2 parseWslInfo reads the KERNEL, and the environment only for the distro', () => {
+  // The real string from a WSL2 kernel. `microsoft` is what says WSL at all; `WSL2` is what says
+  // it is the VM (and so behind NAT), and that is the difference the join note turns on.
+  const two = parseWslInfo('5.15.153.1-microsoft-standard-WSL2',
+    { WSL_DISTRO_NAME: 'Ubuntu-24.04', WSL_INTEROP: '/run/WSL/8_interop' });
+  assert.deepEqual(two, { wsl: true, v2: true, distro: 'Ubuntu-24.04', interop: true });
+  // WSL1 shares the Windows network stack, so it must not be read as v2 — a localhost note there
+  // would be beside the point. A missing marker reads as v1 rather than being guessed upward.
+  assert.deepEqual(parseWslInfo('4.4.0-19041-Microsoft', { WSL_DISTRO_NAME: 'Ubuntu' }),
+    { wsl: true, v2: false, distro: 'Ubuntu', interop: false });
+  // interop is WSL_INTEROP and nothing inferred: WSL_DISTRO_NAME is set whether Windows-binary
+  // interop is on or off, so reading it that way would claim a clipboard that is not there.
+  assert.equal(parseWslInfo('5.15-microsoft-standard-WSL2', { WSL_DISTRO_NAME: 'U' }).interop, false);
+  assert.equal(parseWslInfo('5.15-microsoft-standard-WSL2', { WSL_INTEROP: '/run/WSL/1' }).interop, true);
+  // An ordinary Linux box, and macOS/Windows (which pass ''), answer no to everything.
+  for (const rel of ['6.1.0-13-arm64', '5.10.0-21-amd64', '', null]) {
+    assert.deepEqual(parseWslInfo(rel, { WSL_DISTRO_NAME: 'Ubuntu' }).wsl, false, `${rel} read as WSL`);
+  }
+  // The kernel decides, not the environment: a variable anybody can export must not make a Linux
+  // box start translating C:\ paths and printing localhost notes.
+  assert.equal(parseWslInfo('6.1.0-13-arm64', { WSL_DISTRO_NAME: 'Ubuntu', WSL_INTEROP: '/x' }).wsl, false);
+  // A distro name goes into a `\\wsl$\<name>\…` path, so a name that could carry a separator or a
+  // quote is dropped rather than passed through. The rest of the answer stands.
+  const odd = parseWslInfo('5.15-microsoft-standard-WSL2', { WSL_DISTRO_NAME: 'Ub untu\\..\\x' });
+  assert.equal(odd.wsl, true);
+  assert.equal(odd.distro, '');
+});
+
+test('v0.32 W2 windowsDriveMount: a Windows drive under WSL, and nothing else', () => {
+  assert.equal(windowsDriveMount('/mnt/c/tmp/jam'), 'c');
+  assert.equal(windowsDriveMount('/mnt/D/Users/roy'), 'd');
+  assert.equal(windowsDriveMount('/mnt/c'), 'c');
+  // A Linux path, including the ones that merely start the same way. `/mnt/data` is somebody's
+  // ordinary mount point and must not be read as drive D.
+  for (const p of ['/tmp/jam', '/home/roy/x', '/mnt/data/x', '/mnt/', '/mnt/wsl/x', '', null]) {
+    assert.equal(windowsDriveMount(p), null, `${p} read as a Windows drive`);
+  }
+  // /etc/wsl.conf can move the automount root, so the root is an argument rather than a constant.
+  assert.equal(windowsDriveMount('/windows/c/tmp', '/windows/'), 'c');
+});
+
+test('v0.32 W2 a state dir on a Windows drive is REFUSED, with the advice that is true there', () => {
+  const wsl = parseWslInfo('5.15-microsoft-standard-WSL2', { WSL_DISTRO_NAME: 'Ubuntu' });
+  const why = pathPrivacy({ isDirectory: () => true, isSymbolicLink: () => false, uid: 1000, mode: 0o40777 }, 1000);
+  assert.match(why, /mode is 40777|its mode is/, `the 0777 DrvFs shape is not refused: ${why}`);
+  const said = privacyRefusal("this jam's state dir", '/mnt/c/tmp/claude-jam-7777', why, { wsl });
+  // The refusal itself is unchanged — this is a message, not a gate.
+  assert.match(said, /^refusing to use this jam's state dir \/mnt\/c\/tmp\/claude-jam-7777: /);
+  // And the WSL note REPLACES the generic advice, because both halves of it are wrong on DrvFs:
+  // chmod reports success and changes nothing, and another --port is on the same mount.
+  assert.match(said, /Windows drive C:, mounted into WSL as DrvFs/);
+  assert.match(said, /`chmod` on such a mount reports success and changes nothing/);
+  assert.match(said, /--state ~\/\.claude-jam-state/);
+  assert.equal(/start the jam on another --port/.test(said), false,
+    'the refusal still offers another --port, which lands on the same world-writable mount');
+  // A Linux path under WSL keeps the ordinary advice: /tmp is where the state dir belongs.
+  const linux = privacyRefusal("this jam's state dir", '/tmp/claude-jam-7777', why, { wsl });
+  assert.match(linux, /start the jam on another --port/);
+  assert.equal(/DrvFs/.test(linux), false);
+  // And so does every non-WSL platform, whatever the path looks like.
+  assert.equal(/DrvFs/.test(privacyRefusal('x', '/mnt/c/y', why)), false);
+});
+
+test('v0.32 W2 wslTranslatePath: the Windows spellings of a path, and the two it refuses', () => {
+  const at = { distro: 'Ubuntu' };
+  // What Explorer, `cmd`, and every Windows program hand you.
+  assert.deepEqual(wslTranslatePath('C:\\Users\\roy\\shot.png', at), { path: '/mnt/c/Users/roy/shot.png' });
+  assert.deepEqual(wslTranslatePath('c:/Users/roy/a b.txt', at), { path: '/mnt/c/Users/roy/a b.txt' });
+  assert.deepEqual(wslTranslatePath('D:\\', at), { path: '/mnt/d' });
+  // The distribution's own files, as Windows names them. Both spellings Windows uses.
+  assert.deepEqual(wslTranslatePath('\\\\wsl$\\Ubuntu\\home\\roy\\x.txt', at), { path: '/home/roy/x.txt' });
+  assert.deepEqual(wslTranslatePath('\\\\wsl.localhost\\Ubuntu\\home\\roy\\x.txt', at), { path: '/home/roy/x.txt' });
+  // A POSIX path is already the answer and comes back untouched — the non-WSL cost of this whole
+  // function is one regex that does not match.
+  for (const p of ['/home/roy/x', './rel/x', '~/x', 'plain.txt']) {
+    assert.deepEqual(wslTranslatePath(p, at), { path: p });
+  }
+  // ANOTHER distribution is not mounted in this namespace, so dropping the prefix would hand back
+  // a path that exists here and is a DIFFERENT file. That is the one case worth refusing loudly.
+  const other = wslTranslatePath('\\\\wsl$\\Debian\\home\\roy\\x', at);
+  assert.match(other.refuse, /inside the WSL distribution "Debian", and this jam is running in "Ubuntu"/);
+  assert.equal(other.path, undefined);
+  // A Windows network share is not mounted either, and inventing a mount point would be a guess.
+  const unc = wslTranslatePath('\\\\fileserver\\team\\x.docx', at);
+  assert.match(unc.refuse, /Windows network path, which is not mounted inside WSL/);
+  // With no distro known, our own \\wsl$ paths still translate — there is nothing to disagree with.
+  assert.deepEqual(wslTranslatePath('\\\\wsl$\\Whatever\\home\\roy\\x', {}), { path: '/home/roy/x' });
+  // The automount root is an argument here too, for the same reason.
+  assert.deepEqual(wslTranslatePath('C:\\x', { root: '/windows/' }), { path: '/windows/c/x' });
+});
+
+test('v0.32 W2 windowsUncPath: how Windows names a file that lives in the distribution', () => {
+  assert.equal(windowsUncPath('/home/roy/p/jam-uploads/a.png', 'Ubuntu'),
+    '\\\\wsl$\\Ubuntu\\home\\roy\\p\\jam-uploads\\a.png');
+  // A file already on a Windows drive has a real Windows path; \\wsl$ would work and is the slow
+  // way round, and is not what anybody wants pasted into Explorer.
+  assert.equal(windowsUncPath('/mnt/c/Users/roy/p/a.png', 'Ubuntu'), 'C:\\Users\\roy\\p\\a.png');
+  assert.equal(windowsUncPath('/mnt/c', 'Ubuntu'), 'C:\\');
+  // A guessed distro name in a path is worse than no line at all, so there is no line.
+  assert.equal(windowsUncPath('/home/roy/x', ''), null);
+  assert.equal(windowsUncPath('/home/roy/x', 'bad name'), null);
+  assert.equal(windowsUncPath('relative/x', 'Ubuntu'), null);
+});
+
+test('v0.32 W2 the join block says the LAN address is a VM\'s, and gives the one that works', () => {
+  const join = 'node client.mjs ws://172.28.144.3:7777 --name <You>';
+  const view = 'http://jam:abc123@172.28.144.3:7778';
+  const lines = wslJoinLines(join, view, { distro: 'Ubuntu', v2: true });
+  assert.equal(lines[0], 'from Windows on this PC: node client.mjs ws://localhost:7777 --name <You>');
+  assert.equal(lines[1], 'view from Windows: http://jam:abc123@localhost:7778');
+  assert.match(lines[2], /this jam runs in WSL2 \(Ubuntu\)/);
+  assert.match(lines[2], /another machine needs mirrored networking, a portproxy, or --tunnel/);
+  assert.match(lines[2], /Windows-WSL2-Host/); // the wiki page, by name
+  // WSL1 shares the Windows network stack: none of this applies, and saying it would be noise.
+  assert.deepEqual(wslJoinLines(join, view, { distro: 'Ubuntu', v2: false }), []);
+  // No view running, no view line.
+  assert.equal(wslJoinLines(join, null, { v2: true }).length, 2);
+});
+
+test('v0.32 W2 wslLocalhostUrl rewrites a LAN address and NEVER a relay hostname', () => {
+  assert.equal(wslLocalhostUrl('ws://192.168.1.9:7777'), 'ws://localhost:7777');
+  assert.equal(wslLocalhostUrl('http://jam:k@10.0.0.4:7778'), 'http://jam:k@localhost:7778');
+  // A relay hostname is public and already works from anywhere, this PC included. Rewriting it
+  // would hand somebody a URL that works ONLY here, which is the opposite of what it is for.
+  assert.equal(wslLocalhostUrl('wss://calm-tree-1234.trycloudflare.com'), null);
+  assert.equal(wslLocalhostUrl('https://box.tail1234.ts.net:8443/x'), null);
+  // Already the answer, or nothing to rewrite.
+  assert.equal(wslLocalhostUrl('ws://localhost:7777'), null);
+  assert.equal(wslLocalhostUrl('ws://127.0.0.1:7777'), null);
+  assert.equal(wslLocalhostUrl('no url here'), null);
+  assert.equal(wslLocalhostUrl(''), null);
+});
+
+test('v0.32 W2 inviteLines carries the WSL note on every surface, and only under WSL', () => {
+  const base = { join: 'node client.mjs ws://172.28.1.5:7777 --name <You>', view: null, token: 'tok' };
+  // Off WSL nothing changes at all — the four surfaces are byte-identical to what they were.
+  assert.deepEqual(inviteLines(base), inviteLines({ ...base, wsl: { wsl: false } }));
+  const under = inviteLines({ ...base, wsl: parseWslInfo('5.15-microsoft-standard-WSL2', { WSL_DISTRO_NAME: 'Ubuntu' }) });
+  // It goes LAST, under the addresses it is about, and it does not displace any of them.
+  assert.deepEqual(under.slice(0, inviteLines(base).length), inviteLines(base));
+  assert.match(under.at(-1), /this jam runs in WSL2 \(Ubuntu\)/);
+  assert.ok(under.some((l) => l.includes('ws://localhost:7777')), under.join('\n'));
+});
+
+test('v0.32 W2 the WSL binaries are named in platform.mjs and nowhere else', () => {
+  // Inside a distribution `process.platform` is 'linux', so a client reaching for powershell.exe
+  // "just for WSL" would read as ordinary Linux code — a third door into the seam W0 exists to
+  // keep to one. The general lint above covers every module; this one says so for these three by
+  // name, and asserts platform.mjs really is where they live.
+  // The "nowhere else" half is the general PLATFORM_BINS lint above, which now carries these
+  // three; what it cannot say is that the branch still EXISTS, so that is this test's job.
+  const plat = fs.readFileSync(new URL('./platform.mjs', import.meta.url), 'utf8');
+  for (const bin of ['powershell.exe', 'wslpath', 'clip.exe']) {
+    assert.ok(plat.includes(bin), `platform.mjs no longer names ${bin} — did the WSL branch move?`);
+  }
+  for (const bin of ['powershell.exe', 'clip.exe', 'wslpath']) {
+    assert.ok(PLATFORM_BINS.includes(bin), `${bin} is not in PLATFORM_BINS, so no lint guards it`);
   }
 });

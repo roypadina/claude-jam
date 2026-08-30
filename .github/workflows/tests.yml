@@ -66,6 +66,11 @@ jobs:
       # dropped hook. No tmux, no claude, no network off loopback. Skips whole on Windows, which has
       # no jam host to run a bash hook.
       - run: node scripts/check-hook-post.mjs
+      # v0.32 W2: the WSL2 Windows host. On every leg here this is NOT EXERCISED by construction —
+      # none of these runners is WSL — and it still runs, for two reasons: it exercises the pure
+      # translation against a real filesystem, and it must not be allowed to rot before the day
+      # somebody runs it on a real install, which is the only thing that can verify W2 at all.
+      - run: node scripts/check-wsl.mjs
       # 0.23.3: what the Linux sound path actually resolves to on a real Linux box. PRINTED, not
       # asserted — a runner with no freedesktop sound theme correctly resolves to silence, and the
       # same line on a Linux DESKTOP is what discharges the rest of that deferral. Same discipline

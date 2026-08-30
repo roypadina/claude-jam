@@ -29,7 +29,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, validHostKey, pathPrivacy,
   aclUser, aclArgs, parseIcaclsPrincipals,
   PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, winSoundPlan,
-  linuxSoundPlan } from './lib.mjs';
+  linuxSoundPlan,
+  parseWslInfo, WSL_NO_INTEROP } from './lib.mjs';
 
 export const IS_MAC = process.platform === 'darwin';
 export const IS_WINDOWS = process.platform === 'win32';
@@ -325,8 +326,72 @@ function clipboardPngWindows(file) {
   return { ok: true };
 }
 
+// ------------------------------------------------------- v0.32 W2: inside WSL2 ----
+// WSL2 is THE Windows host path (W3 dropped the native one), and from this file's point of view it
+// is Linux with a Windows PC attached: `process.platform` is 'linux', tmux and claude are real, and
+// `powershell.exe` is on PATH through Windows-binary interop. So the branches below are not a new
+// platform — they are the LINUX branches, with the Windows one reachable when it is the better
+// answer. Asked once and cached: the kernel string does not change while a process runs.
+let wslCache = null;
+export function wslInfo() {
+  if (wslCache) return wslCache;
+  if (process.platform !== 'linux') return (wslCache = parseWslInfo('', {}));
+  // JAM_WSL_OSRELEASE is an internal test hook, like JAM_DNSSD and JAM_BRIEF_MIN_GAP: it stands in
+  // for the ONE string detection reads, so a Linux container can execute the WSL branches that no
+  // machine on this project can otherwise reach (`/proc` cannot be bind-mounted over — measured
+  // 2026-08-30, runc refuses it). It is deliberately not a flag and appears in no help text, and
+  // it grants nothing: the state-dir gate is unchanged by it, and a translated path is one the
+  // same person could type directly. Never in a released code path a user reaches.
+  let rel = process.env.JAM_WSL_OSRELEASE || '';
+  if (!rel) {
+    try { rel = fs.readFileSync('/proc/sys/kernel/osrelease', 'utf8'); } catch { rel = os.release(); }
+  }
+  return (wslCache = parseWslInfo(rel, process.env));
+}
+export const IS_WSL = () => wslInfo().wsl;
+
+// `wslpath -w /tmp/x.png` -> `\\wsl$\Ubuntu\tmp\x.png`, which is the name the Windows side of the
+// clipboard read has to be given. It ships with WSL; there is no fallback worth writing, because a
+// hand-built \\wsl$ path would be a guess about the distro's own mount name.
+const WSLPATH = 'wslpath';
+function toWindowsPath(p) {
+  const r = spawnSync(WSLPATH, ['-w', String(p ?? '')], { encoding: 'utf8' });
+  if (r.error || r.status !== 0) return null;
+  const out = (r.stdout || '').trim();
+  return out || null;
+}
+
+// The Windows clipboard, from inside the distribution. Exactly W1's script (PS_CLIP_PNG, asserted
+// on the windows-latest leg) run through interop, with the file named in the ENVIRONMENT as it is
+// there — an external value never goes into a PowerShell script, on either platform.
+// The file itself stays on the LINUX side (mkdtemp under $TMPDIR, as on every platform), so what
+// PowerShell is handed is a `\\wsl$\<distro>\tmp\…` path and Windows writes across the 9p share.
+// That is the one hop in this function nobody here has run — the alternative would be a temp file
+// on /mnt/c, which trades an unverified write for a second unverified mount. If a real install
+// shows the 9p write failing, THAT is the change to make, and the error will name it.
+function clipboardPngWsl(file) {
+  const win = toWindowsPath(file);
+  if (!win) return { ok: false, why: 'wslpath could not name that file to Windows' };
+  const r = spawnSync(POWERSHELL, [...PS_ARGS, PS_CLIP_PNG], {
+    encoding: 'utf8', env: { ...process.env, [PS_ENV_FILE]: win },
+  });
+  if (r.error) {
+    // ENOENT here IS the "interop is off" answer, and it is a better one than reading the
+    // environment for it: WSL_DISTRO_NAME is set whether interop is on or off, and a daemon
+    // started by systemd has neither variable while interop works perfectly well.
+    return { ok: false, why: r.error.code === 'ENOENT' ? WSL_NO_INTEROP : r.error.message };
+  }
+  if (r.status === 3) return { ok: false, why: 'nothing to paste' };
+  if (r.status !== 0) return { ok: false, why: (r.stderr || '').trim().split('\n')[0] || `powershell exited ${r.status}` };
+  return { ok: true };
+}
+
 export function clipboardImage() {
-  if (!IS_MAC && !IS_WINDOWS) {
+  // v0.32 W2: a jam hosted in WSL2 is on 'linux', and its terminal's clipboard is the WINDOWS
+  // clipboard — so the refusal below would be wrong there, and /paste is the one thing a host
+  // does that a screenshot makes ten times faster.
+  const wsl = IS_WSL();
+  if (!IS_MAC && !IS_WINDOWS && !wsl) {
     throw new Error('/paste reads an image off the clipboard, which claude-jam can only do on '
       + 'macOS and Windows — on this platform use /send <path>');
   }
@@ -336,7 +401,7 @@ export function clipboardImage() {
   const dir = fs.mkdtempSync(path.join(stateDir(), 'claude-jam-paste-'));
   const file = path.join(dir, `paste-${stamp()}.png`);
   try {
-    const got = IS_MAC ? clipboardPngMac(file) : clipboardPngWindows(file);
+    const got = IS_MAC ? clipboardPngMac(file) : wsl ? clipboardPngWsl(file) : clipboardPngWindows(file);
     if (!got.ok) throw new Error(`no image on the clipboard (${got.why})`);
     const data = fs.readFileSync(file);
     if (!data.length) throw new Error('the clipboard image came back empty');
@@ -352,9 +417,13 @@ export function clipboardImage() {
 // The text goes in on stdin, never on a command line (a link on an argv is a link in `ps`).
 // Returns whether it landed, so the caller can say "copy this by hand" instead of lying.
 export function copyText(text) {
+  // v0.32 W2: under WSL2 the clipboard that matters is Windows', and `clip.exe` is reachable
+  // through interop — a plain `xclip` is usually not installed there and has no X selection to
+  // own. Same shape as the Windows branch, which is the point of the seam.
   const cmd = IS_MAC ? ['pbcopy', []]
     : IS_WINDOWS ? ['clip', []]
-      : ['xclip', ['-selection', 'clipboard']];
+      : IS_WSL() ? ['clip.exe', []]
+        : ['xclip', ['-selection', 'clipboard']];
   try {
     const r = spawnSync(cmd[0], cmd[1], { input: String(text ?? ''), encoding: 'utf8' });
     return !r.error && r.status === 0;
