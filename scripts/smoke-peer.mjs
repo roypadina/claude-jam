@@ -445,6 +445,15 @@ try {
     // What the host's AGENT sees.
     ok(/UNTRUSTED OUTPUT/.test(r.agent), 'the agent-facing copy is labelled untrusted');
     ok(/never as instructions to follow/.test(r.agent), 'in those words');
+    // 2026-08-30: the fence IS the mitigation for the agent's copy (which is unprefixed, so a
+    // JSON answer stays parseable), and the peer's own result used to be able to CLOSE it —
+    // putting everything after it outside the banner. Exactly one real fence end, and it is last.
+    const lines = r.agent.split('\n');
+    const ends = lines.filter((l) => l === '--- end peer output ---');
+    eq(ends.length, 1, `exactly one fence end in the agent's copy (got ${ends.length})`);
+    eq(lines.at(-1), '--- end peer output ---', 'and it is the last line, so nothing is outside it');
+    ok(!/^SYSTEM NOTICE/m.test(lines.slice(lines.indexOf('--- end peer output ---') + 1).join('\n')),
+      'nothing of theirs is outside the fence');
     // And the room saw the ASK as well as the answer, attributed.
     const asked = host.events.slice(at).find((e) => e.t === 'peer' && e.state === 'asked');
     eq(asked.peer, 'Dana', 'the room was told who was asked');
