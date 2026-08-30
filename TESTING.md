@@ -403,6 +403,20 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   status 0, wanted 1`), and on macOS the check asserts the opposite direction as well — a machine
   that HAS `/usr/bin/dns-sd` must not be refused.
 
+  **0.23.3 — the decision is now DISCOVERY IS macOS-ONLY, and the two unbuilt paths are recorded
+  here so it is revisitable from evidence rather than re-argued.** The `windows-latest` leg made this
+  concrete: Windows has no `dns-sd` either, so "Linux discovery is unsupported" was the wrong scope.
+
+  | unbuilt path | what it would take | why not now |
+  | --- | --- | --- |
+  | **avahi (Linux)** — `avahi-publish-service` + `avahi-browse` | a SECOND parser, written against the real binary the way `parseDnssdZone` was (its `\032` escapes and duplicated per-interface records were measured, not guessed), plus a second spawn/respawn lifecycle beside the `dns-sd` one | no avahi on any machine this project can reach, so the parser would be written from a man page — precisely the confident-wrong-fix `parseDnssdZone` exists as the counter-example to. **And `avahi-utils` does not provide a `dns-sd` at all** — measured 2026-08-30 in a Debian bookworm container: it ships `avahi-browse`, `avahi-publish`, `avahi-publish-service`, `avahi-resolve`, `avahi-set-host-name` and no `dns-sd`. The old `DNSSD_MISSING` told Linux users to install it, which did nothing; that message is corrected |
+  | **Bonjour for Windows** — `%PROGRAMFILES%\Bonjour\dns-sd.exe` | one path probe added to `DNSSD_PATHS` and nothing else: it is the same CLI with the same output, so no second parser and no second lifecycle | it would be an unverifiable claim on a platform nobody has run. This project's rule is that no doc says a thing works until somebody has seen it work, and the `-Z` output would be parsed by a parser verified only against macOS. Roy's call, 0.23.3: do not wire it up |
+
+  So `DNSSD_MISSING` now names what DOES work (an invite link, or the `ws://` address — which is the
+  path 0.23.1 pointed discovered-jam users at anyway) instead of sending people to install something
+  that would not have helped. Prove/revisit: if either path is ever wanted, the entry above says
+  exactly what it costs, and the discipline is unchanged — measure the real binary's output first.
+
   Not covered, and small: the MENU's `Alert` is React in an ink tree, so "the reason is on screen"
   is asserted by nothing. `smoke-nudge` already drives a real `/menu` in a tmux pane; prove it there
   if the Join screen is next touched.

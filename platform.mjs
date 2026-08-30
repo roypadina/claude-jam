@@ -404,10 +404,18 @@ export function openExternal(url) {
 // up with avahi ONLY, that is when a second parser is owed, and it must be written against the
 // real binary the way parseDnssdZone() was.
 export const DNSSD_PATHS = ['/usr/bin/dns-sd', '/usr/local/bin/dns-sd', '/opt/homebrew/bin/dns-sd'];
+// 0.23.3: this message used to say "on Linux install avahi-utils, on Windows Apple Bonjour", and
+// the Linux half was simply FALSE — measured 2026-08-30 in a Debian bookworm container: installing
+// `avahi-utils` provides avahi-browse / avahi-publish-service and NO `dns-sd` at all, so following
+// the advice changed nothing. The Windows half pointed at Bonjour's dns-sd.exe, which nobody here
+// has ever run and which DNSSD_PATHS does not look for on purpose (see above). A refusal that tells
+// somebody to do something useless is worse than one that tells them the truth, so it names the two
+// things that DO work instead. TESTING.md carries both unbuilt paths and what each would take.
 export const DNSSD_MISSING = 'no dns-sd on this machine, so claude-jam cannot announce or find '
-  + 'jams on the network — everything else works, and an invite link or a ws:// URL still joins. '
-  + 'macOS ships it in /usr/bin; on Linux install avahi-utils, on Windows Apple Bonjour. '
-  + 'JAM_DNSSD=<path> points at one somewhere else.';
+  + 'jams on the network. Everything else works: ask the host for an invite link, or join their '
+  + 'ws:// address directly. Discovery needs Apple\'s dns-sd, which ships in /usr/bin on macOS and '
+  + 'is not packaged for Linux or Windows — claude-jam does not support LAN discovery there. '
+  + 'JAM_DNSSD=<path> points at a compatible one if you have built it.';
 
 // `JAM_DNSSD` first (the same escape hatch JAM_TAILSCALE and JAM_TTYD give), then the known
 // locations. A refusal carries its reason and the fix, never a bare null.
