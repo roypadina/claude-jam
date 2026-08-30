@@ -812,6 +812,12 @@ test instead of somebody's message.
   revoke is the pair that actually keeps them out.
 - Admission is per person, and since v0.22 there are per-person credentials — but once in,
   everybody is still equally trusted: an invite grants exactly the same abilities a knock does.
+- **`0600` is POSIX, and Windows gets an ACL instead (v0.32 W1).** Every private file and
+  directory named on this page is mode-protected on macOS and Linux; on Windows the same paths get
+  an NTFS ACL with a single entry for the current user
+  (`icacls /inheritance:r /grant:r <you>:F`, `(OI)(CI)` on a directory). It is the equivalent, not
+  the same mechanism, and if it cannot be applied the file keeps its profile's inheritance rather
+  than the write failing. CI on a Windows runner checks it; no human has.
 - **Host is a local file, not an address (v0.34).** `<state>/host.key` is `0600` in a `0700` dir,
   and reading it is what proves the claim; the loopback test is kept as a second, independent
   condition. A client that claims `--host` with no key file joins as a guest and says so — there
