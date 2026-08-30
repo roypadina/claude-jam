@@ -3181,13 +3181,27 @@ export const HISTORY_FILE = 'history';
 // v0.32 W0: the config directory is its own answer, because platform.mjs has to be able to give
 // it out without going through the history file — and because Windows will answer
 // `%APPDATA%\claude-jam` here and nowhere else.
-export function configDirPath(home = os.homedir(), env = {}) {
-  const base = env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME)
-    ? env.XDG_CONFIG_HOME : path.join(home, '.config');
-  return path.join(base, 'claude-jam');
+// v0.32 W1: `%APPDATA%\claude-jam` on Windows, and the answer is decided by the `platform`
+// ARGUMENT rather than by which machine is asking. That is what lets the mac CI leg prove the
+// Windows answer and the Windows leg prove the mac one — the alternative (reading
+// process.platform inside) is a branch that only ever runs on the OS that cannot check it.
+// The path FLAVOUR follows the same argument for the same reason: on real Windows `path` already
+// IS `path.win32`, so naming it changes nothing there, and on macOS it makes
+// `path.isAbsolute('C:\\Users\\x')` answer the way Windows answers it instead of `false`.
+export const WIN_APPDATA_FALLBACK = ['AppData', 'Roaming']; // when %APPDATA% is unset or relative
+export function configDirPath(home = os.homedir(), env = {}, platform = process.platform) {
+  const win = platform === 'win32';
+  const p = win ? path.win32 : path.posix;
+  // XDG first on both, because somebody who sets XDG_CONFIG_HOME on Windows means it.
+  const base = env.XDG_CONFIG_HOME && p.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME
+    : win
+      ? (env.APPDATA && p.isAbsolute(env.APPDATA) ? env.APPDATA : p.join(home, ...WIN_APPDATA_FALLBACK))
+      : p.join(home, '.config');
+  return p.join(base, 'claude-jam');
 }
-export function historyFilePath(home = os.homedir(), env = {}) {
-  return path.join(configDirPath(home, env), HISTORY_FILE);
+export function historyFilePath(home = os.homedir(), env = {}, platform = process.platform) {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  return p.join(configDirPath(home, env, platform), HISTORY_FILE);
 }
 export function parseHistoryFile(text) {
   return String(text ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-HISTORY_FILE_MAX);
@@ -5491,4 +5505,61 @@ PEER TASKS (this jam was started with --peer-tasks)
 - A decline is a decision and not a failure: do not re-dispatch it. A timeout, a cap-hit and a
   crash are three other answers, and they are told apart for you.
 `;
+}
+
+// ======================================================== v0.32 W1: the Windows client ====
+// Everything here is pure, and it is pure on purpose: nobody working on this project has a
+// Windows machine, so the ONLY thing that ever proves a win32 decision right is a unit test on
+// the `windows-latest` CI leg. A function that returns an argv can be asserted there; a function
+// that shells out cannot. So the seam in platform.mjs owns the spawning and this owns the
+// deciding — which argv, which principal, which .wav, which refusal.
+//
+// The rule these follow, without exception: NOTHING that came from outside is interpolated into
+// a PowerShell script. A path, a title, a body goes into the child's ENVIRONMENT and the script
+// reads `$env:JAM_…`. PowerShell has no argv-quoting story a caller can rely on — `-Command`
+// takes a script, and a script is a shell string — so the only safe answer is for the script to
+// be a constant and the data never to be in it.
+
+// ---------------------------------------------------------------- the file mode Windows lacks --
+// There is no 0600 on Windows and pretending otherwise would be the dishonest kind of port: NTFS
+// has an ACL, and the equivalent of "only its owner may read this" is an ACL with exactly one
+// entry. `/inheritance:r` drops what the file inherited from its parent, `/grant:r <user>:F`
+// replaces any explicit grant for that user with full control, and the two together leave a
+// single principal behind. A directory adds `(OI)(CI)` so what is created inside it inherits
+// the same single entry — which is what makes a state dir's later files safe by construction.
+//
+// The principal is `DOMAIN\user` when the machine is in a domain and `user` otherwise. It comes
+// from the environment, so a machine with no %USERNAME% gets `null` and the caller does nothing
+// rather than building a grant for a user called "undefined".
+export function aclUser(env = {}) {
+  const user = String(env.USERNAME ?? '').trim();
+  if (!user || /[\s"/\\:*?<>|]/.test(user)) return null; // a username with a separator is not one
+  const domain = String(env.USERDOMAIN ?? '').trim();
+  return domain && !/[\s"/\\:*?<>|]/.test(domain) ? `${domain}\\${user}` : user;
+}
+
+// The arguments only — the binary's name lives in platform.mjs, which is the one module allowed
+// to know it. Every element is its own argv word, so a path containing a space is a path.
+export function aclArgs(target, user, { dir = false } = {}) {
+  return [String(target ?? ''), '/inheritance:r', '/grant:r', `${user}${dir ? ':(OI)(CI)F' : ':F'}`];
+}
+
+// Who the ACL actually grants to, read back out of `icacls <path>` so the answer is measured
+// rather than assumed. The first line begins with the path itself (which contains a `C:` that
+// would otherwise parse as a principal, hence the argument), and every following line is one
+// more entry, indented.
+//
+// SHAPE UNVERIFIED BY A HUMAN: written to the documented format, never seen next to a real
+// Windows console by anyone on this project. The Windows CI leg is what verifies it — the test
+// beside this runs the real binary against a real file and asserts the parse comes back with
+// exactly the current user. If that test is red, this parser is what is wrong.
+export function parseIcaclsPrincipals(text, target = '') {
+  const out = [];
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    const line = (target && raw.startsWith(target) ? raw.slice(target.length) : raw).trim();
+    if (!line || /^(Successfully|Failed) processed/.test(line)) continue;
+    const m = /^(.+?):\(/.exec(line);
+    if (m) out.push(m[1].trim());
+  }
+  return out;
 }
