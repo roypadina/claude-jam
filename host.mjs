@@ -1513,14 +1513,22 @@ function paneDims(rows) {
   return paneSize;
 }
 
+// EVERY secret this daemon holds, in ONE expression, read fresh each time (`/token` rotates one
+// of them). Nothing else in this file may name a secret to a scrub funnel: the whole point of
+// lib's SECRET_REGISTRY is that a new credential is added here and there, and a test catches a
+// funnel that was passed a hand-picked subset instead. `token` follows the rotation; `HOST_KEY`
+// is null when the key file could not be written; `hookSecret` is always set.
+const liveSecrets = () => ({ token: currentToken, hostKey: HOST_KEY, hookSecret: opts.hookSecret });
+
 function captureFrame() {
   const r = ptmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE);
   if (r.status !== 0) return null;
   // scrubRowJoins FIRST, on the raw rows: a secret WRAPPED at the right margin is in neither
   // row on its own, and sanitizeFrameRow only ever sees one row (see the note there — the
   // 64-hex host key splits 79% of the time on an 80-column pane).
-  return scrubRowJoins((r.stdout || '').replace(/\n$/, '').split('\n'), currentToken, HOST_KEY, opts.hookSecret)
-    .map((row) => sanitizeFrameRow(row, currentToken, HOST_KEY, opts.hookSecret));
+  const secrets = liveSecrets();
+  return scrubRowJoins((r.stdout || '').replace(/\n$/, '').split('\n'), secrets)
+    .map((row) => sanitizeFrameRow(row, secrets));
 }
 
 function pumpMirror() {
@@ -1648,8 +1656,9 @@ function onScreenHistory(ws, m) {
       return sendError(ws, `could not read the pane's history: ${(r.stderr || '').trim() || 'capture-pane failed'}`);
     }
     // Same order as captureFrame: the wrap join first, then the per-row pass.
-    rows = scrubRowJoins((r.stdout || '').replace(/\n$/, '').split('\n'), currentToken, HOST_KEY, opts.hookSecret)
-      .map((row) => sanitizeFrameRow(row, currentToken, HOST_KEY, opts.hookSecret));
+    const secrets = liveSecrets();
+    rows = scrubRowJoins((r.stdout || '').replace(/\n$/, '').split('\n'), secrets)
+      .map((row) => sanitizeFrameRow(row, secrets));
     screenCache = { key, at: Date.now(), rows };
   }
   const size = paneDims(rows);
@@ -3391,7 +3400,7 @@ function sendExport(rec) {
   }
   let text;
   try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return sendError(rec.ws, `could not read the transcript: ${e.message}`); }
-  const data = Buffer.from(stripTokenBlock(text, currentToken, HOST_KEY, opts.hookSecret), 'utf8');
+  const data = Buffer.from(stripTokenBlock(text, liveSecrets()), 'utf8');
   const xfer = `e${++xferN}`;
   console.log(`[export] ${rec.name} ← ${file} (${humanBytes(data.length)})`);
   broadcast({ t: 'sys', text: `${rec.name} took a copy of the session transcript (${humanBytes(data.length)})` });
@@ -4024,7 +4033,7 @@ function onTranscript(e) {
   // line: a guest who gets claude to read <state>/host.key or token.json would otherwise be
   // handed the value verbatim, and in knock mode a guest has no token at all, so it would be a
   // credential they were never given. Found by the 0.22.0 release gate (smoke-adopt S7c).
-  const text = scrubSecrets(stripControl(e.text), currentToken, HOST_KEY, opts.hookSecret);
+  const text = scrubSecrets(stripControl(e.text), liveSecrets());
   if (e.kind === 'user') {
     if (e.bridged) return; // already broadcast at injection time
     broadcast({ t: 'say', from: opts.name, text });

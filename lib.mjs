@@ -1034,12 +1034,12 @@ export function nextBlock(kind, current) {
 // single hint scan when a row cannot contain any of the shapes, which is nearly every row —
 // see the cost note there. Best effort only: a value split across SGR sequences will not match.
 export const FRAME_ROW_MAX = 2000;
-export function sanitizeFrameRow(row, token = null, hostKey = null, hookSecret = null) {
+export function sanitizeFrameRow(row, secrets = {}) {
   const s = scrubSecrets(maskSecrets(String(row)
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '') // OSC (title, clipboard)
     .replace(/\x1b[P^_X][^\x1b]*(?:\x1b\\)?/g, '') // DCS / PM / APC / SOS
     // C0 except ESC (0x1b) and TAB (0x09), DEL, and the 8-bit C1 range.
-    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, '')), token, hostKey, hookSecret)
+    .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, '')), secrets)
     // Scrub before the cut, or a secret straddling character 2000 keeps its tail.
     .slice(0, FRAME_ROW_MAX);
   return s.includes('\x1b') ? `${s}\x1b[0m` : s;
@@ -1063,26 +1063,54 @@ export function sanitizeFrameRow(row, token = null, hostKey = null, hookSecret =
 // documented ceiling too.
 export const TOKEN_MASK = '[token removed]';
 export const HOST_KEY_MASK = '[host key removed]';
-// v0.23.1: the THIRD value, and the one the v0.34 host.key work walked straight past. The hook
-// secret authenticates `POST /admit`, `/end`, `/invite`, `/remote`, `/peer/dispatch` and every
-// `/hook/*` — host-level authority, all of it — and it is written to `<state>/session.json` as
-// the lower-case field `"secret"`, which is the one shape maskSecrets deliberately refuses to
-// match (its .env rule is UPPER-CASE-only so it does not eat prose). So the exact route the
-// comment below describes for host.key leaked this one instead: measured 2026-08-30, a guest's
-// mirror carried `"secret": "HOOKSECRETcanary1234"` in clear on a screen where the join token and
-// the host key on the adjacent rows were both masked, and that secret alone — no host.key, no
-// join token — minted an invite link and ended the jam over a loopback-looking socket.
 export const HOOK_SECRET_MASK = '[hook secret removed]';
-export function scrubSecrets(text, token = null, hostKey = null, hookSecret = null) {
+
+// ------------------------------------------------------- THE SECRET REGISTRY ----
+// v0.23.1. Until now there were two needles, threaded by hand through four functions, and the
+// 2026-08-30 review found the THIRD one — the hook secret — leaking in a mirror frame precisely
+// because it was never added. The hand-written list WAS the bug: the v0.34 work that made
+// host.key a needle sat one file away from the credential that authenticates `POST /admit`,
+// `/end`, `/invite`, `/remote`, `/peer/dispatch` and every `/hook/*`, and did not add it.
+// Measured that day: a guest's mirror carried `"secret": "HOOKSECRETcanary1234"` in clear on a
+// screen where the join token and the host key on the adjacent rows were both masked (that shape
+// is `<state>/session.json`'s lower-case field, which maskSecrets refused to match), and that
+// secret alone — no host.key, no join token — minted an invite link and ended the jam.
+//
+// So the list stops being hand-written. This is the ONE enumeration of every secret a daemon
+// holds; `secretNeedles()` derives from it, all four scrub funnels iterate that, and a test walks
+// the registry and asserts each entry is masked on every funnel. A fifth secret that is not
+// registered fails that test instead of surfacing on somebody's screen.
+//
+// NOT here, deliberately: the INVITE secret. `mintInvite` keeps only `inviteHash(secret)` in
+// `<state>/invites.json` (see inviteRecord) — the plaintext exists in exactly one frame, the
+// `/invite` reply to the host who asked for it, and in no log line, no file and no pane. There is
+// nothing for a needle to catch, and registering a value the daemon does not retain would be a
+// scrub that quietly never runs.
+export const SECRET_MIN = 8; // shorter than this is not a credential, and would gut innocent rows
+const longEnough = (v) => typeof v === 'string' && v.length >= SECRET_MIN;
+export const SECRET_REGISTRY = [
+  { key: 'token', mask: TOKEN_MASK, what: 'the join token', valid: longEnough },
+  { key: 'hostKey', mask: HOST_KEY_MASK, what: "the host's own key", valid: validHostKey },
+  { key: 'hookSecret', mask: HOOK_SECRET_MASK, what: "the daemon's internal hook secret", valid: longEnough },
+];
+export const SECRET_KEYS = SECRET_REGISTRY.map((s) => s.key);
+
+// `{token, hostKey, hookSecret}` → the [needle, mask] pairs worth searching for. An absent or
+// malformed value contributes nothing, so every funnel below can be called with whatever the
+// caller has — including nothing at all.
+export function secretNeedles(secrets = {}) {
+  const s = secrets && typeof secrets === 'object' ? secrets : {};
+  return SECRET_REGISTRY.filter((e) => e.valid(s[e.key])).map((e) => [s[e.key], e.mask]);
+}
+
+// Replaced by known literal rather than by pattern — see the note above scrubRowJoins for why
+// (a pattern wide enough for a bare 64-hex key also eats commit shas out of somebody's screen).
+export function scrubSecrets(text, secrets = {}) {
   let out = String(text);
-  if (typeof token === 'string' && token.length >= 8 && out.includes(token)) {
-    out = out.split(token).join(TOKEN_MASK);
-  }
-  if (validHostKey(hostKey) && out.includes(hostKey)) {
-    out = out.split(hostKey).join(HOST_KEY_MASK);
-  }
-  if (typeof hookSecret === 'string' && hookSecret.length >= 8 && out.includes(hookSecret)) {
-    out = out.split(hookSecret).join(HOOK_SECRET_MASK);
+  for (const [needle, mask] of secretNeedles(secrets)) {
+    // `includes` first: on the mirror's hot path almost no row holds any of these, and a miss
+    // must not allocate.
+    if (out.includes(needle)) out = out.split(needle).join(mask);
   }
   return out;
 }
@@ -1106,17 +1134,13 @@ export function scrubSecrets(text, token = null, hostKey = null, hookSecret = nu
 // coloured frame with both needles set: 1.7 µs per frame, against 10.3 µs for the per-row
 // sanitize it sits beside — and 11 µs in the contrived worst case where every row ends in a
 // character of the needle. 0.04 ms/s at 25 frames/s.
-export function scrubRowJoins(rows, token = null, hostKey = null, hookSecret = null) {
+export function scrubRowJoins(rows, secrets = {}) {
   const out = Array.isArray(rows) ? rows.map((r) => String(r)) : [];
   if (out.length < 2) return out;
-  const needles = [];
-  if (typeof token === 'string' && token.length >= 8) needles.push([token, TOKEN_MASK]);
-  if (validHostKey(hostKey)) needles.push([hostKey, HOST_KEY_MASK]);
-  // Three needles now, not two: the 24-character hook secret wraps on an 80-column pane 29% of
-  // the time by the same (L-1)/W the comment above works out, and a wrapped secret is in neither
-  // half of the per-row pass.
-  if (typeof hookSecret === 'string' && hookSecret.length >= 8) needles.push([hookSecret, HOOK_SECRET_MASK]);
-  for (const [needle, mask] of needles) {
+  // Every registered secret, not a hand-written two: the 24-character hook secret wraps on an
+  // 80-column pane 29% of the time by the same (L-1)/W worked out above, and a wrapped value is
+  // in neither half of the per-row pass.
+  for (const [needle, mask] of secretNeedles(secrets)) {
     const alphabet = new Set(needle);
     for (let i = 0; i + 1 < out.length; i++) {
       const a = out[i];
@@ -1655,10 +1679,10 @@ export const TOKEN_BLOCK_RE = /Join token: [^"\n]{0,800}?tell them to ask the ho
 // broadcast. So this is no longer the only scrub — scrubSecrets also guards the transcript funnel
 // (host.mjs onTranscript) and the mirror rows (sanitizeFrameRow). Export still needs its own
 // pass, because a transcript on disk predates all of them.
-export function stripTokenBlock(text, token = null, hostKey = null, hookSecret = null) {
+export function stripTokenBlock(text, secrets = {}) {
   return scrubSecrets(
     String(text).replace(TOKEN_BLOCK_RE, '[claude-jam join-token block removed on export]'),
-    token, hostKey, hookSecret,
+    secrets,
   );
 }
 
@@ -1791,7 +1815,9 @@ export function funnelPrecheck(statusJson) {
 // `AKIA`, no `TOKEN`, no `sk-` (i.e. essentially every row of a TUI) costs a single regex test
 // instead of seven. Measured on a real 40-row frame: see SPEC's v0.17 note.
 export const SECRET_MASK = '[masked]';
-const SECRET_HINT = /AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|PRIVATE[ _]KEY|sk-|pk-|rk-|gh[pousr]_|earer|SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|CREDENTIAL/;
+// v0.23.1: the words are matched case-insensitively now, because the JSON rule below is — a hint
+// scan that only knew `SECRET` would skip the very row `"secret": "…"` lives on.
+const SECRET_HINT = /AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|PRIVATE[ _]KEY|sk-|pk-|rk-|gh[pousr]_|earer|secret|token|password|passwd|api_?key|access_key|credential/i;
 const SECRET_RULES = [
   // AWS key ids: a documented prefix plus 16 upper-case/digit characters.
   [/\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA)[0-9A-Z]{16}\b/g, SECRET_MASK],
@@ -1805,10 +1831,20 @@ const SECRET_RULES = [
   [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, SECRET_MASK],
   // A bearer credential in a header or a curl line; the word itself stays, so the line still reads.
   [/\b([Bb]earer\s+)[A-Za-z0-9._~+/-]{16,}={0,2}/g, `$1${SECRET_MASK}`],
-  // .env-style KEY=value where the KEY says it is a secret. UPPER CASE only, on purpose: that is
-  // the .env convention, and it keeps prose ("check the token"), jam's own `--token abc` and
-  // every lower-case identifier out of the deny-list. The key is kept, only the value goes.
+  // .env-style KEY=value where the KEY says it is a secret. UPPER CASE only, and it stays that
+  // way: the pane this runs on is a code screen, so a case-insensitive version of THIS rule masks
+  // `const token = getToken(` and `secret = load(` out of every diff anybody watches, for no
+  // security gain — a variable name is not a credential. Prose ("check the token"), jam's own
+  // `--token abc` and every lower-case identifier stay out of the deny-list for the same reason.
+  // The key is kept, only the value goes.
   [/\b([A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*)(\s*[:=]\s*)(?:"[^"\n]{4,}"|'[^'\n]{4,}'|[^\s"'#,;)]{4,})/g, `$1$2${SECRET_MASK}`],
+  // v0.23.1: the JSON shape, and CASE-INSENSITIVE, because this is the one that hid the hook
+  // secret. `<state>/session.json` spells it `"secret": "…"` — lower case, and quoted — which the
+  // upper-case rule above cannot see; nor could it see `"JAM_HOOK_SECRET": "…"` (peer-mcp.json),
+  // because the closing quote sits between the key and the colon. A quoted key with a quoted
+  // value has none of the code-screen false positives that sink case-insensitivity above: no
+  // assignment, no call, no identifier reads like this.
+  [/("[A-Za-z0-9_.-]*(?:secret|token|password|passwd|api_?key|access_key|private_key|credentials?)[A-Za-z0-9_.-]*"\s*:\s*)"[^"\n]{4,}"/gi, `$1"${SECRET_MASK}"`],
 ];
 
 export function maskSecrets(text) {

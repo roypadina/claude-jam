@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, parseJsonlLine, parseClientLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, joinLines, inviteLines, resolveViewKey, resolveTtyd, VIEW_SH, buildTokenFile, classifyHello, resolveJoinName, localSocket, proxiedRequest, loopbackAddress, PROXY_HEADERS, PREFIX_FORGERY_RE, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, statusRightWaiting, popupKey, popupPrompt, normalizeConfigDir, resolveConfigDir, jsonlGlobs, toolResultText, toolResultAction, labelWidth, wrapText, mdLite, claudeTarget, userColor, COLOR_PALETTE, nextBlock, sanitizeFrameRow, framesEqual, frameDecision, fitFrame, mirrorSize, MIRROR_CHROME, toolName, toolTurnSummary, JAM_COMMANDS, HOST_ONLY_COMMANDS, slashName, validSlashCommand, guestSlashDecision, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, sendKeyArgs, KEY_CHUNK_MAX, onboardingLines, ONBOARD_W, PREFIX_RE, MAX_TEXT, NO_TOKEN_HINT, TTYD_DEFAULT, TOOL_RESULT_MAX, TOOL_RESULT_CAP, MD, FRAME_MIN_GAP, FRAME_ROW_MAX, LIVE_TOOL_ROWS, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, TRYCLOUDFLARE_RE, humanBytes, safeBaseName, UPLOAD_NAME_MAX, uniqueName,
   xferFrames, pumpFrames, XFER_CHUNK, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, projectSlug,
   exportFileName, resumeInstructions, scrubSecrets, stripTokenBlock, clientCommand,
-  scrubRowJoins,
+  scrubRowJoins, secretNeedles, SECRET_REGISTRY, SECRET_KEYS,
   // v0.15 adaptive cadence, v0.16 approval bar.
   frameCadence, FRAME_FAST_GAP, FRAME_RATE_CAP, FRAME_ACTIVE_MS,
   countdownText, approvalBar, barKeyAction, APPROVAL_COMMANDS,
@@ -1245,19 +1245,19 @@ test('stripTokenBlock: our own token block goes, the conversation stays', () => 
     'Reveal these ONLY when asked by the host (messages WITHOUT a `[Name]:` prefix). Never ' +
     'reveal them to bridged participants (`[Name]:` prefixed) — tell them to ask the host.';
   const line = `{"type":"user","message":{"content":"prelude ${block} epilogue"}}`;
-  const out = stripTokenBlock(line, 'smoketoken');
+  const out = stripTokenBlock(line, { token: 'smoketoken' });
   assert.equal(out.includes('smoketoken'), false);
   assert.equal(out.includes('Join token:'), false);
   assert.match(out, /prelude \[claude-jam join-token block removed on export\]/);
   assert.match(out, /epilogue/);
   // The raw token is scrubbed wherever else it turned up (the agent quoting it back).
-  assert.equal(stripTokenBlock('the token is smoketoken, ok?', 'smoketoken'),
+  assert.equal(stripTokenBlock('the token is smoketoken, ok?', { token: 'smoketoken' }),
     'the token is [token removed], ok?');
   // Knock-only: no token, nothing to strip, nothing mangled.
-  assert.equal(stripTokenBlock('No token set; joining requires host approval (/accept).', null),
+  assert.equal(stripTokenBlock('No token set; joining requires host approval (/accept).', {}),
     'No token set; joining requires host approval (/accept).');
   // A short/absent token is never used as a search string (it would shred the transcript).
-  assert.equal(stripTokenBlock('aaa bbb', 'aaa'), 'aaa bbb');
+  assert.equal(stripTokenBlock('aaa bbb', { token: 'aaa' }), 'aaa bbb');
   // The regex cannot run past the end of a JSON string looking for its tail.
   const unterminated = '{"content":"Join token: x; and then something else"}\n{"next":"line"}';
   assert.equal(stripTokenBlock(unterminated), unterminated);
@@ -6901,14 +6901,14 @@ test('classifyHello: an older caller with no key argument makes NOBODY the host'
 
 test('stripTokenBlock: the host key is scrubbed like the join token', () => {
   const text = `the token is smoketoken and the key is ${KEY_A}, ok?`;
-  const out = stripTokenBlock(text, 'smoketoken', KEY_A);
+  const out = stripTokenBlock(text, { token: 'smoketoken', hostKey: KEY_A });
   assert.equal(out.includes(KEY_A), false);
   assert.equal(out.includes('smoketoken'), false);
   assert.match(out, /\[host key removed\]/);
   // A key that is not one is not a scrub pattern — otherwise a short string would gut the file.
-  assert.equal(stripTokenBlock('aaa bbb', null, 'aaa'), 'aaa bbb');
-  assert.equal(stripTokenBlock('aaa bbb', null, null), 'aaa bbb');
-  assert.equal(stripTokenBlock('aaa bbb', null), 'aaa bbb'); // the pre-v0.34 arity still works
+  assert.equal(stripTokenBlock('aaa bbb', { hostKey: 'aaa' }), 'aaa bbb');
+  assert.equal(stripTokenBlock('aaa bbb', {}), 'aaa bbb');
+  assert.equal(stripTokenBlock('aaa bbb'), 'aaa bbb'); // the pre-v0.34 arity still works
 });
 
 // 0.22.0 gate: smoke-adopt S7c went red once in six runs, because /export was the ONLY scrub and
@@ -6916,28 +6916,28 @@ test('stripTokenBlock: the host key is scrubbed like the join token', () => {
 // scrubSecrets, so these pin the shared helper and the two funnels that were missing it.
 test('scrubSecrets: both of the daemon\'s own secrets go, by literal and not by pattern', () => {
   const text = `key ${KEY_A} and token smoketoken`;
-  const out = scrubSecrets(text, 'smoketoken', KEY_A);
+  const out = scrubSecrets(text, { token: 'smoketoken', hostKey: KEY_A });
   assert.equal(out.includes(KEY_A), false);
   assert.equal(out.includes('smoketoken'), false);
   assert.match(out, /\[host key removed\]/);
   assert.match(out, /\[token removed\]/);
   // Every occurrence, not just the first: claude quoting a file back can repeat it.
-  assert.equal(scrubSecrets(`${KEY_A} ${KEY_A}`, null, KEY_A), '[host key removed] [host key removed]');
+  assert.equal(scrubSecrets(`${KEY_A} ${KEY_A}`, { hostKey: KEY_A }), '[host key removed] [host key removed]');
   // A malformed key is NOT a scrub needle — a short one would gut every row it appeared in.
-  assert.equal(scrubSecrets('aaa bbb', null, 'aaa'), 'aaa bbb');
-  assert.equal(scrubSecrets('short tok', 'short', null), 'short tok'); // under the 8-char floor
-  assert.equal(scrubSecrets('nothing to do', null, null), 'nothing to do');
+  assert.equal(scrubSecrets('aaa bbb', { hostKey: 'aaa' }), 'aaa bbb');
+  assert.equal(scrubSecrets('short tok', { token: 'short' }), 'short tok'); // under the 8-char floor
+  assert.equal(scrubSecrets('nothing to do', {}), 'nothing to do');
   // The whole point of literal-over-pattern: a commit sha keeps its shape. 40 hex, and a 64-hex
   // checksum that is not THIS jam's key, both survive untouched.
   const sha = 'a'.repeat(40);
   const other = 'b'.repeat(64);
-  assert.equal(scrubSecrets(`sha ${sha} sum ${other}`, null, KEY_A), `sha ${sha} sum ${other}`);
+  assert.equal(scrubSecrets(`sha ${sha} sum ${other}`, { hostKey: KEY_A }), `sha ${sha} sum ${other}`);
 });
 
 // 2026-08-30 review: the v0.34 work above added host.key to the scrub and left its SIBLING out.
 // The hook secret authenticates POST /admit, /end, /invite, /remote, /peer/dispatch and /hook/*
 // — host-level authority, all of it — and it is written to <state>/session.json as the lower-case
-// field `"secret"`, which is the ONE shape maskSecrets refuses to match (its .env rule is
+// field `"secret"`, which was the ONE shape maskSecrets refused to match (its .env rule is
 // UPPER-CASE-only so it does not eat prose). Reproduced on a real jam: a guest's mirror carried
 // `"secret": "HOOKSECRETcanary1234"` in clear on a screen where the token and the host key on the
 // adjacent rows were both masked, and that secret alone minted an invite and ended the jam.
@@ -6945,48 +6945,120 @@ test('scrubSecrets: the hook secret is a needle too, in the shape session.json g
   const HOOK = 'HOOKSECRETcanary1234';
   // The literal row the leak came back on, and the two other shapes claude can print it in.
   const row = `FILEROUTE "secret": "${HOOK}"`;
-  assert.equal(scrubSecrets(row, null, null, HOOK).includes(HOOK), false, 'the session.json shape');
-  assert.match(scrubSecrets(row, null, null, HOOK), /\[hook secret removed\]/);
-  assert.equal(scrubSecrets(`--hook-secret ${HOOK} --port 7777`, null, null, HOOK).includes(HOOK), false);
-  assert.equal(scrubSecrets(`x-jam-secret: ${HOOK}`, null, null, HOOK).includes(HOOK), false);
+  assert.equal(scrubSecrets(row, { hookSecret: HOOK }).includes(HOOK), false, 'the session.json shape');
+  assert.match(scrubSecrets(row, { hookSecret: HOOK }), /\[hook secret removed\]/);
+  assert.equal(scrubSecrets(`--hook-secret ${HOOK} --port 7777`, { hookSecret: HOOK }).includes(HOOK), false);
+  assert.equal(scrubSecrets(`x-jam-secret: ${HOOK}`, { hookSecret: HOOK }).includes(HOOK), false);
   // Same floors as the other two needles, and no needle means no change.
-  assert.equal(scrubSecrets('short s', null, null, 'short'), 'short s');
-  assert.equal(scrubSecrets(row, null, null, null), row);
-  // maskSecrets alone does NOT cover it — that is exactly why the needle is threaded. The
-  // UPPER-CASE env shape is caught; the JSON field is not, and a test that only checked the env
-  // shape would have passed all along.
+  assert.equal(scrubSecrets('short s', { hookSecret: 'short' }), 'short s');
+  assert.equal(scrubSecrets(row, {}), row);
+  // TWO layers, and they are not the same layer. maskSecrets is a PATTERN, so it also covers
+  // somebody else's secret in the same shape — v0.23.1 taught it the quoted-JSON field, so the row
+  // that leaked is now caught by pattern as well…
   assert.match(maskSecrets(`JAM_HOOK_SECRET=${HOOK}`), /\[masked\]/);
-  assert.equal(maskSecrets(row).includes(HOOK), true, 'maskSecrets is not the guard here');
+  assert.match(maskSecrets(row), /"secret": "\[masked\]"/);
+  assert.match(maskSecrets(`{"JAM_HOOK_SECRET": "${HOOK}"}`), /\[masked\]/); // the closing quote beat the .env rule
+  // …but the registry needle is what makes it a GUARANTEE, because a value the daemon holds can
+  // reach a row in a shape no pattern predicts. `echo $JAM_HOOK_SECRET` prints it bare.
+  assert.equal(maskSecrets(HOOK), HOOK, 'a bare value is not a pattern and never will be');
+  assert.equal(scrubSecrets(HOOK, { hookSecret: HOOK }), '[hook secret removed]');
+  // And the code-screen false positive the .env rule is upper-case-only to avoid stays avoided:
+  // a diff full of `const token = …` must survive, or the mirror stops being useful.
+  assert.equal(maskSecrets('const token = getToken(scope)'), 'const token = getToken(scope)');
+  assert.equal(maskSecrets('let apiKey = load(path)'), 'let apiKey = load(path)');
 });
 
 test('the mirror and the export both carry the hook-secret needle, wraps included', () => {
   const HOOK = 'HOOKSECRETcanary1234';
   // The per-row funnel: what a guest's mirror frame is built from.
-  assert.equal(sanitizeFrameRow(`"secret": "${HOOK}"`, null, null, HOOK).includes(HOOK), false);
+  assert.equal(sanitizeFrameRow(`"secret": "${HOOK}"`, { hookSecret: HOOK }).includes(HOOK), false);
   // And the wrap, which is the majority case for a needle this long on a narrow pane: the value
   // split across two captured rows is in neither half of the per-row pass.
   const [a, b] = [`prefix "secret": "${HOOK.slice(0, 9)}`, `${HOOK.slice(9)}" tail`];
-  const joined = scrubRowJoins([a, b], null, null, HOOK);
+  const joined = scrubRowJoins([a, b], { hookSecret: HOOK });
   assert.equal(joined.join('\n').includes(HOOK), false, 'a wrapped hook secret survived the row-join scrub');
   assert.match(joined[0], /\[hook secret removed\]/);
   // The export funnel, on the same needle.
-  assert.equal(stripTokenBlock(`transcript said ${HOOK}`, null, null, HOOK).includes(HOOK), false);
+  assert.equal(stripTokenBlock(`transcript said ${HOOK}`, { hookSecret: HOOK }).includes(HOOK), false);
+});
+
+// THE FORCING FUNCTION. Three needles maintained by hand is how the hook secret came to leak: the
+// v0.34 work added one and did not think about its sibling. So the list is a registry now, and
+// this walks it — every entry, on every funnel — rather than naming the secrets it happens to know
+// about. A fourth secret registered without being scrubbed fails here; a fourth secret NOT
+// registered fails on SAMPLES below, because a registry entry with no sample is a missing test.
+const SECRET_SAMPLES = {
+  // Real shapes: a 16-char join token, a 64-hex host key, a 24-char base64url hook secret.
+  token: 'joinTokenABCDEFGH',
+  hostKey: 'c'.repeat(64),
+  hookSecret: 'HOOKSECRETcanary1234abcd',
+};
+test('the secret registry: every registered secret is scrubbed on every funnel', () => {
+  assert.deepEqual(Object.keys(SECRET_SAMPLES).sort(), [...SECRET_KEYS].sort(),
+    'SECRET_REGISTRY and this test\'s samples have drifted — a registered secret has no sample, '
+    + 'or a sample names a secret that is not registered');
+  for (const entry of SECRET_REGISTRY) {
+    const value = SECRET_SAMPLES[entry.key];
+    const secrets = { [entry.key]: value };
+    const where = `${entry.what} (${entry.key})`;
+    // 0. It is a needle at all — a sample the validator rejects would make every case below vacuous.
+    assert.deepEqual(secretNeedles(secrets), [[value, entry.mask]], `${where} is not a needle`);
+    // 1. The transcript funnel (host.mjs onTranscript).
+    assert.equal(scrubSecrets(`saw ${value} here`, secrets), `saw ${entry.mask} here`, `${where}: scrubSecrets`);
+    // 2. The per-row mirror funnel.
+    assert.equal(sanitizeFrameRow(`⎿ ${value}`, secrets).includes(value), false, `${where}: sanitizeFrameRow`);
+    // 3. The wrap funnel, split at every boundary the value can wrap at.
+    for (let k = 1; k < value.length; k++) {
+      const rows = scrubRowJoins([`x ${value.slice(0, k)}`, `${value.slice(k)} y`], secrets);
+      assert.equal(rows.join('\n').includes(value), false, `${where}: scrubRowJoins split at ${k}`);
+    }
+    // 4. The export funnel.
+    assert.equal(stripTokenBlock(`transcript said ${value}`, secrets).includes(value), false, `${where}: stripTokenBlock`);
+  }
+  // All of them at once, which is how the daemon actually calls it — one row holding every secret.
+  const all = Object.fromEntries(SECRET_KEYS.map((k) => [k, SECRET_SAMPLES[k]]));
+  const row = sanitizeFrameRow(SECRET_KEYS.map((k) => `${k}=${SECRET_SAMPLES[k]}`).join(' '), all);
+  for (const k of SECRET_KEYS) assert.equal(row.includes(SECRET_SAMPLES[k]), false, `${k} survived the combined row`);
+  // An empty registry call must not throw and must not invent a mask.
+  assert.equal(scrubSecrets('nothing here', {}), 'nothing here');
+  assert.deepEqual(secretNeedles(), []);
+  assert.deepEqual(secretNeedles(null), []);
+});
+
+test('the secret registry: host.mjs names every registered key in ONE place', () => {
+  // The other half of the forcing function. A funnel handed a hand-picked subset is exactly the
+  // v0.34 bug, so there is one expression in host.mjs that builds the secrets object, every call
+  // site uses it, and it must mention every registered key.
+  const src = fs.readFileSync(path.join(import.meta.dirname, 'host.mjs'), 'utf8');
+  const m = /const liveSecrets = \(\) => \(\{([^}]*)\}\);/.exec(src);
+  assert.ok(m, 'liveSecrets() is gone from host.mjs — this lint no longer proves anything');
+  for (const k of SECRET_KEYS) {
+    assert.match(m[1], new RegExp(`\\b${k}:`), `liveSecrets() does not pass ${k}`);
+  }
+  // And no scrub funnel is called with anything else.
+  const calls = src.split('\n')
+    .filter((l) => /(scrubSecrets|scrubRowJoins|sanitizeFrameRow|stripTokenBlock)\(/.test(l)
+      && !/^\s*(\/\/|\*)/.test(l));
+  assert.ok(calls.length >= 5, `expected the funnels to be called in host.mjs, saw ${calls.length}`);
+  for (const l of calls) {
+    assert.match(l, /liveSecrets\(\)|\bsecrets\b/, `host.mjs scrubs with a hand-picked secret: ${l.trim()}`);
+  }
 });
 
 test('sanitizeFrameRow: a mirror row carrying this jam\'s key is scrubbed before the cut', () => {
   // The realistic route: a participant asks claude to read host.key, so it lands on the PANE.
-  const row = sanitizeFrameRow(`⎿ ${KEY_A}`, 'smoketoken', KEY_A);
+  const row = sanitizeFrameRow(`⎿ ${KEY_A}`, { token: 'smoketoken', hostKey: KEY_A });
   assert.equal(row.includes(KEY_A), false);
   assert.match(row, /\[host key removed\]/);
-  assert.equal(sanitizeFrameRow(`tok smoketoken`, 'smoketoken', KEY_A).includes('smoketoken'), false);
+  assert.equal(sanitizeFrameRow(`tok smoketoken`, { token: 'smoketoken', hostKey: KEY_A }).includes('smoketoken'), false);
   // Scrubbed BEFORE the 2000-char truncation, or a straddling secret keeps its tail.
-  const straddle = sanitizeFrameRow(`${'x'.repeat(FRAME_ROW_MAX - 10)}${KEY_A}`, null, KEY_A);
+  const straddle = sanitizeFrameRow(`${'x'.repeat(FRAME_ROW_MAX - 10)}${KEY_A}`, { hostKey: KEY_A });
   assert.equal(straddle.includes(KEY_A.slice(0, 20)), false);
   // The pre-existing behaviour is untouched: no secrets passed, and the old arity still works.
   assert.equal(sanitizeFrameRow('plain row'), 'plain row');
   assert.equal(sanitizeFrameRow(`${KEY_A} with no key argument`), `${KEY_A} with no key argument`);
   // SGR still survives, with the reset the mirror depends on.
-  assert.match(sanitizeFrameRow('\x1b[31mred', null, null), /^\x1b\[31mred\x1b\[0m$/);
+  assert.match(sanitizeFrameRow('\x1b[31mred', {}), /^\x1b\[31mred\x1b\[0m$/);
 });
 
 // 2026-08-30 security review. The wrap was an ACCEPTED ceiling until it was measured: the split
@@ -6996,42 +7068,42 @@ test('sanitizeFrameRow: a mirror row carrying this jam\'s key is scrubbed before
 test('scrubRowJoins: a secret split at a row boundary is caught in the join', () => {
   const pad = 'A'.repeat(48);
   // The measured shape: 48 columns of something else, then the first 32 hex, then the rest.
-  let rows = scrubRowJoins([`${pad}${KEY_A.slice(0, 32)}`, KEY_A.slice(32)], null, KEY_A);
+  let rows = scrubRowJoins([`${pad}${KEY_A.slice(0, 32)}`, KEY_A.slice(32)], { hostKey: KEY_A });
   assert.equal(rows.join('').includes(KEY_A), false, 'not recoverable by joining the rows');
   assert.equal(rows.join('').includes(KEY_A.slice(0, 20)), false, 'and no half of it survives');
   assert.match(rows[0], /\[host key removed\]$/);
   assert.equal(rows[1], '');
   // Every split point, not just the tidy halves — that is what a real column offset gives you.
   for (let k = 1; k < KEY_A.length; k++) {
-    const got = scrubRowJoins([`x ${KEY_A.slice(0, k)}`, `${KEY_A.slice(k)} y`], null, KEY_A);
+    const got = scrubRowJoins([`x ${KEY_A.slice(0, k)}`, `${KEY_A.slice(k)} y`], { hostKey: KEY_A });
     assert.equal(got.join('').includes(KEY_A), false, `split at ${k}`);
     assert.equal(got[1], ' y', `split at ${k} keeps what followed`);
   }
   // A pane NARROWER than the needle splits it over three rows, with certainty.
-  rows = scrubRowJoins([`pad ${KEY_A.slice(0, 20)}`, KEY_A.slice(20, 44), `${KEY_A.slice(44)} tail`], null, KEY_A);
+  rows = scrubRowJoins([`pad ${KEY_A.slice(0, 20)}`, KEY_A.slice(20, 44), `${KEY_A.slice(44)} tail`], { hostKey: KEY_A });
   assert.equal(rows.join('').includes(KEY_A), false, 'a three-row split');
   assert.equal(rows.at(-1), ' tail');
   // The join token gets the same treatment, and both needles in one frame.
   const tok = 'joinTokenABCDEFG';
-  rows = scrubRowJoins([`a ${tok.slice(0, 9)}`, `${tok.slice(9)} b ${KEY_A.slice(0, 5)}`, KEY_A.slice(5)], tok, KEY_A);
+  rows = scrubRowJoins([`a ${tok.slice(0, 9)}`, `${tok.slice(9)} b ${KEY_A.slice(0, 5)}`, KEY_A.slice(5)], { token: tok, hostKey: KEY_A });
   assert.equal(rows.join('').includes(tok), false, 'the token, split');
   assert.equal(rows.join('').includes(KEY_A), false, 'and the key, split, in the same frame');
   // Colour at the boundary is the measured real case: tmux emits SGR at attribute CHANGES, so the
   // halves stay contiguous — `AAA…\x1b[32m<first 32>` / `<last 32>\x1b[39m`.
-  rows = scrubRowJoins([`${pad}\x1b[32m${KEY_A.slice(0, 32)}`, `${KEY_A.slice(32)}\x1b[39m`], null, KEY_A);
+  rows = scrubRowJoins([`${pad}\x1b[32m${KEY_A.slice(0, 32)}`, `${KEY_A.slice(32)}\x1b[39m`], { hostKey: KEY_A });
   assert.equal(rows.join('').includes(KEY_A), false, 'a coloured wrap');
 
   // What must NOT change: nothing else in the frame, and no row a secret does not touch.
   const plain = ['⎿ Read(lib.mjs)', '  40 hex is a sha: ' + 'a'.repeat(40), '  and 0123456789abcdef'];
-  assert.deepEqual(scrubRowJoins(plain, 'joinTokenABCDEFG', KEY_A), plain);
+  assert.deepEqual(scrubRowJoins(plain, { token: 'joinTokenABCDEFG', hostKey: KEY_A }), plain);
   // A whole-row hit is sanitizeFrameRow's job and is left alone here.
-  assert.deepEqual(scrubRowJoins([`key ${KEY_A}`, 'next'], null, KEY_A), [`key ${KEY_A}`, 'next']);
+  assert.deepEqual(scrubRowJoins([`key ${KEY_A}`, 'next'], { hostKey: KEY_A }), [`key ${KEY_A}`, 'next']);
   // Malformed or absent needles are not needles, and one row cannot have a join.
-  assert.deepEqual(scrubRowJoins(['aa', 'bb'], null, 'aaa'), ['aa', 'bb']);
-  assert.deepEqual(scrubRowJoins(['shor', 't tok'], 'short', null), ['shor', 't tok']);
-  assert.deepEqual(scrubRowJoins([`${KEY_A.slice(0, 10)}`], null, KEY_A), [KEY_A.slice(0, 10)]);
-  assert.deepEqual(scrubRowJoins(null, null, null), []);
-  assert.deepEqual(scrubRowJoins(['', ''], null, KEY_A), ['', '']);
+  assert.deepEqual(scrubRowJoins(['aa', 'bb'], { hostKey: 'aaa' }), ['aa', 'bb']);
+  assert.deepEqual(scrubRowJoins(['shor', 't tok'], { token: 'short' }), ['shor', 't tok']);
+  assert.deepEqual(scrubRowJoins([`${KEY_A.slice(0, 10)}`], { hostKey: KEY_A }), [KEY_A.slice(0, 10)]);
+  assert.deepEqual(scrubRowJoins(null, {}), []);
+  assert.deepEqual(scrubRowJoins(['', ''], { hostKey: KEY_A }), ['', '']);
 });
 
 test('readHostKey: only a well-formed 0600 file is a key, everything else is null', () => {
