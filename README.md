@@ -839,7 +839,8 @@ test instead of somebody's message.
 - `claude-jam clean` decides "the session is gone" from `tmux has-session` plus a TCP probe of that
   port. A state dir whose port is held by something else is flagged, not deleted.
 - The exit prompt is the launcher's, so it exists only for the host client the launcher spawned.
-  A `claude-jam join --host` client started by hand just closes, and the jam keeps running.
+  A `claude-jam join --host --host-key-file …` client started by hand just closes, and the jam
+  keeps running.
 - The live view, scrolling it, tool collapse, F2/F3 and the newline keys are ink-only — `--basic` is a
   transcript-only client.
 - No rate limiting, no web client, one session per host, no Windows.

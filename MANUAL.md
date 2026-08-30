@@ -933,7 +933,8 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
   the dim `— mirror:` line says how much was cut. The host's own client keeps the window sized
   to their terminal, so a guest with a bigger terminal simply sees blank space.
 - Host wants their client back after closing it → `claude-jam host --attach` (or the
-  `claude-jam join ws://127.0.0.1:<port> … --host` line the launcher printed).
+  `claude-jam join ws://127.0.0.1:<port> … --host --host-key-file <state>/host.key` line the
+  launcher printed — the key file is what makes it the HOST, not `--host` on its own).
 - Host wants a clean restart → `claude-jam end` (or `claude-jam host` on the same name and answer
   `[e]nd it and start fresh`), then `claude-jam host …` (`--resume <session-id>` keeps this
   conversation).
