@@ -67,19 +67,30 @@ jobs:
       # A client is the whole Windows story, and `npm i -g claude-jam` is how it gets there — so
       # the tarball is built on every platform too. It must not need tmux or claude to pack.
       - run: npm pack --dry-run
-      # 0.23.4: smoke-lifecycle was wired here, failed three `--attach` steps on the first Linux run
-      # it ever had, and was taken back out with the question left open. THE QUESTION IS NOW ANSWERED,
-      # and it was not Linux: ink refuses to paint its dynamic region when `is-in-ci` says CI, and both
-      # of jam's ink surfaces are dynamic-only — so the client and the launcher menu drew a BLANK
-      # SCREEN in any environment carrying `CI`, and this workflow was simply the first one to set it.
-      # Fixed in ink-ci.mjs; the same Debian container is 19/19 with CI=true where it was 4-red, and
-      # `CI=true node menu.mjs` paints where it used to paint nothing. Full write-up, with the CI=0
-      # control that isolates it, in TESTING.md ("`--attach` on Linux — ANSWERED").
+      # 0.23.4: smoke-lifecycle is BACK on this leg, and both reasons it came out are closed.
       #
-      # The step is still NOT re-added: that is a gate-policy call for Roy, not a consequence of the
-      # bug being fixed. If it goes back, it needs `apt-get install -y tmux` and one `run:` behind
-      # `if: runner.os == 'Linux'`, and TESTING.md notes one thing still owed — a failed step leaves
-      # its `jamlife` session behind and cascades into later ones, so a red RESULT line overstates.
-      # The gate this was wired for is NOT lost meanwhile: check-state-privacy.mjs already exercises
-      # it against the real host.mjs on this leg, which is why the step's absence costs coverage of
-      # the attach path only.
+      # What it proves that nothing else here does: a jam actually RUNNING on Linux. The other steps
+      # above all exit before tmux is reached. This one starts a real daemon in a real tmux session,
+      # attaches a real client over a real pty, presses F3, drives the four-way launcher prompt and
+      # `/end`, and ends the jam — 19 steps, ~25 s, no `claude` (it runs a stub) and no tokens. The
+      # state-dir privacy gate it was ORIGINALLY wired for is still covered separately by
+      # check-state-privacy.mjs above, so this step's value is the attach/tmux path, on the platform
+      # where `/tmp` is 1777 and where WSL2 (SPEC W2) lives.
+      #
+      # Why it failed before, and why that is not a reason to keep it out: it was never Linux. ink
+      # refuses to paint its dynamic region when `is-in-ci` says CI, and both of jam's ink surfaces
+      # are dynamic-only — so the client and the launcher menu drew a BLANK SCREEN in any environment
+      # carrying `CI`, and this workflow was simply the first thing to set it. Fixed in ink-ci.mjs
+      # (0.23.4). The second reason was this suite's own reporting: one failed step left its `jamlife`
+      # session behind and five later steps failed on the leftovers, so a red RESULT line overstated
+      # by 8×. Also fixed in 0.23.4 — a step now tears down what IT created and a step whose fixture
+      # was never built is reported BLOCKED, counted apart from FAILED. Measured 19/19 on macOS and
+      # on Debian bookworm/tmux 3.3a, with `CI=true` and with it unset; full write-up in TESTING.md.
+      #
+      # If this ever goes red: read the FIRST failure and ignore the BLOCKED lines — they are
+      # consequences, by construction. Do NOT add a retry. A suite that needs one in CI is telling
+      # you something.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - if: runner.os == 'Linux'
+        run: node scripts/smoke-lifecycle.mjs
