@@ -108,6 +108,8 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   WIN_APPDATA_FALLBACK, aclUser, aclArgs, parseIcaclsPrincipals,
   PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, PS_PLAY_WAV,
   WIN_MEDIA_SOUNDS, WIN_BEEPS, winBeepScript, winSoundPlan,
+  // 0.23.3: and the Linux one, which used to be untestable because it was a loop over fs.
+  LINUX_SOUNDS, FREEDESKTOP_SOUND_DIR, ALSA_SOUND_DIR, linuxSoundPlan,
   terminalSupport, WINDOWS_TERMINAL_HINT, canAttachTmux, NO_TMUX_ATTACH,
   windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS,
 } from './lib.mjs';
@@ -4392,7 +4394,11 @@ test('v0.32 W1 winSoundPlan: a real .wav when there is one, a distinct beep PATT
   assert.equal(WIN_BEEPS.knock.length, 2);
   assert.equal(winBeepScript('knock').split(';').length, 2);
   // A kind that is not one of the three has no plan and no script — never a spawn, never a throw.
-  for (const bad of ['leave', '', null, undefined, 'KNOCK']) {
+  // 0.23.3 adds the PROTOTYPE keys, and they are not paranoia: a plain-object index walks the
+  // prototype, so `WIN_MEDIA_SOUNDS['__proto__']` was Object.prototype, `names` was truthy, and
+  // `names.map` threw out of playSound on a real Windows machine. Measured 2026-08-30.
+  for (const bad of ['leave', '', null, undefined, 'KNOCK', '__proto__', 'constructor', 'toString',
+    'valueOf', 'hasOwnProperty']) {
     assert.equal(winSoundPlan(bad, all, win), null, JSON.stringify(bad));
     assert.equal(winBeepScript(bad), null, JSON.stringify(bad));
   }
@@ -5142,6 +5148,13 @@ test('v0.25 the sound kinds are three, distinct, and mapped from the EVENT not t
   assert.equal(EVENT_SOUNDS.leave, null);
   assert.equal(soundKind('whatever'), null);
   assert.equal(soundKind(undefined), null);
+  // 0.23.3: including the prototype keys. `EVENT_SOUNDS['__proto__']` is Object.prototype, which
+  // is truthy, so `?? null` did not save it and soundKind handed `{}` on as if it were a kind.
+  for (const bad of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    assert.equal(soundKind(bad), null, bad);
+    assert.equal(soundFile(bad), null, bad);   // and the seam agrees, on every platform
+    assert.equal(playSound(bad), false, bad);  // never a spawn, and never a throw out of a render path
+  }
   assert.deepEqual(SOUND_KINDS, ['knock', 'join', 'nudge']);
   // Your own arrival is not an arrival.
   assert.equal(soundKind('join', { self: true }), null);
@@ -5168,6 +5181,50 @@ test('v0.25 the platform seam turns each kind into a DIFFERENT file, and knows w
   assert.equal(soundFile('leave'), null);
   assert.equal(playSound('leave'), false);
   assert.equal(playSound(undefined), false);
+});
+
+// 0.23.3 — the Linux half of that seam, which was a `for` loop over `fs.existsSync` inside
+// platform.mjs and so could be checked by nothing but a Linux desktop with a sound theme. The
+// deferral said "never executed — no Linux box"; a runner is a Linux box, but it is a HEADLESS one
+// with no sound theme and no audio device, so what a runner can settle is the decision and not the
+// sound. These are the parts a program decides: which player, which file, in which order, and what
+// "there is nothing here" resolves to.
+test('0.23.3 linuxSoundPlan: paplay first, aplay as the fallback, one distinct file per kind', () => {
+  const all = () => true;
+  const none = () => false;
+  // A desktop with the freedesktop theme: paplay, and the FIRST candidate of each kind.
+  const files = ['knock', 'join', 'nudge'].map((k) => linuxSoundPlan(k, all));
+  for (const p of files) assert.equal(p.bin, 'paplay');
+  assert.equal(files[0].file, `${FREEDESKTOP_SOUND_DIR}/message-new-instant.oga`);
+  assert.equal(files[1].file, `${FREEDESKTOP_SOUND_DIR}/service-login.oga`);
+  assert.equal(files[2].file, `${FREEDESKTOP_SOUND_DIR}/message.oga`);
+  // Three sounds, or the split buys nothing — the same rule SOUNDS is asserted against.
+  assert.equal(new Set(files.map((p) => p.file)).size, 3);
+  // Second choice within a player: the first file missing falls to the next candidate, not to aplay.
+  const second = linuxSoundPlan('knock', (f) => f.endsWith('bell.oga'));
+  assert.deepEqual(second, { bin: 'paplay', file: `${FREEDESKTOP_SOUND_DIR}/bell.oga` });
+  // A box with ALSA's WAVs and no freedesktop theme — the fallback, and it must never be handed an
+  // .oga, which aplay cannot play at all.
+  const alsa = ['knock', 'join', 'nudge'].map((k) => linuxSoundPlan(k, (f) => f.endsWith('.wav')));
+  for (const p of alsa) {
+    assert.equal(p.bin, 'aplay');
+    assert.match(p.file, /\.wav$/);
+    assert.ok(p.file.startsWith(`${ALSA_SOUND_DIR}/`), p.file);
+  }
+  assert.equal(new Set(alsa.map((p) => p.file)).size, 3);
+  // Nothing installed: silence, which is a correct answer and not an error. A headless CI runner
+  // and a server are this case, and `playSound` turns it into `false` rather than a spawn.
+  assert.equal(linuxSoundPlan('knock', none), null);
+  // Not a sound kind at all — a leave is deliberately silent, and so is anything unknown.
+  for (const bad of ['leave', 'whatever', '', null, undefined, 42, '__proto__', 'constructor']) {
+    assert.equal(linuxSoundPlan(bad, all), null, JSON.stringify(bad));
+  }
+  // The candidate table itself: every kind covered for both players, no file shared across kinds.
+  for (const bin of ['paplay', 'aplay']) {
+    assert.deepEqual(Object.keys(LINUX_SOUNDS[bin]), ['knock', 'join', 'nudge'], bin);
+    const firsts = Object.values(LINUX_SOUNDS[bin]).map((n) => n[0]);
+    assert.equal(new Set(firsts).size, 3, `${bin} gives two kinds the same first choice`);
+  }
 });
 
 test('v0.25 the three notification tiers default ON and are independently switchable', () => {

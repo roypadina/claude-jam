@@ -349,12 +349,63 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
 - ~~2026-08-29 · smoke.mjs, smoke-xfer, smoke-popup, smoke-slash, smoke-perm, smoke-knock not
   re-run after the v0.28 scrollback batch (judged unaffected; token cost). Prove: full sweep at
   the 0.20.0 release.~~ **DISCHARGED — 0.21.0 gate, 2026-08-29: all six re-run, all green.**
-- 2026-08-29 · Linux sound path (`paplay`/`aplay`) never executed — no Linux box. Prove: a Linux
-  run in the campaign, or mark the platform unsupported in the docs.
+- ~~2026-08-29 · Linux sound path (`paplay`/`aplay`) never executed — no Linux box. Prove: a Linux
+  run in the campaign, or mark the platform unsupported in the docs.~~
+  **RE-SCOPED AND MOSTLY DISCHARGED — 0.23.3, 2026-08-30.** The deferral was unprovable as written,
+  and the reason was a code shape rather than a missing machine: the decision (which player, which
+  file, in which order) was a `for` loop inside `platform.mjs`'s `soundFile`, closed over
+  `fs.existsSync`, so the only thing that could ever check it was a Linux desktop with a sound theme
+  installed. That is exactly what AGENTS.md §2 tells you not to do, and `winSoundPlan` was already
+  the counter-example sitting next to it. So the decision moved to `lib.mjs` as `linuxSoundPlan(kind,
+  exists)` — no behaviour change, a pure extraction — and it is asserted on **every** CI leg: paplay
+  before aplay, the per-kind candidate order, the second-choice-within-a-player fallback, the
+  `.oga`/`.wav` split (aplay cannot play an `.oga` at all, so handing it one is not a fallback), three
+  distinct files per player, and "nothing installed → `null`", which is silence and a correct answer.
+  Canary run: swapping the player order turns the new test red and nothing else (checked 2026-08-30).
+  The `ubuntu-latest` leg additionally **prints** what a real Linux box resolved to, rather than
+  asserting a branch — a headless runner has no sound theme and no audio device, and resolving to
+  silence there is correct.
+
+  **What still needs a Linux DESKTOP, and it is the only thing left:** that the three sounds are
+  audibly *distinguishable* — that a knock does not sound like a join. Nobody has heard one. Prove:
+  one person at a Linux desktop with `paplay` and the freedesktop theme, a knock and a join, and a
+  report of whether they can be told apart without looking. Also named there: the CEILING recorded in
+  `linuxSoundPlan`'s own comment — the chain keys on the FILE, not on the BINARY, so a box with the
+  freedesktop theme and no `paplay` on `PATH` gets silence instead of falling through to `aplay`.
+  That is pre-existing behaviour kept deliberately (a PATH probe is a second seam, and `spawn`'s own
+  `error` handler makes a wrong guess cost one silent child); if a real desktop shows it biting, the
+  fix is an `onPath` argument, not a loop back in `platform.mjs`.
 - 2026-08-29 · The nudge phone tier (ntfy) has no end-to-end run — the URL matcher is https-only,
   so there is no local stand-in server. Prove: one real ntfy topic in the campaign.
-- 2026-08-29 · avahi (Linux mDNS) fallback not built and not tested; `dns-sd` is required.
-  Prove: decide in the campaign whether Linux discovery is supported or documented as absent.
+- ~~2026-08-29 · avahi (Linux mDNS) fallback not built and not tested; `dns-sd` is required.
+  Prove: decide in the campaign whether Linux discovery is supported or documented as absent.~~
+  **DECIDED AND DISCHARGED — 0.23.3, 2026-08-30. Linux mDNS discovery is UNSUPPORTED, it is
+  documented as absent, and the refusal is now asserted rather than assumed.** The decision half was
+  the easy one and it goes the way `platform.mjs`'s own comment already argued: avahi-browse prints a
+  completely different format, there is no avahi on this project's machines to verify a parser
+  against, and a parser written from a man page is precisely the confident-wrong-fix that
+  `parseDnssdZone` (written against the real binary, with its `\032` escapes and duplicated
+  per-interface records) exists as the counter-example to. Building it would owe a second parser AND
+  a second lifecycle for a capability nobody has asked for. `docs/COMPATIBILITY.md` says ❌
+  unsupported in those words, with the `avahi-utils` route for somebody who wants the compat `dns-sd`.
+
+  The half that was actually missing is that "unsupported" must not mean "silently reports an empty
+  network" — *nobody is hosting* and *this machine cannot look* are different answers, and conflating
+  them sends somebody hunting for a jam that is announcing perfectly well. All three surfaces were
+  read and all three were already correct (`cmdFind` refuses with the reason and exits 1, `--json`
+  gives `{ok:false,error,jams:[]}`, the menu's Join screen shows the reason in an `Alert` and keeps
+  the paste row, and the daemon logs `announce: off — <why>` once and hosts anyway) — but only the
+  PURE half had a test, so a regression to a silent empty listing would have gone unnoticed.
+  `scripts/check-discovery-refusal.mjs` now runs the real `sessions.mjs find`, both plain and
+  `--json`, and asserts the refusal. On the Linux leg it runs the NATIVE case too, because there
+  really is no `dns-sd` there — the branch is not hypothetical on that platform, it is the only one.
+  Canary run 2026-08-30: replacing the refusal with an empty result turns both checks red (`exit
+  status 0, wanted 1`), and on macOS the check asserts the opposite direction as well — a machine
+  that HAS `/usr/bin/dns-sd` must not be refused.
+
+  Not covered, and small: the MENU's `Alert` is React in an ink tree, so "the reason is on screen"
+  is asserted by nothing. `smoke-nudge` already drives a real `/menu` in a tmux pane; prove it there
+  if the Join screen is next touched.
 - 2026-08-29 · Invite links have never been used by a real remote guest on another machine —
   only by scripted clients here. Prove: the friend test, and the campaign's multi-guest pass.
 - ~~2026-08-29 · The 2-hour remote-session claim is unproven: the keepalive, relay auto-restart
@@ -721,12 +772,82 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
      Either refusal is correct, but which one fires is unknown until somebody runs it, and a WSL2
      host whose `$TMPDIR` is on `/mnt/c` would refuse to start at all — that is the outcome W2 has
      to design around, and the reason this is a precondition.
+
+  **0.23.3 — 1 and 2 are now COMMITTED to CI, and 3 is not. Read this before treating any of it as
+  measured: the `ubuntu-latest` leg has not run at the time of writing.** The three experiments were
+  the reason a Linux leg was added, and `scripts/check-state-privacy.mjs` is where they live. It runs
+  on every leg, needs no tmux, no claude and no network (the gate is the FIRST thing `host.mjs` does
+  after argument parsing, so a refusal costs one node start), and it prints `NOT EXERCISED` with a
+  reason for every branch it could not reach rather than counting it as a pass.
+
+  | experiment | where it stands |
+  | --- | --- |
+  | **2 — the false positive** | **MEASURED, and on macOS, 2026-08-30.** It did not need Linux after all, and that realisation is the useful part: the gate `lstat`s the state DIR, never its parent, so a `1777` parent is irrelevant to it — and `/private/tmp` on macOS is really mode `1777`, so the shape is reproducible here. An ordinary `secureDir`'d state dir under a genuinely world-writable parent is NOT refused, and the check `chmod`s the parent to `1777` and asserts it took, so the check cannot go vacuous. The whole unit suite was also re-run with `TMPDIR=/private/tmp` — the Linux `$TMPDIR` shape — and is unchanged at 451/0/3. |
+  | **1 — the attack, as ONE uid** | **MEASURED, 2026-08-30**, against the real `host.mjs`: a `0777` state dir with a planted 64-hex `host.key` exits 2, the refusal names `mode is 777`, it does not quote the key, and **nothing was written into the directory**. Plus the symlink case, and `EACCES` on an unsearchable parent. This is the same one-uid rehearsal 0.23.2 did, now automated on every push. |
+  | **1 — the attack, as TWO REAL UIDS** | **COMMITTED, NEVER RUN.** This is the branch macOS cannot reach and it is the point of the exercise. It needs a second uid, so it needs passwordless `sudo` — a CI runner has it, a developer's machine must not, and the check uses `sudo -n` so it can never prompt. On `ubuntu-latest` it creates the state dir as `nobody` at **mode 0700 on purpose** (a `0777` dir is refused by the mode branch before owner is ever asked, so only a tidy-umask plant tests the OWNER branch at all) and asserts the refusal names `owned by uid <n>`. On this Mac it reports `NOT EXERCISED — no passwordless sudo`, which is the honest line and is what the local run printed. |
+  | **3 — WSL2 on a DrvFs mount** | **UNCHANGED, and still a W2 precondition.** No CI runner has a `/mnt/c`, so neither the `0777`-for-everything shape nor the reports-no-usable-metadata shape can be reached. `pathPrivacy`'s fail-closed branch is unit-tested against synthesised stats and nothing more. Prove: one WSL2 install, `--state /mnt/c/tmp/jam`, and a report of WHICH refusal fired. |
+
+  **Two things the CI leg will not close, said here so nobody reads the green as more than it is.**
+  A Linux HOST has never existed: the nineteen smokes need a real tmux and six of them a real
+  `claude`, and none has run on Linux, so `tmux`, injection, `capture-pane` framing and F3 are
+  untested there (see the smoke assessment below). And a CI container commonly runs as **root**,
+  where `EACCES` is unreachable — a GitHub `ubuntu-latest` runner is the non-root user `runner`, so
+  the branch does run there, but the check detects uid 0 and says it did not exercise it rather than
+  reporting a pass it did not earn.
 - 2026-08-30 · `pathPrivacy`'s Windows branch (uid `null` → the owner and mode questions are skipped
   and only the symlink check runs) is asserted by unit test and has never executed on Windows. It is
   reached there through `assumePrivate`, whose `process.getuid` check is the only thing selecting it.
   Prove: the `windows-latest` CI leg runs the unit test; a human at a Windows keyboard starting a jam
   is what would prove `assumePrivate` does not refuse a normal `%TEMP%` directory. Until then the
   honest line is "green on macOS, and the Windows leg will say".
+
+- 2026-08-30 · **0.23.3, THE SMOKE ASSESSMENT: no smoke suite was added to CI, and this is the
+  reasoning rather than an omission.** The task was to assess and not to promise, so here is the
+  assessment, with the measurement it rests on.
+
+  **Nine of the nineteen need only `tmux`, `bash` and node.** That was worth checking rather than
+  assuming, and it is better than expected: `smoke-adopt`, `smoke-answer`, `smoke-discover`,
+  `smoke-invite`, `smoke-lifecycle`, `smoke-nudge`, `smoke-peer`, `smoke-scroll` and `smoke-view` all
+  point `JAM_CLAUDE` at a stub, and the ttyd/cloudflared they name are `stub()`ed shell scripts that
+  hold a pid and sleep — not the real binaries. So "they need a real `claude`" is true of six suites
+  (1–6 and `smoke-perm`), not of the free twelve, and a headless Linux runner is not disqualified.
+
+  **The one worth wiring is `smoke-lifecycle`, and it is worth wiring.** It is the ONLY behavioural
+  proof of the state-dir gate (S4/S4b), Linux is the platform where that gate's attack exists, it
+  costs no tokens, and it is 23 s. `apt-get install -y tmux` plus one `run:` line is the whole diff.
+  Two things were checked and are not blockers: S3 is guarded on *"the live `jam` session on :7777,
+  **if one is running**"*, so a runner with no jam on 7777 is fine; and it brings its own `$TMPDIR`,
+  its own ports (7845–7855) and its own sessions (`jamlife*`).
+
+  **It was NOT wired in this batch for one reason: it has never run on Linux, and I cannot run it.**
+  Adding an unrun nineteen-step tmux suite to the gate in the same commit as the leg itself means the
+  first Linux result mixes "the gate regressed" with "tmux 3.5a is not tmux 3.7c" and nobody can tell
+  which without a second push. This repo's comments cite measured tmux-3.7c behaviours by name
+  (*"`show-options -t` does not honour the `=` prefix"*), Ubuntu ships an older tmux, and TESTING.md's
+  own recurring lesson is that an edit which compiles is not a run. That is a reason to do it as its
+  own batch with somebody watching, not a reason not to do it.
+  Prove/do: `apt-get install -y tmux` + `node scripts/smoke-lifecycle.mjs` behind
+  `if: runner.os == 'Linux'`, pushed once on a branch and read before it goes near `main`'s gate. If
+  it is green, `smoke-nudge` (the platform seam, and the suite that would catch a Linux SOUND
+  regression) is the obvious second, then `smoke-scroll`.
+
+  What ran for this batch instead, all on macOS 2026-08-30: the unit suite **454 tests, 451 pass, 3
+  skipped, 0 fail** (and again at `TMPDIR=/private/tmp`, the Linux `$TMPDIR` shape, unchanged);
+  `check-terminal-gate`, `check-state-privacy` and `check-discovery-refusal` all clean; `npm pack
+  --dry-run` 21 files; `smoke-nudge` **16/16 in 18 s** (the sound seam, which is what this batch
+  changed — its log line `knock → afplay Submarine.aiff` is the seam being exercised) and
+  `smoke-lifecycle` **19/19 in 23 s** (the state-dir gate, S4 and S4b green, and its S3 re-confirmed
+  Roy's live jam on :7777 untouched). Not re-run, and judged unaffected: the other seventeen. Nothing
+  in the frame pipeline, the WS admission path, transfers, invites, discovery's parser, adoption or
+  the peer executor was touched — the diff is one pure function extracted, four prototype-key guards,
+  two new check scripts and CI. Prove: the full sweep at the next release gate.
+
+- 2026-08-30 · **0.23.3: a Linux HOST has still never existed, and the CI leg does not change that.**
+  Said as its own entry so it cannot be read out of the rows above. `ubuntu-latest` runs pure
+  functions and three real-entry-point checks that exit before tmux. Nothing has ever started a
+  daemon, built a tmux session, run `capture-pane`, injected into a pane or pressed F3 on Linux.
+  Prove: the smoke wiring in the entry above, and then one person hosting a real jam on a real Linux
+  box and joining it from a mac.
 
 ### v0.32 W1 — the Windows client (2026-08-30)
 

@@ -4552,10 +4552,20 @@ export const SOUND_KINDS = ['knock', 'join', 'nudge'];
 
 // `self` is your own arrival, which is not an arrival. `prefs.sound === false` is the human
 // having said no, and it wins over every event — including the v0.17 `waiting` bell.
+//
+// 0.23.3: `Object.hasOwn`, not a bare index. A plain-object lookup walks the PROTOTYPE, so
+// `EVENT_SOUNDS['__proto__']` was `Object.prototype` — truthy, so `?? null` did not save it — and
+// `soundKind('__proto__')` handed `{}` on to playSound as if it were a sound kind. Found 2026-08-30
+// by the new linuxSoundPlan test, which is where it actually bites: the plan functions then do
+// `names.map(…)` on Object.prototype and THROW, out of `playSound`, out of a render path, on Linux
+// and on Windows (macOS masks it — the mac branch only builds a filename and stats it). Not
+// reachable from a frame today: every `event:` in both clients is a literal. Fixed as a class
+// rather than an instance, because "look up a caller's string in a plain object" is the shape.
 export function soundKind(event, { self = false, prefs = null } = {}) {
   if (self) return null;
   if (prefs && notifyPrefs(prefs).sound === false) return null;
-  return EVENT_SOUNDS[String(event ?? '')] ?? null;
+  const k = String(event ?? '');
+  return Object.hasOwn(EVENT_SOUNDS, k) ? EVENT_SOUNDS[k] ?? null : null;
 }
 
 // The three tiers a client may use to interrupt its human, each independently switchable —
@@ -5919,7 +5929,8 @@ export const WIN_BEEPS = {
   nudge: [[659, 90], [659, 90], [659, 90]],
 };
 export function winBeepScript(kind) {
-  const seq = WIN_BEEPS[String(kind ?? '')];
+  const k = String(kind ?? '');
+  const seq = Object.hasOwn(WIN_BEEPS, k) ? WIN_BEEPS[k] : null; // 0.23.3: see soundKind's note
   if (!seq) return null;
   return seq.map(([hz, ms]) => `[console]::beep(${hz},${ms})`).join('; ');
 }
@@ -5929,13 +5940,62 @@ export function winBeepScript(kind) {
 // same call, with the real fs.existsSync, says which branch a real Windows image lands on.
 export function winSoundPlan(kind, exists = () => false, env = {}) {
   const k = String(kind ?? '');
-  const names = WIN_MEDIA_SOUNDS[k];
+  const names = Object.hasOwn(WIN_MEDIA_SOUNDS, k) ? WIN_MEDIA_SOUNDS[k] : null; // 0.23.3: see soundKind
   if (!names) return null;
   const dir = `${env.WINDIR || 'C:\\Windows'}\\Media`;
   const file = names.map((n) => `${dir}\\${n}`).find((f) => exists(f)) || null;
   return file
     ? { mode: 'wav', file, args: [...PS_ARGS, PS_PLAY_WAV], env: { [PS_ENV_FILE]: file } }
     : { mode: 'beep', file: null, args: [...PS_ARGS, winBeepScript(k)], env: {} };
+}
+
+// 0.23.3: the LINUX plan, moved here for exactly the reason winSoundPlan is here. It used to be a
+// `for` loop inside platform.mjs's `soundFile`, closed over `fs.existsSync` — so the only machine
+// that could ever check it was a Linux desktop with a sound theme installed, and there is none in
+// this project. AGENTS.md §2 states the rule the Windows leg taught: the DECISION is a pure
+// function in lib.mjs, the spawn is platform.mjs's. This is that rule applied to the branch that
+// was left behind.
+//
+// Two players, two file sets, and the split is not cosmetic: `paplay` is PulseAudio/PipeWire and
+// takes the freedesktop `.oga` theme most desktops ship; `aplay` is ALSA and plays WAV only, so
+// handing it an `.oga` is a guaranteed failure rather than a fallback. Hence a candidate list per
+// player, tried in order, and per kind so a knock is never a join.
+export const FREEDESKTOP_SOUND_DIR = '/usr/share/sounds/freedesktop/stereo';
+export const ALSA_SOUND_DIR = '/usr/share/sounds/alsa';
+export const LINUX_SOUNDS = {
+  paplay: {
+    knock: ['message-new-instant.oga', 'bell.oga'],
+    join: ['service-login.oga', 'complete.oga'],
+    nudge: ['message.oga', 'bell.oga'],
+  },
+  aplay: {
+    knock: ['Front_Center.wav'],
+    join: ['Front_Left.wav'],
+    nudge: ['Front_Right.wav'],
+  },
+};
+const LINUX_SOUND_DIR = { paplay: FREEDESKTOP_SOUND_DIR, aplay: ALSA_SOUND_DIR };
+
+// `null` is a real answer and the honest one on a headless box: no player's files are here, so the
+// event is silent. Silence is acceptable and is never an error a user sees — a missing sound must
+// not be able to cost a frame.
+//
+// THE CEILING, named rather than implied: the chain keys on the FILE, not on the BINARY. A box with
+// the freedesktop theme installed but no `paplay` on PATH resolves to paplay and gets silence
+// instead of falling through to aplay. That is the pre-existing behaviour, kept deliberately — a
+// PATH probe is a second seam and `spawn`'s own 'error' handler already makes a wrong guess cost
+// one silent child rather than an exception. If a real Linux desktop ever shows this biting, the
+// fix is an `onPath` argument here, not a loop back in platform.mjs.
+export function linuxSoundPlan(kind, exists = () => false) {
+  const k = String(kind ?? '');
+  for (const bin of ['paplay', 'aplay']) {
+    // `Object.hasOwn`, not a bare index — see soundKind's 0.23.3 note. This is the call that found it.
+    const names = Object.hasOwn(LINUX_SOUNDS[bin], k) ? LINUX_SOUNDS[bin][k] : null;
+    if (!names) return null; // not a sound kind at all: the same answer for both players
+    const file = names.map((n) => `${LINUX_SOUND_DIR[bin]}/${n}`).find((f) => exists(f));
+    if (file) return { bin, file };
+  }
+  return null;
 }
 
 // ------------------------------------------------- which terminal, and which keyboard, on Windows --

@@ -28,7 +28,8 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, validHostKey, pathPrivacy,
   aclUser, aclArgs, parseIcaclsPrincipals,
-  PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, winSoundPlan } from './lib.mjs';
+  PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, winSoundPlan,
+  linuxSoundPlan } from './lib.mjs';
 
 export const IS_MAC = process.platform === 'darwin';
 export const IS_WINDOWS = process.platform === 'win32';
@@ -226,21 +227,14 @@ export function notify(title, body) {
 export const SOUNDS = { knock: 'Submarine', join: 'Glass', nudge: 'Hero' };
 export const MAC_SOUND_DIR = '/System/Library/Sounds';
 
-// Linux, UNVERIFIED on this machine — said plainly rather than pretended. `paplay` takes the
-// freedesktop .oga set that ships with most desktops; `aplay` is ALSA and plays WAV only, so it
-// gets its own candidate list rather than being handed an .oga it would reject. Neither present,
-// or no file found: silence, which is an acceptable answer and never an error a user sees.
+// Linux: which player and which file is `linuxSoundPlan`'s decision, in lib.mjs, for the same
+// reason winSoundPlan's is — 0.23.3 moved it there. It used to be a loop right here, closed over
+// `fs.existsSync`, so nothing but a Linux desktop with a sound theme could ever check it and this
+// project has none. As a pure function it is asserted on every CI leg, and the `ubuntu-latest` leg
+// PRINTS what a real Linux box resolved to. What still needs a person at a Linux desktop is only
+// whether the three sounds are audibly distinguishable — TESTING.md says so.
 // v0.32 W1 took the other branch: `System.Media.SoundPlayer` over a .wav from `%WINDIR%\Media`,
 // and a per-kind `[console]::beep()` PATTERN when there is none — see winSoundPlan in lib.mjs.
-const FD = '/usr/share/sounds/freedesktop/stereo';
-const LINUX_SOUNDS = {
-  paplay: { knock: [`${FD}/message-new-instant.oga`, `${FD}/bell.oga`],
-    join: [`${FD}/service-login.oga`, `${FD}/complete.oga`],
-    nudge: [`${FD}/message.oga`, `${FD}/bell.oga`] },
-  aplay: { knock: ['/usr/share/sounds/alsa/Front_Center.wav'],
-    join: ['/usr/share/sounds/alsa/Front_Left.wav'],
-    nudge: ['/usr/share/sounds/alsa/Front_Right.wav'] },
-};
 
 // "Verify the files exist at startup once and remember the answer" — a render path must not pay
 // a stat per sound, and a missing file must not be re-discovered forty times an hour. `null` is
@@ -250,7 +244,9 @@ export function soundFile(kind) {
   const k = String(kind ?? '');
   if (soundCache.has(k)) return soundCache.get(k);
   let hit = null;
-  if (SOUNDS[k]) {
+  // `Object.hasOwn`, not a bare index: `SOUNDS['__proto__']` is Object.prototype and is TRUTHY, so
+  // this guard let a prototype key through to the per-platform branches (0.23.3 — see soundKind).
+  if (Object.hasOwn(SOUNDS, k)) {
     if (IS_MAC) {
       const f = `${MAC_SOUND_DIR}/${SOUNDS[k]}.aiff`;
       if (fs.existsSync(f)) hit = { bin: 'afplay', file: f };
@@ -262,12 +258,9 @@ export function soundFile(kind) {
       const plan = winSoundPlan(k, fs.existsSync, process.env);
       if (plan) hit = { bin: POWERSHELL, file: plan.file, args: plan.args, env: plan.env, mode: plan.mode };
     } else {
-      for (const bin of ['paplay', 'aplay']) {
-        const found = (LINUX_SOUNDS[bin][k] || []).find((f) => fs.existsSync(f));
-        // The binary is on PATH or it is not; spawn's 'error' handler is what finds out, and a
-        // wrong guess here costs one silent child rather than an exception.
-        if (found) { hit = { bin, file: found }; break; }
-      }
+      // The binary is on PATH or it is not; spawn's 'error' handler is what finds out, and a wrong
+      // guess costs one silent child rather than an exception. See linuxSoundPlan's own note.
+      hit = linuxSoundPlan(k, fs.existsSync);
     }
   }
   soundCache.set(k, hit);
