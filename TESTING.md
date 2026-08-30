@@ -62,6 +62,24 @@ Not yet run as part of a release gate; the gate record below is 0.23.0's, which 
 
 ## Release gates that have actually run
 
+- **0.23.1 — 2026-08-30. The security patch, and the first gate with nineteen suites.**
+  All nineteen in the documented order, one at a time, plus the unit suite (**446 tests, 443 pass,
+  3 skipped, 0 fail**) and `check-terminal-gate`, on node 24.15 / tmux 3.7c / claude 2.1.251 /
+  ttyd 1.7.7 / cloudflared 2026.8.2 / git 2.50.1, from a verified-clean machine state (**no live
+  tmux server on any socket** — checked by listing sessions on every socket under
+  `$TMPDIR/../tmux-501`, not by assuming — and Roy's dormant state dirs at 7777 and 7873 left
+  untouched). Suites 1–6 shared one `--model haiku` daemon on :7799, suite 7 its own knock-only
+  daemon, suites 8–19 self-contained.
+  **19/19, exit 0 on every suite, 241 PASS, 0 FAIL.** That is the 0.23.0 gate's 235 plus
+  `smoke-view`'s 6, so nothing that was running steps stopped running them.
+  `smoke.mjs` contributes 0 PASS lines **by format, not by vacuity** — it is the field report, and
+  its `--- RESULT ---` block was read for this gate: `pong` returned, the system prompt in effect
+  (it refused a paraphrase of the token to a prefixed participant), and the v0.30 big paste whole
+  at 120/120 marked lines.
+  Sessions killed by exact name on their own sockets throughout; nothing left advertising on the
+  network (smoke-discover's own teardown check), no orphan `ttyd` or `cloudflared`, no listener
+  left on any port the gate used.
+
 - **0.23.0 — 2026-08-30. The first gate with a Windows leg, and the leg is what it was for.**
   All eighteen suites in the documented order plus the unit suite (**441 tests, 438 pass, 3 skipped,
   0 fail**), on node 24.15 / tmux 3.7c / claude 2.1.251 / cloudflared 2026.8.2 / ttyd 1.7.7, from a
