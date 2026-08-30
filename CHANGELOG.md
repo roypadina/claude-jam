@@ -37,14 +37,44 @@ older daemon, or one started by hand) says so and joins as a **guest**. Falling 
 address-only host would re-open F1 for exactly the people who upgrade without restarting. End the
 jam and start it again to be its host.
 
-**The key is a credential**: never logged, never in a frame the daemon sends, never in the
-transcript, never in an export (`stripTokenBlock` scrubs it like the join token), never in a
+**The key is a credential**: never logged, never in a frame the daemon builds, never in a
 `--help` example. Only its **path** is ever printed — the launcher hands its own client
 `--host-key-file <path>` on every surface that opens it (`claude-jam host`, `host --attach`, the
 launcher menu's attach, and `claude-jam adopt`), and the client reads the file itself.
 
 **Still not verified:** Tailscale Funnel's *transport* (does it relay at all, on this tailnet).
 What changed is that the *host gate* no longer depends on recognising it.
+
+### Security — the scrub covers every funnel out, not just `/export`
+
+Found by this release's own gate, and worth stating rather than fixing quietly: **no released
+version is affected**, because no released version has a host key to leak. This is a defect in
+unreleased v0.34 code, caught before it shipped.
+
+v0.34 scrubbed the key on one path — `/export` — on the stated assumption that it "is never put in
+a frame and never told to claude, so it has no route into a transcript". There is a route. claude
+runs as the host user with file tools, so **any participant can ask it to read
+`<state>/host.key`**; the answer lands on the pane and in the transcript, and the daemon broadcasts
+both. `smoke-adopt` S7c caught it as a one-in-six flake, which is the other half of the finding: a
+security assertion that passes five times in six is worse than none.
+
+Both funnels now scrub, sharing one helper (`scrubSecrets`):
+
+- the **transcript** path, at the single line all four frame kinds pass through, and
+- the **mirror rows**, so a key printed on the pane does not reach a guest's terminal.
+
+The **join token** gets the same treatment there, and it matters more than it looks: in knock mode
+a guest has no token at all, so a guest who got claude to read `token.json` gained a credential
+they were never given — persistence across a `/token` rotation, and the ability to hand out access.
+
+Scrubbing is by **known literal**, not by pattern: the daemon knows both actual values, and a
+pattern wide enough to match a bare 64-hex key would also eat commit shas and checksums out of
+somebody's screen. One `includes` guard per value keeps the mirror's hot path allocation-free.
+
+Known ceiling, recorded in the code: a secret **wrapped across two captured rows** matches in
+neither half, so a 64-hex key on an 80-column pane is half-exposed on the pane path. The
+transcript funnel and `/export` see whole text and do catch it, and host authority still needs
+locality as well as the key.
 
 ### Tests — the smoke suites clean up after themselves (campaign F10)
 

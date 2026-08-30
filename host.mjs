@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, clientCommand,
+import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, buildTokenFile, classifyHello, localSocket, nameTaken, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, scrubSecrets, clientCommand,
   // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
   respawnDelay, heartbeatSweep, HEARTBEAT_MS, resolveTailscale, funnelPrecheck, funnelHost, parseFunnelUrl, FUNNEL_PORTS,
   // v0.17 Batch H/F: history backfill, /files, /diff, secret masking.
@@ -1524,7 +1524,8 @@ function paneDims(rows) {
 function captureFrame() {
   const r = ptmux('capture-pane', '-e', '-p', '-t', CLAUDE_PANE);
   if (r.status !== 0) return null;
-  return (r.stdout || '').replace(/\n$/, '').split('\n').map(sanitizeFrameRow);
+  return (r.stdout || '').replace(/\n$/, '').split('\n')
+    .map((row) => sanitizeFrameRow(row, currentToken, HOST_KEY));
 }
 
 function pumpMirror() {
@@ -1651,7 +1652,8 @@ function onScreenHistory(ws, m) {
     if (r.status !== 0) {
       return sendError(ws, `could not read the pane's history: ${(r.stderr || '').trim() || 'capture-pane failed'}`);
     }
-    rows = (r.stdout || '').replace(/\n$/, '').split('\n').map(sanitizeFrameRow);
+    rows = (r.stdout || '').replace(/\n$/, '').split('\n')
+      .map((row) => sanitizeFrameRow(row, currentToken, HOST_KEY));
     screenCache = { key, at: Date.now(), rows };
   }
   const size = paneDims(rows);
@@ -3955,8 +3957,12 @@ function onTranscript(e) {
   if (e.kind === 'text' || e.kind === 'tool') pumpPrompt();
   // v0.17 F2: the live half of the file set — the backfill seeded the rest at boot.
   noteFilePath(touched, e.file);
-  // Agent text lands in everyone's terminal, so strip escapes here too.
-  const text = stripControl(e.text);
+  // Agent text lands in everyone's terminal, so strip escapes here too — and scrub this jam's
+  // own two secrets, because everything below broadcasts. All four kinds funnel through this one
+  // line: a guest who gets claude to read <state>/host.key or token.json would otherwise be
+  // handed the value verbatim, and in knock mode a guest has no token at all, so it would be a
+  // credential they were never given. Found by the 0.22.0 release gate (smoke-adopt S7c).
+  const text = scrubSecrets(stripControl(e.text), currentToken, HOST_KEY);
   if (e.kind === 'user') {
     if (e.bridged) return; // already broadcast at injection time
     broadcast({ t: 'say', from: opts.name, text });
