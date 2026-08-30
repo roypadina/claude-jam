@@ -52,7 +52,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
 | `peer-mcp.mjs` | v0.29: `list_peers` / `dispatch_to_peer` as a stdio MCP server for the HOST's own claude. A PIPE, not a brain — every decision is the daemon's, reached over the same loopback+secret endpoint `hooks.sh` uses. |
 | `peer.mjs` | v0.29: running ONE peer task on this machine — the scratch dir, the generated settings, the spawn, the caps and the killing. Imported by both clients so there is one place a peer task is built and stopped. |
-| `test.mjs` | the unit suite. `scripts/` holds the nineteen end-to-end smokes, `scripts/check-terminal-gate.mjs` (a free non-smoke check that spawns the real client entry point, in CI on both legs) and `fixtures/pane/` the real `capture-pane` corpus. |
+| `test.mjs` | the unit suite. `scripts/` holds the nineteen end-to-end smokes, three free non-smoke checks that spawn a real entry point and are in CI on **all three** legs — `check-terminal-gate.mjs` (the client, and the Windows terminal refusal), `check-state-privacy.mjs` (`host.mjs`, and the state-dir gate, including a second real uid where one is reachable) and `check-discovery-refusal.mjs` (`sessions.mjs find` with no `dns-sd`) — and `fixtures/pane/` the real `capture-pane` corpus. |
 | `docs/COMPATIBILITY.md` | what has actually been RUN, per platform and per capability, with the date and the build. No "should work" rows. A capability is verified or it is listed as unverified with the experiment that would settle it. |
 | `integrations/claude-plugin/` | the OPTIONAL `/jam` Claude Code plugin: a command, a skill, a manifest. **No code** — everything it does, it does by running the `claude-jam` on `PATH`. `.claude-plugin/marketplace.json` at the repo root points at it; a test asserts the two manifests agree. |
 
@@ -67,8 +67,12 @@ the tool's dependencies, spelled the same everywhere, and they stay where they a
 node --test test.mjs      # the whole unit suite; must be green before every commit
 ```
 
-451 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
+454 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
 framework. Add tests to `test.mjs` next to the ones for the same version heading.
+
+**`test.mjs` spawns nothing** — no tmux, no git, no platform binary off the win32-only tests — and
+that is worth keeping: it is why the suite is 285 ms and why a CI leg needs no packages installed.
+Something that has to spawn the real entry point goes in a `scripts/check-*.mjs` instead.
 
 Three of them are **skipped off Windows** (`{ skip: process.platform !== 'win32' }`) — the real
 `icacls` ACL, the real `%WINDIR%\Media` lookup, and `/paste`'s failure path through real
@@ -76,18 +80,36 @@ PowerShell. They are the only thing that ever executes those branches, and they 
 `windows-latest` CI leg. If you touch a win32 branch, the honest report is "green on macOS, and
 the Windows leg will say" — not "verified".
 
-### CI, and why it is not optional here (v0.32 W1)
+### CI, and why it is not optional here (v0.32 W1, Linux added 0.23.3)
 
-`.github/workflows/tests.yml` runs the unit suite, `scripts/check-terminal-gate.mjs` and
-`npm pack --dry-run` on **macos-latest and windows-latest**, on node 22 (the `engines` floor).
-Nobody on this project has a Windows machine, so CI is the only thing that ever runs the Windows
-code at all. Two consequences for anything you write there:
+`.github/workflows/tests.yml` runs the unit suite, three `scripts/check-*.mjs` and
+`npm pack --dry-run` on **macos-latest, ubuntu-latest and windows-latest**, on node 22 (the
+`engines` floor). Nobody on this project has a Windows machine OR a Linux machine, so CI is the only
+thing that ever runs either platform's code at all.
+
+The two legs are there for different reasons, and the difference matters when you decide what to put
+where. **Windows** is a platform whose code was written blind. **Linux** is a platform where a
+*security property* differs: `os.tmpdir()` is `/tmp`, mode `1777`, so another local user can create
+`$TMPDIR/claude-jam-<port>` before the jam does — which is 0.23.2's finding 3, and is impossible on
+macOS, where `$TMPDIR` is per-user and `0700`. Five adversarial reviews missed it because all five
+ran on macOS. If you touch `pathPrivacy`, `assumePrivate`, `secureDir`, `secureWrite` or
+`loadHostKey`, the Linux leg is the one that can tell you anything.
+
+Two consequences for anything you write for either:
 
 - **Put the decision in `lib.mjs` as a pure function** (which argv, which principal, which
   `.wav`, which refusal) and the spawn in `platform.mjs`. A function that returns an argv is
-  assertable on a Windows runner; a function that shells out is not.
+  assertable on a Windows runner; a function that shells out is not. 0.23.3 is the cautionary
+  example: the LINUX sound decision was left as a `for` loop over `fs.existsSync` inside
+  `soundFile`, so it was checkable only on a Linux desktop with a sound theme — i.e. nowhere — while
+  `winSoundPlan` sat two functions away doing it right. Extracting it found a real throw on its
+  first run.
 - **A path assertion must go through `path.join`**, never a POSIX literal, or it fails on the
   Windows leg for the separator alone and teaches everyone to ignore the red.
+- **Never index a plain object with a caller's string.** `Object.hasOwn(MAP, k) ? MAP[k] : null`.
+  A bare index walks the prototype, so `MAP['__proto__']` is `Object.prototype` — truthy, so a
+  `?? null` does not save you — and the junk throws further down. Four lookups in the sound path had
+  this, and it threw on Linux and Windows while macOS masked it (0.23.3).
 
 Three of them are lints rather than assertions about behaviour, and all three exist because the
 thing they check cannot be caught by running the program once:

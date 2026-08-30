@@ -17,9 +17,32 @@ Two things are being tracked and they are not the same problem:
 | | host | client |
 | --- | --- | --- |
 | **macOS** (26, Apple silicon) | ✅ verified continuously — every release gate runs here | ✅ verified continuously |
-| **Linux** | ⚠️ unverified: no Linux machine on this project. The code is POSIX and the smokes are not Linux-specific, but nobody has run them there. Sounds fall back to `paplay`/`aplay`, also unrun. mDNS discovery needs `dns-sd` (avahi is not implemented). | ⚠️ unverified, same reason |
+| **Linux** | ⚠️ **still unverified as a HOST** — no Linux machine on this project, and no tmux/claude/pty path has ever run there. What changed in 0.23.3 is that a `ubuntu-latest` CI leg now runs the unit suite and three real-entry-point checks on every push; see the Linux table below for what that does and does not settle. | ⚠️ unverified by a human. The unit suite and the three checks run on `ubuntu-latest`; nobody has joined a jam from a Linux box |
 | **Windows** (native) | ❌ **not built, and not planned.** See SPEC.md v0.32 **W3** — nothing reattaches to a running ConPTY, so the host's own operator would be the one person on the ~300 ms proxy path. | 🟡 **implemented, CI-tested on `windows-latest`, never run by a human.** Details below. |
 | **Windows via WSL2** | 🟡 designed, not yet integrated (SPEC.md v0.32 **W2**). tmux and `claude` both run inside the distribution; the open work is paths across the `\\wsl$` boundary and port forwarding from Windows to WSL. | ✅ use the Linux client inside WSL2 — same unverified status as Linux |
+
+---
+
+## Linux, capability by capability (0.23.3)
+
+The `ubuntu-latest` leg landed in 0.23.3 and **has not run yet at the time this table was
+written** — it is committed, not measured, and no row below says otherwise. When the first run
+happens, the rows marked ⏳ get its date and its result, exactly as the Windows rows did.
+
+The leg exists for one specific reason: **0.23.2 fixed a local privilege escalation that macOS
+cannot test.** `os.tmpdir()` on macOS is a per-user `0700` directory, so no other local user can
+create `$TMPDIR/claude-jam-<port>` first; on Linux it is `/tmp`, mode `1777`, and getting there
+first is the whole attack. Five adversarial reviews missed the finding because every one of them
+ran on macOS.
+
+| capability | on Linux | verified by |
+| --- | --- | --- |
+| the state-dir privacy gate | `lstat` + owner + mode on `$TMPDIR/claude-jam-<port>`, refusing before anything is written | ⏳ CI — `scripts/check-state-privacy.mjs` runs the real `host.mjs` against a planted `0777` dir, a symlink, an unsearchable parent (`EACCES` — reachable there, because the runner is not root) and **a directory created by a second real uid** via `sudo -u nobody`. That last one is the only place the 0.23.2 attack can be run at all. Green on macOS 2026-08-30 with the two-uid branch reported NOT EXERCISED |
+| the gate's FALSE POSITIVE (an ordinary jam under a world-writable parent must start) | the gate `lstat`s the state dir, not its parent, so a `1777` `/tmp` is irrelevant | ✅ measured 2026-08-30 — on macOS against a real `1777` parent (`/private/tmp` is `1777` there too), and it is the first check in `check-state-privacy.mjs`, so it runs on every leg. A gate that refused every Linux host would be worse than the bug it fixes |
+| `os.tmpdir()` is `/tmp`, and `/tmp` is `1777` | the two facts the finding rests on, previously cited from POSIX and never measured | ⏳ CI — asserted on the Linux leg (and skipped, out loud, if `$TMPDIR` is set on the runner) |
+| join/knock/nudge sounds | `paplay` (freedesktop `.oga`) then `aplay` (ALSA `.wav`), per kind; nothing installed → silence | 🟡 **the decision is verified, the sound is not.** `linuxSoundPlan` is a pure function as of 0.23.3 and is asserted on every leg (player order, per-kind candidates, the `.oga`/`.wav` split, "nothing → silence"). A CI runner has no audio device, so the Linux leg PRINTS what it resolved rather than asserting a branch. **Nobody has heard one** — that needs a Linux desktop |
+| mDNS discovery (`claude-jam find`, the menu's Join screen) | ❌ **unsupported, and it says so.** `dns-sd` is Apple's CLI and Linux has none unless avahi's compat package provides one; the avahi-native path was deliberately not built | ⏳ CI — `scripts/check-discovery-refusal.mjs` asserts the refusal is non-zero and carries `DNSSD_MISSING` (which names `avahi-utils` as the fix) rather than a silent empty listing, in both the table and the `--json` shape. Green on macOS 2026-08-30, where it asserts the other direction: a machine that HAS `dns-sd` is not refused |
+| hosting a jam (tmux, `claude`, `capture-pane`, injection, F3) | POSIX, and nothing in it is macOS-specific | ⚠️ **nothing.** The nineteen smokes need a real tmux and (six of them) a real `claude`; none has ever run on Linux. This is the gap the CI leg does NOT close |
 
 ---
 
