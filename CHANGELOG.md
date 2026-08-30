@@ -1,5 +1,67 @@
 # Changelog
 
+## Unreleased
+
+### CI gains a Linux leg, and the leg is what it is for
+
+`ubuntu-latest` joins `macos-latest` and `windows-latest` in `.github/workflows/tests.yml`. It is
+there for one specific reason: **0.23.2 fixed a local privilege escalation that macOS cannot test.**
+`os.tmpdir()` on macOS is a per-user `0700` directory, so no other local user can create
+`$TMPDIR/claude-jam-<port>` first and there is nothing to attack; on Linux it is `/tmp`, mode `1777`,
+and getting there first is the whole attack. Five adversarial reviews missed the finding because
+every one of them ran on macOS. Linux is also the precondition for the WSL2 Windows host (SPEC v0.32
+W2), whose `$TMPDIR` is Linux's.
+
+The unit suite needs no new packages there — it spawns nothing — so nothing was installed for it.
+
+**Two new checks, both cheap, both able to fail, on every leg.** They are the shape
+`scripts/check-terminal-gate.mjs` established: spawn the real entry point, because a pure-function
+test cannot see whether the caller *asks* correctly.
+
+- `scripts/check-state-privacy.mjs` — the state-dir gate against the real `host.mjs`. The gate is the
+  first thing `host.mjs` does after argument parsing, before tmux and before claude, so a refusal
+  costs one node start. It covers the false positive (an ordinary jam under a world-writable parent
+  must **not** be refused — the gate `lstat`s the state dir, never its parent), a planted `0777` dir
+  with a 64-hex `host.key`, a symlink where the state dir belongs, `EACCES` on an unsearchable
+  parent, and — only where a second uid is reachable — **a state dir created by another real uid**,
+  which is the branch macOS cannot reach at all. Every branch it could not exercise prints
+  `NOT EXERCISED` with the reason instead of being counted as a pass.
+- `scripts/check-discovery-refusal.mjs` — with no `dns-sd`, `claude-jam find` must refuse with the
+  reason and exit non-zero, in both the table and the `--json` shape. *Nobody is hosting* and *this
+  machine cannot look* are different answers. On Linux that is not a branch, it is the only branch.
+
+**A caution that belongs in the changelog rather than in a comment**, because it was found the hard
+way while canarying the first of those: with the privacy gate neutered, `node host.mjs` on a planted
+directory does not fail — it **builds a real jam** and detaches. The check therefore runs `host.mjs`
+with `JAM_TMUX_BIN` pointing at nothing, so a fail-open is still a failure by exit code and by the
+files it left, and never a live daemon on somebody's machine.
+
+### Fixed
+
+- **The Linux sound decision was untestable by construction, so it moved.** Which player and which
+  file a knock/join/nudge resolves to on Linux was a `for` loop inside `platform.mjs`'s `soundFile`,
+  closed over `fs.existsSync` — so the only machine that could ever check it was a Linux desktop with
+  a sound theme installed, and this project has none. It is now `linuxSoundPlan(kind, exists)` in
+  `lib.mjs`, exactly as `winSoundPlan` already was, and asserted on every CI leg: `paplay` before
+  `aplay`, the per-kind candidate order, the second-choice fallback within a player, the `.oga`/`.wav`
+  split (`aplay` is ALSA and cannot play an `.oga`, so handing it one is not a fallback), three
+  distinct files per player, and "nothing installed → silence". No behaviour change — a pure
+  extraction. The Linux leg additionally *prints* what a real Linux box resolved to; a headless runner
+  has no audio device, and resolving to silence there is the correct answer. What still needs a person
+  at a Linux desktop is only whether the three are audibly distinguishable.
+
+- **A prototype key was a sound kind.** `soundKind('__proto__')` returned `Object.prototype` rather
+  than `null`: a plain-object index walks the prototype chain, `EVENT_SOUNDS['__proto__']` is truthy,
+  and `?? null` never saw it. The junk then reached `winSoundPlan` / `linuxSoundPlan` / `winBeepScript`,
+  which do `names.map(…)` on it and **throw — out of `playSound`, out of a render path**, on Linux and
+  on Windows. macOS masks it (its branch only builds a filename and stats it), which is why nothing
+  had noticed. Found 2026-08-30 by the new `linuxSoundPlan` test on its first run.
+  **Not reachable from a frame:** every `event:` in both clients is a literal (`'knock'`, `'join'`,
+  `'nudge'`, `''`), so no participant can supply the string. It is a latent throw, not an exposure.
+  Fixed as a class rather than an instance — `Object.hasOwn` at all four lookups plus `soundFile`'s
+  own `if (SOUNDS[k])` guard, which had the same hole — and pinned by tests over `__proto__`,
+  `constructor`, `toString`, `valueOf` and `hasOwnProperty`.
+
 ## 0.23.2
 
 **A security patch, and the second one in a row found by attacking a surface nothing had attacked

@@ -8,6 +8,13 @@ name: tests
 # every push. Everything that needs a human at a Windows keyboard — a toast being seen, a sound
 # being heard, F2 in Windows Terminal — is NOT proven here and is recorded in TESTING.md instead.
 #
+# Why the LINUX leg exists (0.23.3), and it is a different reason: 0.23.2 fixed a local privilege
+# escalation that macOS CANNOT test. `$TMPDIR` on macOS is a per-user 0700 directory, so no other
+# local user can create `$TMPDIR/claude-jam-<port>` first; on Linux `os.tmpdir()` is `/tmp`, mode
+# 1777, and the whole attack is that another user gets there first. Five adversarial reviews missed
+# the finding for exactly that reason — every one of them ran on macOS. `ubuntu-latest` is also the
+# precondition for SPEC v0.32 W2 (the WSL2 Windows host), whose `$TMPDIR` is Linux's.
+#
 # The end-to-end smokes stay out on purpose: they need a real tmux, a real terminal and (six of
 # them) a real `claude` that costs tokens. They are the release gate, run by hand.
 on:
@@ -19,11 +26,13 @@ jobs:
     name: node --test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
-      # Both legs always run: "it broke on Windows" and "it broke everywhere" are different
-      # bug reports, and cancelling the other leg hides which one this is.
+      # Every leg always runs: "it broke on Windows", "it broke on Linux" and "it broke
+      # everywhere" are three different bug reports, and cancelling the others hides which one
+      # this is. That is not theoretical — the Windows leg's first red was a flake on BOTH
+      # platforms, and only seeing macOS fail alongside it said so.
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -36,6 +45,25 @@ jobs:
       # bare Windows console and lets Windows Terminal through. A pure-function test cannot see
       # whether the client ASKS correctly — this found exactly that bug on its first run.
       - run: node scripts/check-terminal-gate.mjs
+      # 0.23.3, and the reason the Linux leg was added: the state-dir privacy gate, against the
+      # REAL host.mjs. Free on every leg (the gate is the first thing host.mjs does, before tmux
+      # and before claude, so a refusal costs one node start), and on `ubuntu-latest` it is the
+      # only place the 0.23.2 attack can be run at all — `/tmp` is 1777 there, the runner is the
+      # non-root user `runner` so the EACCES branch is reachable, and passwordless sudo makes the
+      # second uid real. It prints NOT EXERCISED for every branch it could not reach.
+      - run: node scripts/check-state-privacy.mjs
+      # 0.23.3: `dns-sd` does not exist on Linux, so on that leg this is not a branch — it is the
+      # only branch, on every box. It asserts the refusal is MESSAGED and non-zero rather than a
+      # silent empty listing ("nobody is hosting" and "this machine cannot look" are different
+      # answers), and on macOS it asserts the opposite direction: a machine that HAS dns-sd must
+      # not be refused. Free — JAM_DNSSD points at nothing, so nothing is ever spawned.
+      - run: node scripts/check-discovery-refusal.mjs
+      # 0.23.3: what the Linux sound path actually resolves to on a real Linux box. PRINTED, not
+      # asserted — a runner with no freedesktop sound theme correctly resolves to silence, and the
+      # same line on a Linux DESKTOP is what discharges the rest of that deferral. Same discipline
+      # as the Windows sound-mode line.
+      - if: runner.os == 'Linux'
+        run: node -e "import('./platform.mjs').then(p=>console.log('linux sound modes:',JSON.stringify(['knock','join','nudge'].map(k=>[k,p.soundFile(k)]))))"
       # A client is the whole Windows story, and `npm i -g claude-jam` is how it gets there — so
-      # the tarball is built on both platforms too. It must not need tmux or claude to pack.
+      # the tarball is built on every platform too. It must not need tmux or claude to pack.
       - run: npm pack --dry-run
