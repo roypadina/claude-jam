@@ -188,6 +188,18 @@ Then, in any order, the ones that bring their own everything:
 Prefer 8–18 while iterating: they are self-contained, deterministic and free. 1–6 and 10 spend
 real tokens, so run them once, at the end, and use `--model haiku`.
 
+### A suite cleans up after itself, by exact path
+
+Every suite removes the directories **it** created, and only on a run that PASSED — a failing run
+keeps them, because that is when somebody wants to read them, and it says where they are. Four of
+them did not, and `$TMPDIR` was found holding **158** `jam-*` directories, about ten more per full
+sweep, growing with no expiry (campaign F10).
+
+The removal is one `fs.rmSync` per path `mkdtempSync` handed that process, after the daemons are
+dead. **Never a pattern, never a glob, never a sweep of `$TMPDIR`** — another suite's directories,
+another session's, and Roy's own look identical from the outside, and the rule here is the same one
+§0 states for processes and tmux sessions: name the exact thing you made.
+
 ---
 
 ## 3. How a change is made

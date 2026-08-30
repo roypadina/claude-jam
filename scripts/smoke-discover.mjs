@@ -372,6 +372,17 @@ try {
   }
   spawnSync(process.execPath, [path.join(ROOT, 'sessions.mjs'), 'clean', '--yes'], { env: ENV, encoding: 'utf8' });
   console.log(`\n${failed ? `${failed} step(s) FAILED` : 'all steps passed'}`);
-  console.log(`(TMPDIR ${TMP} — left in place for inspection)`);
+  // v0.21.2 (campaign F10): this suite leaked two directories per run with no note saying why,
+  // which reads more like an oversight than a choice. A passing run takes both with it; a failing
+  // one keeps them, because that is when the daemon logs inside are worth reading. Exactly the two
+  // paths mkdtempSync handed this process — never a pattern, never a sweep of $TMPDIR.
+  if (failed) {
+    console.log(`(TMPDIR ${TMP} — left in place for inspection)`);
+  } else {
+    for (const d of [TMP, BIN]) {
+      try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    console.log(`(cleaned up: ${TMP}, ${BIN})`);
+  }
 }
 process.exit(exitCode);

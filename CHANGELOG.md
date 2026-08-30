@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Tests — the smoke suites clean up after themselves (campaign F10)
+
+`smoke-peer` (4 directories per run), `smoke-answer` (3), `smoke-discover` (2) and `smoke-xfer`
+(1) never removed their temp directories, so `$TMPDIR` accumulated about ten more per full sweep
+with nothing ever removing them — 158 `jam-*` directories on the machine this was counted on. Two
+of them kept theirs deliberately and said so; that choice simply had no expiry.
+
+A run that PASSES now removes exactly the paths `mkdtempSync` gave it, one at a time, after its
+daemons are dead. A run that FAILS keeps them and says where, which is when anybody actually reads
+them. No pattern, no glob, no sweep of `$TMPDIR`: another suite's directories and the user's own
+look identical from the outside.
+
 ### Changed — the tunnel-ready line says the edge is not ready yet (campaign F6)
 
 `tunnel ready: <join command>` now ends `· give it a few seconds — the edge needs a moment before

@@ -587,6 +587,22 @@ try {
   killMine(NAME, PORT);
   killMine(NAME_OFF, PORT_OFF);
   console.log(`\n${failed ? `${failed} step(s) FAILED` : 'all steps passed'}`);
-  console.log(`(state ${STATE} — left in place for inspection; TMPDIR ${TMP}, guest ${GUEST_TMP})`);
+  // v0.21.2 (campaign F10): a passing run takes its four directories with it. Keeping them was
+  // deliberate — they are the evidence for every argv/cwd/stdin assertion above — but the choice
+  // had no expiry, and $TMPDIR was found holding 158 `jam-*` directories, about ten per full
+  // sweep, growing forever. A run that FAILED still keeps them, which is when anybody actually
+  // wants them.
+  //
+  // Exactly the four paths mkdtempSync handed this process, one rmSync each, after the daemons
+  // are dead. No pattern, no sweep of $TMPDIR, nothing this run did not create — another smoke's
+  // directories, and Roy's, look identical from the outside.
+  if (failed) {
+    console.log(`(state ${STATE} — left in place for inspection; TMPDIR ${TMP}, guest ${GUEST_TMP})`);
+  } else {
+    for (const d of [TMP, BIN, CWD, GUEST_TMP]) {
+      try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    console.log(`(cleaned up: ${TMP}, ${BIN}, ${CWD}, ${GUEST_TMP})`);
+  }
 }
 process.exit(exitCode);
