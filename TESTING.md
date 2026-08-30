@@ -529,6 +529,69 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   the authentication gate, a knocker's clash is settled at admission by `resolveJoinName`, and a
   source lint fails if it ever moves back. See the CHANGELOG's 0.22.1 section.
 
+### v0.32 W1 — the Windows client (2026-08-30)
+
+Nine deferrals in one batch, and they are large. Roy has no Windows machine, so the entire client
+was written and tested without one; CI on `windows-latest` closes the parts a program can decide
+and closes **nothing** that a person has to see, hear or type. Each entry names the experiment.
+
+The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgraded past it.
+
+- 2026-08-30 · **W1, THE BIG ONE: no human has ever run the Windows client.** Not once, not
+  partially. It has never been installed on Windows, never started, never joined a jam. Everything
+  claimed about it is either a unit test on a `windows-latest` runner or a reading of Microsoft's
+  documentation. Prove: one person, one Windows 11 machine, Windows Terminal, `npm i -g
+  claude-jam`, then `claude-jam join <invite-link>` against a mac host — and report what happened
+  including what looked wrong. That single run discharges or refutes most of what follows.
+- 2026-08-30 · **W1: no key has been pressed in Windows Terminal.** The decoder is asserted against
+  the xterm-compatible sequences WT is *documented* to send (F2 as SS3 `\x1bOQ`, PgUp/PgDn
+  `\x1b[5~`/`\x1b[6~`, Shift+arrows `\x1b[1;2A/B`, Ctrl+arrows, Home/End, CSI-u). Nobody has seen
+  the bytes. Prove: run `node -e "process.stdin.setRawMode(true);process.stdin.on('data',d=>console.log(JSON.stringify(d.toString())))"`
+  in Windows Terminal, press each key once, and paste the capture into a fixture — the same
+  discipline `fixtures/pane/` already has for `capture-pane`.
+- 2026-08-30 · **W1: Shift+Enter is documented, not delivered.** WT's default Shift+Enter is a bare
+  CR, indistinguishable from Enter, so the docs offer `\` at end of line and a `sendInput` binding
+  to `\\u001b[13;2u` in `settings.json`. The binding recipe has never been applied to a real
+  `settings.json`. Prove: apply it, press the key, see a newline in the input field.
+- 2026-08-30 · **W1: no toast has been seen.** `notify()` on Windows spawns a PowerShell script
+  that tries BurntToast and falls back to the WinRT `ToastText02` notifier under PowerShell's own
+  AppId. Unit tests cover the argv and that title and body are never inside the script; whether a
+  toast APPEARS is untested, and the AppId trick is the part most likely to be wrong. Prove: knock
+  on a jam from a Windows client and watch the notification centre — with BurntToast installed and
+  again without it, because those are two different code paths.
+- 2026-08-30 · **W1: no sound has been heard, and the `%WINDIR%\Media` file list is a guess.**
+  `WIN_MEDIA_SOUNDS` names three candidates per kind from what Windows has historically shipped.
+  The CI test resolves them against a real runner's `%WINDIR%\Media` and PRINTS which branch each
+  kind took (`# v0.32 W1 sound modes on <release>: {...}`) rather than asserting a branch, because
+  falling back to the beep is a correct answer. Prove: read that line from the first Windows CI
+  run, and separately have a person hear a knock and a join and confirm they are distinguishable.
+- 2026-08-30 · **W1: `/paste` has never moved a real image on Windows.** The CI test proves the
+  whole FAILURE path (powershell.exe found, the script parsed and ran, "no image on the clipboard"
+  surfaced, the temp directory removed) because a CI runner's clipboard is empty. The success path
+  — `Get-Clipboard -Format Image` returning a bitmap and `$img.Save(...)` writing a PNG — is unrun.
+  Prove: copy a screenshot on Windows, `/paste` into a jam, and check the host's `jam-uploads/`.
+- 2026-08-30 · **W1: the ACL is verified only by a test nobody has watched pass.** The Windows-only
+  test writes a real file with `secureWrite`, runs the real `icacls`, and asserts the grant list is
+  exactly the current user — but `parseIcaclsPrincipals` was written to the documented output shape,
+  never seen beside a real console, and the `/inheritance:r /grant:r` ordering within one icacls
+  invocation is assumed. Prove: the first green Windows CI run. **If that test is red, the ACL is
+  not being applied and `docs/COMPATIBILITY.md`'s "private files" row must go back to unverified**
+  — a failure there is a security fact, not a test nit.
+- 2026-08-30 · **W1: `npm i -g claude-jam` has never been run on Windows** — nor anywhere else, and
+  the package has never been published. `npm pack --dry-run` (both CI legs) shows the tarball holds
+  every module a client imports, which is not the same as a shim that works. Prove: publish, or
+  `npm i -g ./claude-jam-<v>.tgz` on a Windows machine, then run `claude-jam` and `claude-jam join`.
+- 2026-08-30 · **W1: `smoke-ink` and `smoke-xfer` were not re-run for this batch.** Both need a
+  daemon with a real `claude` and spend tokens, and this batch was told not to. What did run:
+  `smoke-nudge` 16/16 (the platform seam's sounds through stub binaries, real clients, the whole
+  upload ladder) and `smoke-scroll` 13/13 (a REAL ink client on a REAL pty as a guest — the thing
+  most at risk from a new gate in `client.mjs`), plus a hand check of `clipboardImage()` on macOS
+  both ways (a real PNG on the clipboard round-tripped; an empty clipboard refused with
+  `no image on the clipboard (…)`; no temp directory left behind). The macOS `/paste` code path
+  moved (`clipboardPngMac()` was extracted so both platforms share one tail), which is what
+  `smoke-xfer` step "a clipboard PNG round-trips" covers. Prove: `smoke-ink` + `smoke-xfer` at the
+  next release gate.
+
 ## The 2026-08-30 vacuity audit — every suite, for tests that cannot fail
 
 Ordered by the 0.22.1 review after `smoke-nudge` was found printing **"all steps passed" having

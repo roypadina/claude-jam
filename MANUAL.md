@@ -118,6 +118,16 @@ ask the host, to send a `/command` request, or (for a permission prompt specific
 `/answer`, below. Attaching by hand does the same thing as F3, and since v0.20 needs the socket:
 `tmux -L claude-jam-<port> attach -t <jam>:claude` (`claude-jam sessions` prints it).
 
+**Somebody on Windows has no F3 at all**, and that is correct rather than broken: F3 runs tmux on
+the machine the client is on, and a Windows machine has none — the jam's tmux and your screen are
+on the host's machine. A Windows participant is always a guest (being the host needs the key file
+AND a local connection, and no jam is hosted on Windows natively). Everything else they need
+works: F2 for your live screen, `/answer`, `/send`, `/paste`, `/export`, `/c`. If one of them
+asks, that is the answer — and if they say something looks broken, say plainly that the Windows
+client is new, is tested only by CI, and that nobody has run it by hand yet, so a bug report is
+genuinely useful. They also need **Windows Terminal**: the old `cmd.exe` console is refused with a
+message, because it cannot draw the view.
+
 ## Slash commands
 
 - **claude-jam's own** (everyone): `/c` `/who` `/help` `/menu` `/quit` `/exit` `/mirror` `/tools`
@@ -272,7 +282,10 @@ nudge you never heard.
 and note it silences the **sound only**, so the line and the notification still arrive.
 
 On Linux the sounds go through `paplay` or `aplay` if either is installed, and are silently
-skipped if not. Nothing about a sound is ever fatal.
+skipped if not. On Windows they go through PowerShell — a `.wav` from `%WINDIR%\Media`, or a short
+beep pattern (two low thuds for a knock, one high ping for a join, three taps for a nudge) on a
+machine that has no media files — and the desktop notification is a PowerShell toast. Nothing
+about a sound is ever fatal.
 
 ## Getting somebody's attention (`/ping`, `/nudge`)
 
@@ -535,8 +548,8 @@ claude-jam owns the tmux sessions it creates, so nobody has to remember a `tmux 
 A guest cannot put a file on the host's disk by themselves — the host has to accept it, once
 per file:
 
-- Guest runs `/send <path>` (or `/paste`, which grabs an **image off their macOS clipboard**;
-  `/paste <caption>` adds a note). They see "waiting for the host to accept it".
+- Guest runs `/send <path>` (or `/paste`, which grabs an **image off their clipboard** — macOS and
+  Windows; `/paste <caption>` adds a note). They see "waiting for the host to accept it".
 - The host sees `⇪ Dana wants to send photo.png (2.1 MB) — /accept-file Dana ·
   /accept-file Dana always · /deny-file Dana`, gets the approval bar (`⇪ … [a]ccept [d]eny`,
   one key), plus a tmux popup if they are attached.

@@ -23,13 +23,63 @@ message**. Humans also get a side channel the agent never sees.
   `tailscale` for `--funnel`, `git` for `/diff`,
   `pngpaste` for `/paste` (macOS falls back to `osascript`)
 
-macOS and Linux. No Windows. The bell is portable; the desktop notification beside it is macOS
-only (`osascript`), exactly like `/paste`.
+**Hosting** a jam is macOS and Linux, because the host is tmux. Windows can host through WSL2
+(tmux and `claude` both run inside the distribution, and so does claude-jam).
+
+**Joining** is macOS, Linux and — as of v0.32 W1 — Windows, natively: node ≥ 22 and Windows
+Terminal, no WSL and no tmux. Read the honest state of that below before you rely on it.
+
+The bell is portable. The desktop notification and the join/knock sounds beside it are macOS
+(`osascript`, `afplay`) and Windows (PowerShell); Linux uses `paplay`/`aplay` if they are there.
+
+### The Windows client, honestly (v0.32 W1)
+
+It is **implemented and unit-tested on real Windows in CI, and no human has ever run it.** Nobody
+on this project has a Windows machine. Every decision the Windows code makes — the PowerShell
+argv for a clipboard read, the `%APPDATA%` path, the ACL that replaces `0600`, the `%WINDIR%\Media`
+sound table, the key sequences, the terminal check — is a pure function asserted on a
+`windows-latest` runner on every push, and the client entry point's terminal gate is spawned and
+checked there for real. What CI cannot do is look at a screen or listen: **no toast has been seen,
+no knock has been heard, no key has been pressed in Windows Terminal, and no jam has been joined
+from Windows.** `TESTING.md` lists each of those with the experiment that would settle it.
+
+So: worth trying, not yet worth trusting. If you try it —
+
+```powershell
+npm i -g claude-jam
+claude-jam join <invite-link>          # from Windows Terminal, not the legacy cmd.exe console
+```
+
+- **Windows Terminal is required** (ANSI + an alternate screen buffer). The legacy `cmd.exe`
+  console is refused by name with the reason, rather than painting escape codes at you. If you
+  are certain your terminal is fine, `JAM_ASSUME_ANSI=1` skips the check.
+- **Client only.** `claude-jam host`, the launcher menu, `sessions`, `invite` and `find` refuse
+  with the WSL2 route. `claude-jam` with no arguments prints that instead of a menu.
+- **F3 is not offered** — it attaches tmux on the machine running it, and that machine is the
+  host's. F2 (the live view), `/answer`, `/send`, `/paste`, `/export` and `/c` all work.
+- **Shift+Enter for a newline needs one line of Windows Terminal config**, because WT's default
+  Shift+Enter is an ordinary Enter. Either end a line with `\`, or add this to the `actions` array
+  in Windows Terminal's `settings.json`:
+  ```json
+  { "command": { "action": "sendInput", "input": "\\u001b[13;2u" }, "keys": "shift+enter" }
+  ```
+- **There is no `0600` on Windows.** Files that must stay private (the input history here; the
+  host key and token file where a host runs) get an NTFS **ACL granting only the current user** —
+  `icacls /inheritance:r /grant:r <you>:F` — which is the equivalent, not the same thing. See
+  `docs/COMPATIBILITY.md`.
+- Please report what happens, including what looks wrong: that is the only way any of these rows
+  becomes a verified one.
 
 ## Install
 
 ```sh
 brew install roypadina/tap/claude-jam
+```
+
+npm installs the same thing anywhere node ≥ 22 runs, and it is the only path on Windows:
+
+```sh
+npm i -g claude-jam
 ```
 
 Or from source:
@@ -853,7 +903,12 @@ test instead of somebody's message.
   keeps running.
 - The live view, scrolling it, tool collapse, F2/F3 and the newline keys are ink-only — `--basic` is a
   transcript-only client.
-- No rate limiting, no web client, one session per host, no Windows.
+- No rate limiting, no web client, one session per host.
+- **No Windows host.** A native one was investigated and dropped (SPEC.md v0.32 W3): nothing
+  reattaches to a running ConPTY the way `tmux attach` reattaches to a session, so the host's own
+  operator would have been the one person in the jam stuck on the proxied ~300 ms path — which is
+  exactly what F3 exists to escape. WSL2 is the Windows host path. The **client** is native
+  (v0.32 W1), and unrun by any human — see [above](#the-windows-client-honestly-v032-w1).
 
 `README` keeps the short list; `SPEC.md` has the full one, plus every wire frame and the
 phase-2 relay sketch that removes the inbound port.

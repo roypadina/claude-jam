@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+### v0.32 W1 — a native Windows CLIENT, implemented and CI-tested, never run by a human
+
+**Read that heading literally.** Nobody working on claude-jam has a Windows machine. The Windows
+client is written, its every decision is asserted on a real `windows-latest` runner on every push,
+and **no person has started it, seen a toast, heard a knock or pressed a key in Windows Terminal.**
+Nothing in this release says "Windows supported"; `docs/COMPATIBILITY.md` is new and says, row by
+row, what was verified and by what. There is still **no Windows host** — that was investigated and
+dropped (SPEC.md v0.32 W3); WSL2 is the Windows host path.
+
+**CI is the release-relevant part of this batch.** `.github/workflows/tests.yml` runs
+`node --test test.mjs`, `scripts/check-terminal-gate.mjs` and `npm pack --dry-run` on
+**macos-latest and windows-latest**, on node 22 (the `engines` floor). Eight existing test blocks
+compared a path built by `path.join` against a POSIX literal and would have failed on Windows for
+the separator alone; they now assert through the same path function the code uses. `.gitattributes`
+pins LF in the working tree, because the suite reads MANUAL.md, the launcher and every module off
+disk and a `core.autocrlf` checkout would break lints for a reason unrelated to Windows.
+
+- **Install**: `npm i -g claude-jam` (the same package Homebrew ships). `bin` now points at a new
+  `cli.mjs` instead of the bash launcher — npm builds its Windows shim from the target's shebang,
+  so the old `bin` produced a shim that called `bash`, and the whole client was unreachable on
+  Windows without Git Bash. On POSIX `cli.mjs` forwards to the launcher untouched: one dispatcher,
+  no drift, and a lint parses the launcher's own `case` labels to keep the Windows side in step.
+- **Windows is client-only, and says so**: `join` works; `host`, `adopt`, `sessions`, `find`,
+  `end`, `clean`, `invite`, `invites`, `remote` and the launcher menu refuse with the reason and
+  the WSL2 route.
+- **Windows Terminal required.** The legacy `cmd.exe` console is refused **by name** before either
+  renderer loads, with what to install and where — instead of painting `←[2J←[H` at somebody.
+  `JAM_ASSUME_ANSI=1` overrides. mintty (Git Bash), ConEmu with ANSI on, and the VS Code terminal
+  pass; `ConEmuANSI=OFF` and `TERM=dumb` are refused, because those are the garbled screen.
+- **`/paste`** reads the clipboard through `powershell.exe` + `Get-Clipboard -Format Image`
+  (Windows PowerShell 5.1: `-Format` does not exist in pwsh). **Notifications** are a PowerShell
+  toast — BurntToast when installed, else the WinRT notifier. **Sounds** are a `.wav` from
+  `%WINDIR%\Media` through `System.Media.SoundPlayer`, or a per-kind `[console]::beep()` pattern
+  when a machine has none, so a knock is still not a join on a stripped image.
+  Every one of those scripts is a **constant**: the filename, title and body ride in the child's
+  environment, never inside a script string.
+- **Paths** are `%TEMP%` and `%APPDATA%\claude-jam` through the platform seam.
+- **There is no `0600` on Windows** and this release does not pretend there is. `{ mode: 0o600 }`
+  is reinterpreted there as the read-only attribute, so private files get an NTFS **ACL granting
+  only the current user** (`icacls /inheritance:r /grant:r <DOMAIN\user>:F`, plus `(OI)(CI)` on a
+  directory). A failure returns its reason instead of throwing — the file keeps profile
+  inheritance, which is a degradation and not a hole — and the docs say ACL, in those words.
+- **F3 is not offered on Windows.** It attaches tmux on the client's own machine; there is none,
+  and a Windows client is always a guest anyway. It now says where claude's screen actually is.
+- **Shift+Enter is honestly documented**: Windows Terminal sends a bare CR for it, so `\` at the
+  end of a line is the answer, or one `sendInput` binding in `settings.json` (the recipe is in the
+  README). Every other key — F2, PgUp/PgDn, Shift+ and Ctrl+arrows, Home/End, Esc, CSI-u — is
+  asserted against the sequences WT is **documented** to send. That table has never been checked
+  against a capture, and TESTING.md records the capture that would settle it.
+
+One real bug was found by all this and it was on the macOS side of a seam: `client.mjs` called
+`terminalSupport()` with no arguments, and every pure function in `lib.mjs` defaults `env` to `{}`,
+so the gate would have refused **every** Windows terminal there is. A unit test could not see it —
+the function was right and the caller was wrong — which is why `scripts/check-terminal-gate.mjs`
+spawns the real entry point and is in CI on both legs.
+
 ## 0.22.1
 
 **A security patch. Every finding below affects 0.22.0 and earlier, and upgrading is the fix** —

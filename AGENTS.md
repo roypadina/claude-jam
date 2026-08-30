@@ -38,6 +38,7 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | file | what it is |
 | --- | --- |
 | `claude-jam` | the launcher (bash). Owns the usage text; `host`/`adopt`/`join`/`sessions`/`end`/`clean`/`invite`/`invites`/`remote` dispatch from here. No arguments → `menu.mjs`. |
+| `cli.mjs` | v0.32 W1: what `npm i -g` puts on PATH (`bin` points here, not at the launcher — npm's Windows shim reads the shebang and would call `bash`). POSIX: spawns the launcher, arguments untouched, exit code passed through. **Windows: `windowsCli()` in `lib.mjs`** — `join` runs the client in-process, everything host-side is refused with the WSL2 route. It must never grow a second copy of the launcher's dispatch table; a lint parses the launcher's `case` labels and fails if the two disagree. |
 | `jam` | a deprecated four-line alias that execs `claude-jam`. Never printed, never extended. |
 | `lib.mjs` | **pure functions only.** No fs, no spawn, no network, no clock it did not receive. Nearly every test is against this file. If a decision can be made here, it is made here. |
 | `host.mjs` | the launcher's other half (builds the tmux session) **and** the daemon (WS server, frame pipeline, injection, hooks endpoint, relays). |
@@ -51,7 +52,8 @@ Breaking one of these destroys somebody else's live work, and no test can undo i
 | `hooks.sh` | the Claude Code hooks the daemon generates a `settings.json` for. |
 | `peer-mcp.mjs` | v0.29: `list_peers` / `dispatch_to_peer` as a stdio MCP server for the HOST's own claude. A PIPE, not a brain — every decision is the daemon's, reached over the same loopback+secret endpoint `hooks.sh` uses. |
 | `peer.mjs` | v0.29: running ONE peer task on this machine — the scratch dir, the generated settings, the spawn, the caps and the killing. Imported by both clients so there is one place a peer task is built and stopped. |
-| `test.mjs` | the unit suite. `scripts/` holds the eighteen end-to-end smokes and `fixtures/pane/` the real `capture-pane` corpus. |
+| `test.mjs` | the unit suite. `scripts/` holds the eighteen end-to-end smokes, `scripts/check-terminal-gate.mjs` (a free non-smoke check that spawns the real client entry point, in CI on both legs) and `fixtures/pane/` the real `capture-pane` corpus. |
+| `docs/COMPATIBILITY.md` | what has actually been RUN, per platform and per capability, with the date and the build. No "should work" rows. A capability is verified or it is listed as unverified with the experiment that would settle it. |
 | `integrations/claude-plugin/` | the OPTIONAL `/jam` Claude Code plugin: a command, a skill, a manifest. **No code** — everything it does, it does by running the `claude-jam` on `PATH`. `.claude-plugin/marketplace.json` at the repo root points at it; a test asserts the two manifests agree. |
 
 **tmux, claude, git, curl, cloudflared, tailscale and ttyd are not platform binaries** — they are
@@ -65,8 +67,27 @@ the tool's dependencies, spelled the same everywhere, and they stay where they a
 node --test test.mjs      # the whole unit suite; must be green before every commit
 ```
 
-388 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
+441 tests, all against pure functions, all fast (< 1 s). There is no watch mode and no
 framework. Add tests to `test.mjs` next to the ones for the same version heading.
+
+Three of them are **skipped off Windows** (`{ skip: process.platform !== 'win32' }`) — the real
+`icacls` ACL, the real `%WINDIR%\Media` lookup, and `/paste`'s failure path through real
+PowerShell. They are the only thing that ever executes those branches, and they run on the
+`windows-latest` CI leg. If you touch a win32 branch, the honest report is "green on macOS, and
+the Windows leg will say" — not "verified".
+
+### CI, and why it is not optional here (v0.32 W1)
+
+`.github/workflows/tests.yml` runs the unit suite, `scripts/check-terminal-gate.mjs` and
+`npm pack --dry-run` on **macos-latest and windows-latest**, on node 22 (the `engines` floor).
+Nobody on this project has a Windows machine, so CI is the only thing that ever runs the Windows
+code at all. Two consequences for anything you write there:
+
+- **Put the decision in `lib.mjs` as a pure function** (which argv, which principal, which
+  `.wav`, which refusal) and the spawn in `platform.mjs`. A function that returns an argv is
+  assertable on a Windows runner; a function that shells out is not.
+- **A path assertion must go through `path.join`**, never a POSIX literal, or it fails on the
+  Windows leg for the separator alone and teaches everyone to ignore the red.
 
 Three of them are lints rather than assertions about behaviour, and all three exist because the
 thing they check cannot be caught by running the program once:

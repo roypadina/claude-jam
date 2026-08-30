@@ -2123,6 +2123,35 @@ ACL-restricted on Windows), `openExternal(url)`. macOS keeps today's `pngpaste`/
 - CI: GitHub Actions matrix (macos-latest + windows-latest) running `node --test` on every push;
   the smoke suites stay manual/local since they need a real terminal and a real claude.
 
+**What shipped (2026-08-30), and what it is worth.** All of the above except a human. Roy has no
+Windows machine, so the batch was built on the premise that **CI is the verification vehicle**:
+every win32 decision is a pure function in `lib.mjs` and is asserted on a real `windows-latest`
+runner, with the spawning left to `platform.mjs`. `.github/workflows/tests.yml` runs
+`node --test test.mjs` + `scripts/check-terminal-gate.mjs` + `npm pack --dry-run` on macos-latest
+and windows-latest, node 22. **The workflow is committed and deliberately NOT pushed** — a workflow
+starts running the moment it lands, and that is Roy's call.
+
+Shipped: `%APPDATA%`/`%TEMP%` paths; an `icacls` ACL in place of `0600` (with `parseIcaclsPrincipals`
+so a test can read the ACL back, and one Windows-only test that asserts the grant list is exactly
+the current user); `Get-Clipboard -Format Image` for `/paste`; a BurntToast-then-WinRT toast; a
+`%WINDIR%\Media` `.wav` or a per-kind beep pattern for the three sounds; the Windows Terminal gate
+that refuses the legacy console by name; F3 withheld with a sentence saying where claude's screen
+is; and `cli.mjs`, without which `npm i -g claude-jam` on Windows produces a shim that calls `bash`
+and the client is unreachable. Three rules held throughout: no external value is ever inside a
+PowerShell script (it goes in the child's environment), the platform is an **argument** to every
+pure helper so both CI legs check both answers, and `docs/COMPATIBILITY.md` records only what ran.
+
+Deviations from the section above, both deliberate: **F3 is dropped from the Windows client
+entirely** rather than "verified there" — it attaches tmux on the client's own machine, W3 means
+there is no Windows host, and host requires locality, so a Windows client is always a guest with no
+tmux to attach to. And **Shift+Enter is documented rather than delivered**: Windows Terminal sends a
+bare CR for it, so the docs give `\` and a one-line `sendInput` binding instead of promising a key.
+
+Not done, and named: no human has run any of it (no toast seen, no sound heard, no key pressed, no
+jam joined from Windows), the key table is from documentation rather than a capture, and the whole
+cross-platform matrix below is still empty. TESTING.md's Deferred list carries each one with the
+experiment that settles it.
+
 ### W2 — Windows host via WSL2 (THE host path; W3 was investigated and dropped)
 tmux and Claude Code both run in WSL2, so the daemon runs unchanged inside WSL while the human
 uses Windows Terminal. Work is integration, not rewrite: WSL-aware paths for the state dir, the
