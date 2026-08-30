@@ -544,7 +544,7 @@ async function launch() {
     process.execPath, self, '--daemon', ...common));
   sessionCreated = true;
   claimSession();
-  waitForHealth();
+  await waitForHealth();
 
   if (ADOPTED) {
     // v0.33: there is nothing to start. claude is already running in that pane, it already has
@@ -807,12 +807,24 @@ function must(r) {
   }
 }
 
-function waitForHealth() {
+// node 22's own `fetch`, not a `curl` on PATH. Measured 2026-08-30 in `node:22-bookworm-slim`,
+// which ships no curl: every launch reported `daemon did not come up` while the daemon was up,
+// listening and logging normally — a missing dependency diagnosed as a broken daemon, which sends
+// the reader to the wrong half of the machine. The timing is deliberately unchanged: a 10 s total
+// deadline, 1 s per attempt (curl's `-m 1`), 300 ms between attempts, and a daemon that genuinely
+// is not there still gets the same one-line message rather than a fetch stack trace — every
+// failure mode here (refused, DNS, abort, a body that is not `"ok"`) is the same retry.
+// `connection: close` because undici would otherwise hold a keep-alive socket open and delay the
+// launcher's own exit by seconds.
+async function waitForHealth() {
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
-    const r = spawnSync('curl', ['-s', '-m', '1', `http://127.0.0.1:${opts.port}/health`], { encoding: 'utf8' });
-    if (r.stdout?.includes('"ok"')) return;
-    spawnSync('sleep', ['0.3']);
+    try {
+      const r = await fetch(`http://127.0.0.1:${opts.port}/health`,
+        { signal: AbortSignal.timeout(1000), headers: { connection: 'close' } });
+      if ((await r.text()).includes('"ok"')) return;
+    } catch { /* not listening yet, or slower than a second */ }
+    await new Promise((done) => setTimeout(done, 300));
   }
   console.error('daemon did not come up; check the tmux daemon window');
   process.exit(1);
