@@ -412,6 +412,52 @@ try {
     eq(keys().at(-1), '1', 'the digit the pane received');
   });
 
+  // ------------------------------------- 11: a frame cannot end the jam (v0.34.2) ----
+  // The load-bearing behavioural half of the v0.34.2 fix. Reproduced against 0.24.0 as released:
+  // an admitted guest sending the four bytes `null` exited the daemon — `null.t` is a TypeError,
+  // and an uncaught TypeError in a ws `message` listener reaches uncaughtException. The claude
+  // window stayed up, so the jam did not "end" so much as go deaf: everybody was disconnected and
+  // nobody could reconnect, with a live claude in a pane nobody could reach.
+  await step('11 a guest cannot kill the daemon with a frame that is not an object', async () => {
+    const pidOf = () => JSON.parse(fs.readFileSync(path.join(STATE, 'session.json'), 'utf8')).pid;
+    const daemon = pidOf();
+    const alive = () => {
+      const st = (spawnSync('ps', ['-o', 'stat=', '-p', String(daemon)], { encoding: 'utf8' }).stdout || '').trim();
+      return st !== '' && !st.startsWith('Z');
+    };
+    ok(alive(), `the daemon (${daemon}) was not running to begin with`);
+    // Every top-level JSON shape that is not an object, `null` first because that is the one that
+    // was fatal, plus the two the parser rejects outright.
+    for (const raw of ['null', '5', '"hello"', 'true', '[1,2,3]', '[{"t":"say"}]', '{', '']) {
+      const at = guest.since();
+      guest.ws.send(raw);
+      await guest.waitAfter(at, `a refusal for ${JSON.stringify(raw)}`, (e) => e.t === 'error', 5000);
+      const why = guest.after(at, (e) => e.t === 'error').text;
+      ok(/a frame must be a JSON object|bad JSON/.test(why), `${JSON.stringify(raw)} was refused with ${JSON.stringify(why)}`);
+      ok(alive(), `the daemon died on ${JSON.stringify(raw)}`);
+      eq(pidOf(), daemon, 'the daemon pid changed — it died and something restarted it');
+    }
+    // And the same socket is still a participant afterwards: a bad frame costs that frame, not
+    // the connection and not the session.
+    const at = guest.since();
+    guest.send({ t: 'files' });
+    await guest.waitAfter(at, 'the guest still being answered', (e) => e.t === 'sys', 8000);
+    // A socket that has NOT said hello can send it too — the crash was above the admission gate.
+    const stranger = new WebSocket(`ws://127.0.0.1:${PORT}`);
+    const said = new Promise((res) => stranger.addEventListener('message', (m) => res(JSON.parse(m.data))));
+    await new Promise((res, rej) => {
+      stranger.addEventListener('open', res);
+      setTimeout(() => rej(new Error('the stranger never connected')), 5000);
+    });
+    stranger.send('null');
+    const ev = await said;
+    eq(ev.t, 'error', 'what an unadmitted socket got back');
+    ok(/a frame must be a JSON object/.test(ev.text), `the refusal was ${JSON.stringify(ev.text)}`);
+    stranger.close();
+    await sleep(200);
+    ok(alive(), 'the daemon died on a `null` from a socket that had not said hello');
+  });
+
   exitCode = failed ? 1 : 0;
 } catch (e) {
   console.error(`\nFATAL ${e.message}`);

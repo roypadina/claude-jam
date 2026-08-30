@@ -140,6 +140,14 @@ Generated `settings.json` (passed with `--settings`, so nothing global changes):
 
 ## WebSocket protocol (JSON text frames)
 
+**The envelope (v0.34.2).** Every frame is a JSON **object**. `parseFrame` in `lib.mjs` decides
+that once, before any handler reads `m.t`: a number, a string, a boolean, an array and `null` are
+refused with `a frame must be a JSON object`, and anything that is not JSON at all keeps the older
+`bad JSON`. The whole dispatch then runs inside `neverFatal`, so a throw costs that frame and
+nothing else. Both exist because `null.t` is a `TypeError` and an uncaught `TypeError` in a `ws`
+message listener exits the daemon — measured on 0.24.0, from an admitted guest AND from a socket
+that had not said hello.
+
 Client → host:
 - `{t:'hello', name, token, host?:true}` — first frame; bad token → `{t:'error'}` + close 4401.
 - `{t:'say', text}` — to the agent (injected with prefix).

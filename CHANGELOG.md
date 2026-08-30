@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — an admitted guest could end the jam for everybody with four bytes (security)
+
+`{t:'…'}` is the shape of every frame the daemon handles, and every handler reads `m.t` straight
+off whatever `JSON.parse` returned. JSON has four other top-level shapes, and `null` is the one
+that bites: `null.t` is a `TypeError`, an uncaught `TypeError` in a `ws` `message` listener reaches
+`uncaughtException`, and the daemon exits.
+
+**Measured 2026-08-30 against 0.24.0 as released**: the four bytes `null` on the websocket killed
+the daemon — from an admitted guest, from a knocker waiting for approval, and from a socket that had
+not said hello at all, because the dereference is above the admission gate. What is left behind is
+worse than a clean stop: the tmux session and the real `claude` in it keep running, so nothing looks
+broken from the host's pane, while every participant is disconnected and nobody can reconnect.
+
+Two changes, and they are deliberately at different levels:
+
+- **`parseFrame` decides the envelope once**, before any handler sees the frame. A number, a string,
+  a boolean, an array and `null` are all refused with `a frame must be a JSON object`; not-JSON keeps
+  its own older `bad JSON` wording, because a broken client and a hostile one are different reports.
+- **The whole dispatch runs inside `neverFatal`**, so a throw anywhere in it costs that frame and
+  nothing else — the socket is told and stays open, and the stack is logged rather than swallowed. A
+  frame is somebody else's input at a trust boundary; the worst it may cost is that frame.
+
+**What carries it:** `v0.34.2 parseFrame: only a JSON OBJECT is a frame…` (every top-level shape,
+both wordings, and an assertion that JSON's `__proto__` really is an own data property), a `host.mjs`
+lint that the listener still goes through both guards and does not parse a frame for itself, and
+**`smoke-answer` step 11** — the behavioural half, against a real daemon, asserting the daemon's own
+pid is unchanged after each shape and that an unadmitted socket gets the same refusal.
+
+**Canaried three ways, 2026-08-30.** Remove `parseFrame`'s guard → the unit test reds and step 11
+reds on the wording (`neverFatal` catches it, which is the defence in depth doing its job). Remove
+`neverFatal` → the lint reds. Remove both, i.e. 0.24.0's shape → step 11 reds with no reply at all,
+which is the daemon dying.
+
 ## 0.24.0
 
 ### Added — hosting from Windows, through WSL2 (SPEC v0.32 **W2**)

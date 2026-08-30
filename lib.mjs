@@ -347,6 +347,26 @@ export function hostKeyNotice(file) {
     + '(claude-jam end <session>, then claude-jam host) to be its host.';
 }
 
+// Every frame the daemon handles is an OBJECT — `{t:'say', …}` — and every handler reads `m.t`
+// straight off it. JSON has four other top-level shapes, and `null` is the one that bites:
+// `null.t` is a TypeError, an uncaught TypeError in a socket's `message` listener reaches
+// `uncaughtException`, and the daemon exits. Measured 2026-08-30: the four bytes `null` from ANY
+// socket that could reach the port — admitted guest, waiting knocker, or a stranger who had not
+// said hello — ended the jam for everybody, leaving claude running in a pane nobody could talk to.
+//
+// So the envelope is decided here, once, before any handler sees the frame. A number, a string,
+// an array and `null` are all refused with the same sentence; only a plain object gets through.
+// (An array is refused rather than tolerated: `[]` has no `t` and would only ever be a broken
+// client, and letting it through is how the next `m.something` gets a surprise.)
+export function parseFrame(raw) {
+  let m;
+  try { m = JSON.parse(raw); } catch { return { ok: false, error: 'bad JSON' }; }
+  if (m === null || typeof m !== 'object' || Array.isArray(m)) {
+    return { ok: false, error: 'a frame must be a JSON object' };
+  }
+  return { ok: true, frame: m };
+}
+
 // How a hello frame gets in. `admit:'token'` → straight to welcome, `admit:'knock'` →
 // pending until the host accepts. `host:true` is honoured only when hostGate() says BOTH
 // conditions hold — the key out of the 0600 file, and a socket that started on this machine
