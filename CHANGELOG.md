@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.23.5
+
+**Two portability defects, both of them Linux-shaped, and both found by running the thing on a
+Debian box rather than by reading it.** `claude-jam adopt` did not work at all on Debian and
+Ubuntu's packaged tmux — and told you the pane was missing, which sent people looking in the wrong
+place — and starting a jam needed `curl` on your `PATH`, reporting a missing dependency as a broken
+daemon. Nothing in the wire protocol, the frame pipeline, the trust boundary or the tmux/injection
+half changed. macOS behaviour is unchanged in both cases; upgrading is safe.
+
+### Fixed — `claude-jam adopt` failed on tmux 3.3a, and blamed your pane for it
+
+**On Debian bookworm, Ubuntu and anything else shipping tmux 3.3a — which includes WSL2 —
+`claude-jam adopt` printed `no tmux pane %0 on socket <name>` for a pane that was sitting right
+there.** Every user of that tmux, not just the test suite.
+
+Adoption read the eight facts it shows you — pane id, pid, foreground command, directory, session,
+window and pane index, window name — with one `display-message -p` whose fields were joined by
+U+0001. **tmux 3.3a filters non-printable bytes out of `display-message -p` output and writes `_`
+in their place**, so eight fields arrived as one, the parse refused it, and the error blamed the
+pane.
+
+The fix is one `display-message -p` **per field**, which is the only shape that is
+version-independent by construction: there is no separator in the output for a tmux version to
+rewrite. That is deliberately the dumb answer rather than a cleverer separator, and the reason is a
+measurement — asked for the same eight fields joined by U+0001, by a newline and by a tab, tmux
+3.3a rewrote **all three** and 3.7c passed all three through, so "one field per line" would have
+lost in exactly the same way. A per-field read also survives a value that itself contains a newline,
+which no separator can, and it costs 7.0 ms against 1.2 ms on 3.3a — once, per adoption.
+
+Both tmux versions' real output is committed as a fixture pair and read by two unit tests, so a
+future change cannot fix one version by breaking the other. Proved rather than predicted:
+`smoke-adopt` goes from 6 failed + 7 blocked to **16/16** in a tmux 3.3a container, with and without
+`CI` set, and by hand on that tmux `claude-jam adopt` now resolves and prints all eight facts.
+
+### Fixed — starting a jam required `curl`, and said the daemon was broken when it was missing
+
+`waitForHealth()` shelled out to `curl` to poll `/health`, so on a machine without curl every launch
+reported **`daemon did not come up; check the tmux daemon window`** while the daemon was up,
+listening and logging normally. The wrong half of the machine to go looking in, and the kind of
+error that costs an hour.
+
+It is node's own `fetch` now — the daemon is an HTTP server and node 22 has a client. Timing is
+deliberately identical: a 10 s total deadline, 1 s per attempt, 300 ms between attempts. A daemon
+that genuinely is not there still gets the same single line and exit 1, not a fetch stack trace —
+measured on a curl-less box against a port already held by another listener: exit 1 after 10.54 s,
+one line, zero stack frames. On the same box, `smoke-lifecycle` goes from 6 failed + 9 blocked to
+**19/19**.
+
+`hooks.sh` still uses `curl` for the `stop`/`notification` hooks and is unchanged here — a separate
+code path, recorded in `TESTING.md` with what it costs on a curl-less box (those hooks fail
+silently) and what fixing it would take.
+
 ## 0.23.4
 
 **One user-facing defect, and the two test-harness fixes that were standing between it and a green
