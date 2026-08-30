@@ -44,7 +44,7 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   OUTBOX_DIR, OUTBOX_KEEP, outboxName, outboxEntries, resolveOutbox, outboxReport, keptMessageText,
   // v0.31: the status is whatever the pane says, and a question is not a permission.
   classifyPrompt, questionBlock, promptStatusText, answersMode, answerDecision,
-  resolveAnswerTarget, answerLock, ANSWER_TEXT_MAX,
+  resolveAnswerTarget, answerLock, ANSWER_TEXT_MAX, answerFreeText,
   // v0.24: invite-only, the runtime relay switch, and saying out loud when a relay comes up.
   remoteRows, relaySwitchDecision, relayReadyLine, relayPendingLine, inviteState,
   // v0.23: the jam has a name, and says so on the LAN.
@@ -3225,7 +3225,9 @@ function onPerm(ws, me, m) {
     }
     const free = p.options.find((o) => o.free);
     if (!free) return sendError(ws, 'this question has no free-text option — /answer <n> picks one of the ones on screen');
-    const text = String(m.text ?? '').trim().slice(0, ANSWER_TEXT_MAX);
+    // Sanitized HERE, on the daemon side, because this is the only participant text that is
+    // typed into the pane as keystrokes — see answerFreeText for what an unsanitized CR did.
+    const text = answerFreeText(m.text);
     if (!text) return sendError(ws, 'usage: /answer other <what to type>');
     const rec = { name: me.name, ws, choice: free.n, optionText: free.text, sig: p.sig, kind: p.kind, free: true, text };
     if (host) return runAnswer(rec);

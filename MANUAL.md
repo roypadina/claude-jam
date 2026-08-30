@@ -181,8 +181,11 @@ them can answer:
   that is the host's. The refusal says which one is up.
 - **The free-text option** (`Type something.`) is the **host's alone**, whatever else is true: it
   is arbitrary text into the terminal, which is raw keyboard access by another name. The host uses
-  `/answer other <text>`; a guest asking for it goes to the host, who sees the exact text before a
-  character of it is typed.
+  `/answer other <text>`; a guest asking for it goes to the host, who sees the exact text in the
+  approval bar before a character of it is typed. The text is reduced to **one line with no
+  control characters** first, so what the bar shows is all of what gets typed — before 0.22.1 a
+  carriage return in it submitted claude's field and typed the rest as a second, unattributed
+  prompt.
 - **`--answers host`** at launch puts questions back on the host's approval ladder. The default is
   `anyone`.
 
