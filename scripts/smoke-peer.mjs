@@ -186,7 +186,14 @@ function stopGuest() {
   try { guestProc.kill('SIGTERM'); } catch { /* already gone */ }
   guestProc = null;
 }
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const alive = (pid) => {
+  try { process.kill(pid, 0); } catch { return false; }
+  // 2026-08-30: `kill(pid, 0)` succeeds for a ZOMBIE too — exited, unreaped, and not running by
+  // the definition the assertions below use ("the child is gone"). Only asked when the cheap
+  // check says yes. `ps -o stat=` is BSD and GNU both, and prints `Z` for a zombie.
+  const r = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 && !/^\s*Z/.test(r.stdout || '');
+};
 
 // --------------------------------------------------------------------- setup ----
 console.log(`smoke-peer: ports ${PORT} (peer tasks on) and ${PORT_OFF} (off), sessions ${NAME}/${NAME_OFF}`);
