@@ -7659,3 +7659,28 @@ test('v0.23.4 every ink entry point neutralises CI ABOVE its ink import', () => 
       `${f} imports ink without going through ./ink-ci.mjs`);
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// 0.23.4: `ps -p <pid>` and `process.kill(pid, 0)` both SUCCEED for a ZOMBIE — a process that has
+// already exited and whose entry is only waiting for a parent that never called wait(). Every
+// liveness check in scripts/ is used one of two ways ("it was running before this" / "it has exited
+// now"), and a zombie is not running by either. Measured 2026-08-30: `docker run` without `--init`
+// gives PID 1 = the command, which does not reap, and smoke-lifecycle then timed out waiting for
+// children that were `Z` — 13 red steps for 2 real failures. A container artifact, but the check
+// was wrong on every platform, so this is the line that stops it coming back.
+test('0.23.4 no smoke suite reports a ZOMBIE as a running process', () => {
+  const dir = path.join(import.meta.dirname, 'scripts');
+  let checked = 0;
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.mjs'))) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    assert.equal(/spawnSync\('ps', \['-p'/.test(src), false, `${f}: bare \`ps -p\` succeeds on a zombie`);
+    assert.equal(/process\.kill\(pid, 0\); return true/.test(src), false, `${f}: \`kill(pid, 0)\` succeeds on a zombie`);
+    if (!/const (running|alive) = \(pid\)/.test(src)) continue;
+    // Whatever else it does, it reads the state column — that is the only thing that says `Z`.
+    assert.match(src, /\['-o', 'stat=', '-p'/, `${f}: its liveness check cannot see a zombie`);
+    assert.match(src, /\/\^\\s\*Z\//, `${f}: it asks for the state and then does not test for Z`);
+    checked++;
+  }
+  // The four suites that ask about a pid at all. A rename must not turn this lint into a no-op.
+  assert.equal(checked, 4, `expected four pid-asking suites, linted ${checked}`);
+});

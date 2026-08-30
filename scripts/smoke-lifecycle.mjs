@@ -26,6 +26,12 @@
 // (the one deliberate exception is S3, which is read-only). No real claude, no real ttyd, no
 // real cloudflared — stand-ins that hold a pid and sleep. Every tmux session it creates starts
 // with `jamlife`, and it kills only those, by exact name.
+//
+// 0.23.4: a failed step no longer poisons the steps below it, and the RESULT line no longer adds
+// the two kinds of red together. A step declares `cleans` (the exact sessions and ports IT made,
+// removed when it fails) and `needs` (the ids of steps whose fixtures it reads — if one of those
+// failed this step is BLOCKED, which is a different fact from FAILED and is counted apart). See
+// the `step` helper.
 //   usage: node scripts/smoke-lifecycle.mjs
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -75,15 +81,65 @@ const dtmux = (...a) => spawnSync(TMUX, ['-L', 'default', ...a], { encoding: 'ut
 const alive = (name) => tmux('has-session', '-t', `=${name}`).status === 0;
 const pane = (t) => (tmux('capture-pane', '-p', '-t', t).stdout || '').replace(/\n+$/, '');
 const back = (t) => (tmux('capture-pane', '-p', '-S', '-2000', '-t', t).stdout || '').replace(/\n+$/, '');
-const running = (pid) => !!pid && spawnSync('ps', ['-p', String(pid)], { encoding: 'utf8' }).status === 0;
+// 2026-08-30: `ps -p` SUCCEEDS on a ZOMBIE — a process that has already exited and is only waiting
+// for its parent to reap it. Every use of this helper here is either "it was running before" or
+// "it has exited now", and a zombie is not running by either definition. Measured: a container
+// whose PID 1 does not reap (`docker run` without `--init`) turned every teardown assertion in
+// step 2 into a 8-second timeout on a process that was `Z`, and 2 real failures into 13. So the
+// state column is read as well: `ps -o stat=` is BSD and GNU both, and prints `Z` for a zombie.
+const running = (pid) => {
+  if (!pid) return false;
+  const r = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 && !/^\s*Z/.test(r.stdout || '');
+};
 // Only ever a session name this script made up itself, one exact name per call.
 const killMine = (name) => { if (typeof name === 'string' && name.startsWith('jamlife')) tmux('kill-session', '-t', `=${name}`); };
 
+// 2026-08-30: a step that failed used to leave its jam behind, and the next `launch` of that name
+// failed with `tmux session "jamlife" is already a jam` — one broken thing printed as four or five
+// (measured on the first Linux run: 2 real failures, 13 red steps). Two halves to the fix, and
+// neither of them is a sweep:
+//   `cleans` — what THIS step created, by exact session name and exact port, removed when the step
+//              fails so its successors meet the world they would have met anyway. Never a pattern,
+//              never a name this script did not make up (killMine enforces the prefix).
+//   `needs`  — the ids of the steps whose fixtures this step reads. If one of those failed, the
+//              step is BLOCKED, not FAILED: "could not run" and "ran and was wrong" are different
+//              facts and the RESULT line must not add them together.
 let failed = 0;
-async function step(label, fn) {
-  try { await fn(); console.log(`PASS  ${label}`); }
-  catch (e) { failed++; console.log(`FAIL  ${label} — ${e.message}`); }
+let blocked = 0;
+const passed = new Set();
+const listedRows = () => { try { return jamJson(); } catch { return []; } };
+function tidy(spec = {}) {
+  for (const name of spec.sessions || []) {
+    // One of jam's own? Then end it the way a person would — that is the path that also kills the
+    // daemon's children — and take the state dir jam itself reports for that exact name, because a
+    // second jam under an auto-picked port has no entry in P. Then the blunt one by exact name,
+    // for a driver session, or a jam whose `end` refused.
+    const row = listedRows().find((r) => r.name === name);
+    if (row) jam('end', name);
+    killMine(name);
+    if (row?.state_dir) fs.rmSync(row.state_dir, { recursive: true, force: true });
+  }
+  for (const port of spec.ports || []) fs.rmSync(stateDir(port), { recursive: true, force: true });
 }
+async function step(id, label, fn, { needs = [], cleans = null } = {}) {
+  const missing = needs.filter((n) => !passed.has(n));
+  if (missing.length) {
+    blocked++;
+    console.log(`BLOCK ${label}\n      did not run: step ${missing.join(', ')} failed, so the fixture this one reads was never built`);
+    return;
+  }
+  try { await fn(); passed.add(id); console.log(`PASS  ${label}`); }
+  catch (e) {
+    failed++;
+    console.log(`FAIL  ${label} — ${e.message}`);
+    if (cleans) tidy(cleans);
+  }
+}
+// The two decoys belong to S1 and S2. If either step failed there may be no decoy left to still be
+// standing, and that must not be reported as THIS step having killed one.
+const decoyGone = () => [['S1', S.plain], ['S2', S.decoy]]
+  .find(([id, name]) => passed.has(id) && !alive(name))?.[1] || null;
 async function until(what, pred, ms = 20000) {
   for (const deadline = Date.now() + ms; Date.now() < deadline;) {
     const v = await pred();
@@ -202,7 +258,7 @@ const started = Date.now();
 
 try {
   // ============================================================ the safety proofs ====
-  await step('S1 REFUSAL a plain tmux session of ours carries no marker, and survives being named', async () => {
+  await step('S1', 'S1 REFUSAL a plain tmux session of ours carries no marker, and survives being named', async () => {
     killMine(S.plain);
     const born = tmux('new-session', '-d', '-s', S.plain, '-x', '80', '-y', '24', 'sleep 900');
     if (born.status !== 0) throw new Error(`tmux: ${born.stderr}`);
@@ -220,7 +276,9 @@ try {
     if (jamJson().some((j) => j.name === S.plain)) throw new Error('a non-jam session appeared in `claude-jam sessions`');
   });
 
-  await step('S2 REFUSAL a hand-written @claude-jam-owned marker buys nothing, even with a session.json copied in', async () => {
+  // The jam this step launches is the fixture five later steps read, which is why its failure
+  // teardown matters more than any other one here.
+  await step('S2', 'S2 REFUSAL a hand-written @claude-jam-owned marker buys nothing, even with a session.json copied in', async () => {
     killMine(S.decoy);
     const born = tmux('new-session', '-d', '-s', S.decoy, '-x', '80', '-y', '24', 'sleep 900');
     if (born.status !== 0) throw new Error(`tmux: ${born.stderr}`);
@@ -248,33 +306,39 @@ try {
     if (!alive(S.jam)) throw new Error('the real jam died somewhere in here');
     if (real.tmux !== S.jam) throw new Error('session.json names the wrong session');
     fs.rmSync(path.join(NOTJAM, 'session.json'), { force: true });
-  });
+  }, { cleans: { sessions: [S.jam], ports: [P.main] } });
 
   // v0.21: the rename is a migration, not a break. A jam that 0.18.0 created carries the old
   // option name, and it has to stay one of claude-jam's own — the marker is swapped on the real
   // jam from S2, verified, and swapped back, so nothing after this step sees anything unusual.
-  await step('S2b the OLD @jam-owned marker a 0.18.0 jam carries is still honoured', async () => {
+  await step('S2b', 'S2b the OLD @jam-owned marker a 0.18.0 jam carries is still honoured', async () => {
     const before = ownedSession(S.jam, SOCKET);
     if (!before.ok) throw new Error(`the jam did not verify to begin with: ${before.why}`);
     const dir = before.dir;
     tmux('set-option', '-u', '-t', S.jam, OWNED_OPTION); // as if 0.18.0 had never stamped it
     tmux('set-option', '-t', S.jam, OWNED_OPTION_LEGACY, dir);
-    const shown = tmux('show-options', '-t', S.jam, '-v', OWNED_OPTION_LEGACY);
-    console.log(`      ${OWNED_OPTION_LEGACY} on ${S.jam}: ${JSON.stringify((shown.stdout || '').trim())}`);
-    const legacy = ownedSession(S.jam, SOCKET);
-    console.log(`      ownedSession → ${legacy.ok ? `VERIFIED via ${OWNED_OPTION_LEGACY} (${legacy.dir})` : legacy.why}`);
-    if (!legacy.ok) throw new Error(`a 0.18.0 marker stopped verifying: ${legacy.why}`);
-    if (legacy.dir !== dir) throw new Error(`the legacy marker resolved to ${legacy.dir}`);
-    // And it is still a listed, endable row — which is the whole point of keeping the old name.
-    const row = jamJson().find((j) => j.name === S.jam);
-    console.log(`      \`claude-jam sessions\` → ${row ? `${row.name}:${row.state}` : 'MISSING'}`);
-    if (!row || row.state !== 'live') throw new Error('a jam with the old marker fell out of the list');
-    tmux('set-option', '-u', '-t', S.jam, OWNED_OPTION_LEGACY);
-    tmux('set-option', '-t', S.jam, OWNED_OPTION, dir);
+    // The swap back is in a `finally` because this step borrows a fixture it does not own: a
+    // failure in the middle used to leave the shared jam carrying the 0.18.0 marker, and step 1
+    // (which reads @claude-jam-owned on that same session) then failed for this step's reason.
+    try {
+      const shown = tmux('show-options', '-t', S.jam, '-v', OWNED_OPTION_LEGACY);
+      console.log(`      ${OWNED_OPTION_LEGACY} on ${S.jam}: ${JSON.stringify((shown.stdout || '').trim())}`);
+      const legacy = ownedSession(S.jam, SOCKET);
+      console.log(`      ownedSession → ${legacy.ok ? `VERIFIED via ${OWNED_OPTION_LEGACY} (${legacy.dir})` : legacy.why}`);
+      if (!legacy.ok) throw new Error(`a 0.18.0 marker stopped verifying: ${legacy.why}`);
+      if (legacy.dir !== dir) throw new Error(`the legacy marker resolved to ${legacy.dir}`);
+      // And it is still a listed, endable row — which is the whole point of keeping the old name.
+      const row = jamJson().find((j) => j.name === S.jam);
+      console.log(`      \`claude-jam sessions\` → ${row ? `${row.name}:${row.state}` : 'MISSING'}`);
+      if (!row || row.state !== 'live') throw new Error('a jam with the old marker fell out of the list');
+    } finally {
+      tmux('set-option', '-u', '-t', S.jam, OWNED_OPTION_LEGACY);
+      tmux('set-option', '-t', S.jam, OWNED_OPTION, dir);
+    }
     if (!ownedSession(S.jam, SOCKET).ok) throw new Error('putting the new marker back did not verify');
-  });
+  }, { needs: ['S2'] });
 
-  await step('S3 READ-ONLY the live jam on :7777 is unkillable, unlistable, and never touched', async () => {
+  await step('S3', 'S3 READ-ONLY the live jam on :7777 is unkillable, unlistable, and never touched', async () => {
     // The live jam runs on the DEFAULT tmux server (a Homebrew install predating v0.20), which
     // this smoke reaches exactly once, here, and never writes to.
     if (dtmux('has-session', '-t', '=jam').status !== 0) {
@@ -315,7 +379,7 @@ try {
   // One uid, deliberately: the smoke cannot become a second user, and it does not need to — what a
   // second uid leaves behind is a directory whose mode or type is wrong, and that is what is
   // planted here. The owner half of pathPrivacy is unit-tested. (TESTING.md records the limit.)
-  await step('S4 REFUSAL a state dir another local user could have made first', async () => {
+  await step('S4', 'S4 REFUSAL a state dir another local user could have made first', async () => {
     const shapes = [];
     // 1. group- and world-writable, holding a planted host.key: the reproduced takeover.
     const wide = stateDir(P.priv);
@@ -359,9 +423,9 @@ try {
     // Removed by the two exact paths this step created, and only those.
     fs.rmSync(wide, { recursive: true, force: true });
     fs.rmSync(link, { force: true });
-  });
+  }, { cleans: { sessions: [S.priv], ports: [P.priv, P.priv2] } });
 
-  await step('S4b a PLANTED host.key in an otherwise fine state dir makes nobody the host', async () => {
+  await step('S4b', 'S4b a PLANTED host.key in an otherwise fine state dir makes nobody the host', async () => {
     // The second, independent gate. The directory here is 0700 and ours, so the launcher starts —
     // and the key inside it is 0644, which no daemon of jam's ever wrote. It must be refused
     // rather than reused, which leaves the jam with no host at all (fail closed).
@@ -393,13 +457,17 @@ try {
     } finally {
       jam('end', S.priv);
     }
-  });
+  }, { cleans: { sessions: [S.priv], ports: [P.priv] } });
 
   // ============================================================== the live jam ====
-  let main = JSON.parse(fs.readFileSync(path.join(stateDir(P.main), 'session.json'), 'utf8'));
+  // Read INSIDE the steps that need it, not out here: S2's jam is a fixture, and if S2 failed this
+  // read throws BETWEEN steps, where the only handler is the outer catch — which is one more
+  // failure and, worse, every step below it never running at all.
+  const readState = (port) => JSON.parse(fs.readFileSync(path.join(stateDir(port), 'session.json'), 'utf8'));
   const pids = {};
 
-  await step('1 a launched jam is stamped, listed live, and says which relays it has', async () => {
+  await step('1', '1 a launched jam is stamped, listed live, and says which relays it has', async () => {
+    const main = readState(P.main);
     const opt = (tmux('show-options', '-t', S.jam, '-v', OWNED_OPTION).stdout || '').trim();
     console.log(`      ${OWNED_OPTION} → ${opt}`);
     if (opt !== stateDir(P.main)) throw new Error(`marker is ${opt}`);
@@ -416,10 +484,10 @@ try {
     if (!/jamlife/.test(table.out) || !/live/.test(table.out)) throw new Error('the table lost the row');
     // The listing must never carry the credential itself.
     if (new RegExp(TOKEN).test(table.out)) throw new Error('the token is in the listing');
-  });
+  }, { needs: ['S2'] });
 
   // ================================================== v0.20: the socket, and F3 both ways ====
-  await step('7 jam\'s tmux calls do not touch the DEFAULT socket, and its own one has the session', async () => {
+  await step('7sock', '7 jam\'s tmux calls do not touch the DEFAULT socket, and its own one has the session', async () => {
     const mine = tmux('list-sessions', '-F', '#{session_name}').stdout || '';
     console.log(`      tmux -L ${SOCKET} ls → ${mine.trim().split('\n').join(', ')}`);
     if (!new RegExp(`^${S.jam}$`, 'm').test(mine)) throw new Error(`${S.jam} is not on jam's own socket`);
@@ -447,9 +515,9 @@ try {
     if (withHint.socket !== SOCKET) throw new Error(`session.json says socket ${withHint.socket}`);
     const gone = jam('end', S.live);
     if (gone.code !== 0) throw new Error(`could not end the hint jam: ${gone.out}`);
-  });
+  }, { needs: ['S2'], cleans: { sessions: [S.live], ports: [P.live] } });
 
-  await step('7 F3 detaches on a real pty: attach, press F3, come back out', async () => {
+  await step('7f3', '7 F3 detaches on a real pty: attach, press F3, come back out', async () => {
     // A real tty attached to the real session, exactly what F3 in the host client produces —
     // and TMUX unset, because the driver is itself a tmux pane.
     drive(`unset TMUX; ${TMUX} -L ${SOCKET} attach -t ${S.jam}:claude; echo JAM-F3-DETACHED`);
@@ -464,11 +532,11 @@ try {
     console.log('      no clients left on the session — F3 went in and F3 came back out');
     if (!alive(S.jam)) throw new Error('detaching killed the session');
     killMine(S.drive);
-  });
+  }, { needs: ['S2'], cleans: { sessions: [S.drive] } });
 
-  await step('2 claude-jam end: everybody is told, the children die, the state dir goes', async () => {
+  await step('2end', '2 claude-jam end: everybody is told, the children die, the state dir goes', async () => {
     // Every child the daemon spawned, by the pid it logged for itself.
-    pids.daemon = main.pid;
+    pids.daemon = readState(P.main).pid;
     pids.claude = Number((tmux('list-panes', '-t', `${S.jam}:claude`, '-F', '#{pane_pid}').stdout || '').trim());
     const log = await until('the daemon to log its children', () => {
       const b = back(`${S.jam}:daemon`);
@@ -496,11 +564,12 @@ try {
     }
     if (fs.existsSync(stateDir(P.main))) throw new Error(`${stateDir(P.main)} survived`);
     if (jamJson().length) throw new Error(`still listed: ${JSON.stringify(jamJson())}`);
-  });
+  }, { needs: ['S2'], cleans: { sessions: [S.jam], ports: [P.main] } });
 
   // A real client's view of the same frame: it prints one line and exits 0, with no reconnect.
-  await step('2 a real client on a tty prints the notice once and exits 0', async () => {
-    main = launch(S.jam, P.main);
+  // It builds its own jam, so it does not care whether the step above got as far as ending one.
+  await step('2client', '2 a real client on a tty prints the notice once and exits 0', async () => {
+    launch(S.jam, P.main);
     drive(`env ${driveEnv()} node ${path.join(ROOT, 'client.mjs')} ws://127.0.0.1:${P.main} --name Dana --token ${TOKEN}`);
     await until('the client to be in the room', () => /fake claude|live TUI/.test(pane(S.drive)), 25000);
     const r = jam('end', S.jam);
@@ -516,10 +585,10 @@ try {
     // "nothing to reconnect to", so the test is for `retrying`.
     if (/retrying/i.test(out)) throw new Error('the client tried to reconnect');
     killMine(S.drive);
-  });
+  }, { cleans: { sessions: [S.jam, S.drive], ports: [P.main] } });
 
   // ============================================================= orphans and clean ====
-  await step('3 an orphan state dir is listed with a !, and `claude-jam clean` takes only that one', async () => {
+  await step('3clean', '3 an orphan state dir is listed with a !, and `claude-jam clean` takes only that one', async () => {
     // The realistic orphan: the tmux session goes away under a jam (a crash, a kill by hand),
     // leaving the state dir behind. Exact name, and one this script created.
     const orphan = launch(S.jam, P.orphan);
@@ -566,13 +635,14 @@ try {
     if (!fs.existsSync(stateDir(P.live))) throw new Error('clean removed a LIVE jam\'s state dir');
     if (!alive(S.live)) throw new Error('clean killed a live session');
     // The decoys are still standing, having been offered to nothing at all.
-    if (!alive(S.plain) || !alive(S.decoy)) throw new Error('a decoy went missing during clean');
+    const missing = decoyGone();
+    if (missing) throw new Error(`a decoy went missing during clean: ${missing}`);
     console.log(`      ${S.live} and both decoys are still up`);
     if (live.tmux !== S.live) throw new Error('the live session.json is wrong');
-  });
+  }, { cleans: { sessions: [S.jam, S.live], ports: [P.orphan, P.live, P.incomplete] } });
 
   // ================================================================== the prompts ====
-  await step('4 [c]ancel leaves the taken jam exactly as it was', async () => {
+  await step('4cancel', '4 [c]ancel leaves the taken jam exactly as it was', async () => {
     drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
     const prompt = await until('the four choices', () => {
       const f = flat(S.drive);
@@ -590,9 +660,9 @@ try {
     if (!alive(S.live)) throw new Error('cancel ended the jam');
     if (!/jam host --attach/.test(out)) throw new Error('the refusal does not name the way in');
     killMine(S.drive);
-  });
+  }, { needs: ['3clean'], cleans: { sessions: [S.drive] } });
 
-  await step('4 [n]ew session builds a second jam under an auto-name and a free port', async () => {
+  await step('4new', '4 [n]ew session builds a second jam under an auto-name and a free port', async () => {
     drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET} --no-attach`);
     await until('the four choices', () => /\[n\]ew session/.test(flat(S.drive)), 15000);
     line('n');
@@ -609,9 +679,11 @@ try {
     if (alive(S.two) || !alive(S.live)) throw new Error('the wrong session went');
     console.log(`      ${S.two} started on :${two.port}, then ended cleanly`);
     killMine(S.drive);
-  });
+    // The second jam's port was auto-picked, so it is not in P: on failure `cleans` finds its state
+    // dir by the exact name jam itself reports for it.
+  }, { needs: ['3clean'], cleans: { sessions: [S.two, S.drive] } });
 
-  await step('5 [a]ttach opens the host client, and the exit prompt\'s `k` keeps the jam', async () => {
+  await step('5keep', '5 [a]ttach opens the host client, and the exit prompt\'s `k` keeps the jam', async () => {
     drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
     await until('the four choices', () => /\[a\]ttach as host/.test(flat(S.drive)), 15000);
     line('a');
@@ -635,9 +707,9 @@ try {
     if (!/jam host --attach/.test(out) || !/jam sessions/.test(out)) throw new Error('the reattach lines are missing');
     if (jamJson().find((r) => r.name === S.live)?.state !== 'live') throw new Error('the jam is not healthy after a keep');
     killMine(S.drive);
-  });
+  }, { needs: ['3clean'], cleans: { sessions: [S.drive] } });
 
-  await step('6 /end in the host client: `n` ends nothing, `y` ends it for everybody', async () => {
+  await step('6end', '6 /end in the host client: `n` ends nothing, `y` ends it for everybody', async () => {
     const w = watcher(P.live);
     await w.want('the welcome', (f) => f.t === 'welcome');
     drive(`env ${driveEnv()} node ${HOST_MJS} --attach --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
@@ -662,9 +734,10 @@ try {
     console.log(out.split('\n').filter((l) => /has ended|JAMEXIT/.test(l)).map((l) => `      ${l.trim()}`).join('\n'));
     if (jamJson().length) throw new Error(`still listed: ${JSON.stringify(jamJson())}`);
     killMine(S.drive);
-  });
+  }, { needs: ['3clean'], cleans: { sessions: [S.live, S.drive], ports: [P.live] } });
 
-  await step('5 the exit prompt\'s `e` ends the jam, from [e]nd-it-and-start-fresh onwards', async () => {
+  // From here on every step builds the jam it needs, so a failure above costs nothing here.
+  await step('5end', '5 the exit prompt\'s `e` ends the jam, from [e]nd-it-and-start-fresh onwards', async () => {
     const first = launch(S.jam, P.main);
     drive(`env ${driveEnv()} node ${HOST_MJS} --tmux ${S.jam} --port ${P.main} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
     await until('the four choices', () => /\[e\]nd it and start fresh/.test(flat(S.drive)), 15000);
@@ -689,9 +762,9 @@ try {
     if (running(fresh.pid)) throw new Error('`e` left the daemon running');
     if (jamJson().length) throw new Error(`still listed: ${JSON.stringify(jamJson())}`);
     killMine(S.drive);
-  });
+  }, { cleans: { sessions: [S.jam, S.drive], ports: [P.main] } });
 
-  await step('3 `claude-jam end --all` ends jam\'s own two and nothing else', async () => {
+  await step('3all', '3 `claude-jam end --all` ends jam\'s own two and nothing else', async () => {
     const a = launch(S.jam, P.main);
     const b = launch(S.live, P.live);
     const listed = jamJson().map((r) => r.name).sort();
@@ -703,13 +776,18 @@ try {
     if (running(a.pid) || running(b.pid)) throw new Error('a daemon survived --all');
     if (jamJson().length) throw new Error('still listed');
     // The two decoys were never candidates, so --all could not reach them.
-    if (!alive(S.plain) || !alive(S.decoy)) throw new Error('--all reached a session jam does not own');
-  });
+    const reached = decoyGone();
+    if (reached) throw new Error(`--all reached a session jam does not own: ${reached}`);
+  }, { cleans: { sessions: [S.jam, S.live], ports: [P.main, P.live] } });
 
-  await step('S1/S2 both decoys are STILL there, having been offered to nothing', async () => {
-    for (const name of [S.plain, S.decoy]) {
-      if (!alive(name)) throw new Error(`${name} was killed somewhere in this run`);
-      console.log(`      ${name}: alive`);
+  // Not `needs`: the live-jam and GHOST halves below are the two most important assertions in the
+  // suite and must run whatever happened above. Only the decoy half depends on S1/S2 having built
+  // a decoy at all, and decoyGone() is what knows that.
+  await step('decoys', 'S1/S2 both decoys are STILL there, having been offered to nothing', async () => {
+    const gone = decoyGone();
+    if (gone) throw new Error(`${gone} was killed somewhere in this run`);
+    for (const [id, name] of [['S1', S.plain], ['S2', S.decoy]]) {
+      console.log(`      ${name}: ${passed.has(id) ? 'alive' : 'not checked — step ' + id + ' failed, so there may never have been one'}`);
     }
     // The one that matters most: if a live jam was running when this started, it is running now.
     if (liveJam && dtmux('has-session', '-t', '=jam').status !== 0) throw new Error('THE LIVE JAM WENT AWAY DURING THIS RUN');
@@ -736,5 +814,12 @@ try {
   fs.rmSync(GHOST, { recursive: true, force: true }); // planted by this script, removed by it
 }
 
-console.log(`\n--- RESULT --- ${failed ? `${failed} step(s) FAILED` : 'all steps passed'} in ${Math.round((Date.now() - started) / 1000)}s`);
-process.exit(failed ? 1 : 0);
+// The two counts are printed apart and never added: "4 steps failed" for one broken thing is how a
+// number stops being read at all. A blocked step still makes the run non-zero — it proved nothing,
+// and a suite that did not run is not a suite that passed.
+const verdict = [
+  failed ? `${failed} step(s) FAILED` : null,
+  blocked ? `${blocked} step(s) BLOCKED by an earlier failure — not failures of their own` : null,
+].filter(Boolean).join(' · ') || `all ${passed.size} steps passed`;
+console.log(`\n--- RESULT --- ${verdict} in ${Math.round((Date.now() - started) / 1000)}s`);
+process.exit(failed || blocked ? 1 : 0);

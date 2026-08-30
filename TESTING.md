@@ -160,18 +160,27 @@ and byte-identical on Linux**.
 **W2 is unaffected.** Nothing platform-dependent is involved, and the same container is 19/19 with
 `CI` unset both before and after the fix.
 
-**Two things this does NOT settle.** (1) The cascade is still real: one failed step leaves `jamlife`
-behind and step 3 fails on it, so a red RESULT line still overstates. Still owed, in the Deferred
-list. (2) `smoke-lifecycle` never injects a keystroke, so injection on Linux remains unproven — see
-the Linux-host entry in Deferred, which this narrows rather than closes.
+**Two things this did NOT settle, one of them now closed.** (1) The cascade — one failed step leaving
+`jamlife` behind and later steps failing on the leftovers — **is fixed in 0.23.4; see the section
+below for the before/after numbers.** (2) `smoke-lifecycle` never injects a keystroke, so injection
+on Linux remains unproven — see the Linux-host entry in Deferred, which this narrows rather than
+closes.
 
 **A container note worth more than it looks.** `docker run` without `--init` gives PID 1 = the
 command you named, which does not reap. Killed children stay as **zombies**, `ps -p <pid>` still
-succeeds for a zombie, and `smoke-lifecycle`'s `running()` is `ps -p` — so the suite reports the
-daemon's children as still alive and times out on `ttyd (107) to exit`. Measured: `ps -eo pid,stat`
-showed `107 Z`. That is a container artifact, not a Linux one (a real runner's PID 1 reaps), and it
-is the first thing to rule out when a container run of this suite disagrees with a runner. Use
-`docker run --init`, and `docker exec -u <user>` rather than `su -c`.
+succeeds for a zombie, and `smoke-lifecycle`'s `running()` was `ps -p` — so the suite reported the
+daemon's children as still alive and timed out on `ttyd (107) to exit`. Measured: `ps -eo pid,stat`
+showed `107 Z`. Use `docker run --init`, and `docker exec -u <user>` rather than `su -c`. **The
+harness half of this is fixed in 0.23.4** — `running()` reads the state column now — so a container
+run no longer disagrees with a runner for this reason; the `--init` advice stands anyway, because an
+unreaped tree is a bad model of a runner in every other way too.
+
+**And one dependency this container run turned up, which is a real portability fact:** `host.mjs`'s
+`waitForHealth()` shells out to **`curl`**. `node:22-bookworm-slim` has none, and the whole suite
+then reads as six `daemon did not come up` failures while the daemon is up, listening and logging
+normally (measured 2026-08-30 — the fix was `apt-get install -y curl`). `ubuntu-latest` and macOS
+both ship curl, so CI and every developer box are unaffected; a slim container is not. Listed in
+Deferred as a product nit rather than fixed here.
 
 ## Release gates that have actually run
 
@@ -968,6 +977,16 @@ Append one line per skip: what, why, and how it will be proven. Newest last.
   still worth fixing on any platform. Re-adding the CI step is now a decision about gate policy
   rather than an open question — it is Roy's to make, and it is not wired.
 
+  **0.23.4, second pass, 2026-08-30 — (2) IS DONE AND THE STEP IS WIRED. This entry is closed.**
+  The cascade fix, its canary numbers and the `running()`/zombie decision are their own section
+  ("The cascade — a red RESULT line that overstated by 8×"). `.github/workflows/tests.yml` now
+  carries `sudo apt-get install -y tmux` plus `node scripts/smoke-lifecycle.mjs` behind
+  `if: runner.os == 'Linux'`, with no retry and with the reason it is back written above it. Proved
+  before wiring, not predicted: 19/19 on macOS and in the container, with `CI=true` and with it
+  unset, four runs. The next two candidates named above stand as they were — `smoke-nudge` then
+  `smoke-scroll` — and `smoke-adopt` is now known NOT to be a candidate until the tmux 3.3a
+  `PANE_SEP` bug below is fixed.
+
   What ran for this batch on macOS 2026-08-30: the unit suite **454 tests, 451 pass, 3
   skipped, 0 fail** (and again at `TMPDIR=/private/tmp`, the Linux `$TMPDIR` shape, unchanged);
   `check-terminal-gate`, `check-state-privacy` and `check-discovery-refusal` all clean; `npm pack
@@ -1073,6 +1092,29 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   the package has never been published. `npm pack --dry-run` (both CI legs) shows the tarball holds
   every module a client imports, which is not the same as a shim that works. Prove: publish, or
   `npm i -g ./claude-jam-<v>.tgz` on a Windows machine, then run `claude-jam` and `claude-jam join`.
+- 2026-08-30 · **`claude-jam adopt` is BROKEN on tmux 3.3a, and the message blames the wrong thing.**
+  `PANE_SEP` is U+0001; tmux 3.3a replaces it with `_` in `display-message -p` output where 3.7c
+  passes it through, so `parsePaneInfo` sees 1 field of 8 and `cmdAdopt` prints `no tmux pane %0 on
+  socket <s>` for a pane that exists. Measured both ways on 2026-08-30 (3.7c → 8 of 8, 3.3a → 1 of
+  8), which is also why `smoke-adopt` is 13-red at `HEAD` in a Debian bookworm container. Every
+  Debian/Ubuntu box with the packaged tmux is affected, not just the suite. Fix: a separator tmux
+  does not rewrite (or one `display-message` per field), a unit test over `parsePaneInfo` fed real
+  3.3a output, and `smoke-adopt` green on Linux — then it can join the CI leg. Prove: that suite
+  green in the container, and `claude-jam adopt` by hand on tmux 3.3a.
+- 2026-08-30 · **`smoke-transport` and `smoke-replay` have the unguarded-setup shape** — the sibling
+  of the cascade, found while checking the other eighteen suites for it, recorded rather than fixed
+  because both need restructuring rather than a declaration. `smoke-transport`: no top-level
+  `try`/`catch`/`finally` at all, T2 reuses T1's port 7811, and a throw from `daemon()` (104, 162,
+  287) skips every remaining T-group with no PASS/FAIL for them and skips the `daemons` cleanup at
+  371, leaking a child and a state dir. `smoke-replay`: `PANE_SESSION` (164) and the main daemon
+  (168) are built before the guarding `try` (174), and a second daemon block (374-406) runs after
+  that `try`'s `finally` has closed. Fix: the same `try`/`catch` + per-step `cleans` treatment the
+  other two got. Prove: break each one's first daemon on purpose and read the RESULT line.
+- 2026-08-30 · **`host.mjs` needs `curl` on `PATH` to start** (`waitForHealth()` shells out to it).
+  A slim container without curl reports `daemon did not come up` six times while the daemon is up
+  and listening — measured. macOS, `ubuntu-latest` and Debian-with-curl are all fine, so this is a
+  portability nit, not a live bug: node's own `fetch` would remove the dependency. Prove: replace
+  the `spawnSync('curl'…)` poll with `fetch` and re-run `smoke-lifecycle` on both platforms.
 - 2026-08-30 · **W1: `smoke-ink` and `smoke-xfer` were not re-run for this batch.** Both need a
   daemon with a real `claude` and spend tokens, and this batch was told not to. What did run:
   `smoke-nudge` 16/16 (the platform seam's sounds through stub binaries, real clients, the whole
@@ -1122,6 +1164,126 @@ six were sound in practice and one string-drift away from the same silence.
   (`smoke-scroll` is 12 calls / 13 steps because one runs for two roles — correct).
 - *Swallowed awaits.* Every `.catch(() => {})` / `catch { }` outside teardown was read; all are
   best-effort `fs.rmSync` cleanups or a `fetch` whose result is then asserted.
+
+## The cascade — a red RESULT line that overstated by 8× (0.23.4, 2026-08-30)
+
+The sequel to the vacuity audit above, and the same principle from the other end: a suite may not
+report a pass it did not earn, **and it may not report four failures for one broken thing.** A number
+that overstates by 8× stops being read at all, and the next real multi-failure gets waved off.
+
+**The defect.** `smoke-lifecycle`'s steps share fixtures — the jam S2 launches is read by five later
+steps, and eight steps launch a jam under a name an earlier step used. A failing step left its
+`jamlife` session and its state dir behind, so the next `launch` of that name failed with
+`tmux session "jamlife" is already a jam` — a true sentence about a false situation. Worse: two of
+the reads happened BETWEEN steps (`main = JSON.parse(readFileSync(…session.json))` at what was line
+399), where the only handler was the outer `catch`, so one missing fixture could end the run with
+thirteen steps never run and nothing in the RESULT line saying so.
+
+**The fix, in two halves, and neither of them is a sweep.** A step now declares:
+
+- `cleans` — the exact sessions and ports **it** created, torn down when it fails, so its successors
+  meet the world they would have met anyway. Exact quoted names only (`killMine` still enforces the
+  `jamlife`/`jamadopt` prefix, and a jam is ended by the name its own `session.json` records — never
+  the adopted session, and never a pattern).
+- `needs` — the ids of the steps whose fixtures it reads. If one of those failed, the step is
+  **BLOCKED**, printed with the id that blocked it, and counted apart from FAILED in the RESULT line.
+  A blocked run is still non-zero: it proved nothing.
+
+Plus the between-steps reads moved inside the steps that need them, S2b's marker swap-back moved into
+a `finally` (it borrows a fixture it does not own), and the closing decoy check learned that if S1 or
+S2 failed there may be no decoy to still be standing — which is not this step killing one.
+
+**Measured, both suites, by breaking one step on purpose** (`git show HEAD:` copy versus the patched
+one, same injected throw, same machine, macOS):
+
+| canary | before | after |
+| --- | --- | --- |
+| `smoke-lifecycle`, step 2 dies *after* it was handed a jam (so the jam is left behind) | **8 FAILED**, 42 s | **1 FAILED**, 23 s |
+| `smoke-lifecycle`, S2 dies *before* it builds the shared jam | **3 FAILED and 6 of 19 steps ran** — the between-steps read threw, so thirteen steps silently never ran, 2 s | **1 FAILED · 5 BLOCKED**, all thirteen others ran and passed, 19 s |
+| `smoke-adopt`, S6 dies before it adopts anything | **8 FAILED**, 46 s | **1 FAILED · 7 BLOCKED**, 6 s |
+
+And once on a real failure rather than an injected one: the same Debian container **without `curl`**
+(see the `--attach` section) gave `smoke-lifecycle` **6 FAILED · 9 BLOCKED**, where every one of the
+six says the same true thing (`daemon did not come up`) instead of five of them lying about a session
+name. `smoke-adopt` in that container went from **13 FAILED in 42 s** at `HEAD` to **6 FAILED · 7
+BLOCKED in 6 s** — the 20× speed-up is the blocked steps not burning 40-second timeouts on fixtures
+that were never built.
+
+**Which suites have this shape — checked, not assumed.** All eighteen others were read for two
+questions: does a step create a durable named resource a later step needs (present or absent), and is
+there any per-step teardown at all?
+
+| suite | verdict |
+| --- | --- |
+| `smoke-lifecycle` | **HAD IT, FIXED.** Nineteen steps, thirteen resource creations, teardown only in the final `finally`. |
+| `smoke-adopt` | **HAD IT, FIXED.** S6 builds the pane and daemon that S6b, S7, S7b, S7c, S8, S9 and S11 all read; no per-step teardown. Same treatment. |
+| `smoke-transport` | **HAS A DIFFERENT ONE — recorded, not fixed** (Deferred). No top-level `try`/`catch`/`finally` anywhere in the file, and T2 reuses T1's port 7811 with only an in-step `d.stop()` between them: a throw from `daemon()` (lines 104, 162, 287) skips every remaining T-group with no PASS/FAIL for them and skips the `for (const d of daemons) await d.stop()` cleanup, leaking a child and its state dir. |
+| `smoke-replay` | **HAS A DIFFERENT ONE — recorded, not fixed** (Deferred). `PANE_SESSION` (164) and the main daemon (168) are built BEFORE the guarding `try` (174), and a second daemon block (374–406) runs after that `try`'s `finally` has already closed. |
+| `smoke-answer`, `smoke-discover`, `smoke-ink`, `smoke-invite`, `smoke-knock`, `smoke-mirror`, `smoke-nudge`, `smoke-peer`, `smoke-perm`, `smoke-popup`, `smoke-scroll`, `smoke-slash`, `smoke-view`, `smoke-xfer`, `smoke.mjs` | **NOT THIS SHAPE.** Each either drives a daemon it was handed on argv (so it owns no fixture at all) or builds its one shared daemon/session inside the same `try` that guards every step, and re-creates nothing a later step needs. |
+| `check-state-privacy`, `check-discovery-refusal`, `check-terminal-gate` | **NOT THIS SHAPE, and the first two are the model:** every check builds its own `mkdtemp` dir and its own port, tears it down in its own `finally`, and reports PASS / FAIL / **NOT EXERCISED** as three different answers. |
+
+### `running()` and the zombie — decided: FIXED, in all four suites that ask
+
+`ps -p <pid>` **succeeds for a zombie**, and so does `process.kill(pid, 0)`. Every liveness check in
+`scripts/` is used one of exactly two ways — "it was running before this" and "it has exited now" —
+and a zombie (exited, unreaped, holding nothing but a pid entry) is not running by either. So the
+question "should `running()` distinguish a zombie" has one answer, and it is not a container-only
+one: the check was wrong on every platform, and the container just made it visible (13 false reds).
+
+Fixed by reading the state column, which is the only thing that says `Z`: `ps -o stat= -p <pid>`,
+BSD and GNU both, `Z`-prefixed for a zombie. `smoke-lifecycle` and `smoke-adopt` asked with bare
+`ps -p`; `smoke-peer` (`alive`, three "the child is gone" assertions) and `smoke-view` (`running`,
+"the daemon's ttyd outlived the jam") asked with `process.kill(pid, 0)` and keep that as the cheap
+first question, asking `ps` only when it says yes.
+
+Measured on macOS: a python parent that never reaps its child gives `ps -p <pid>` exit **0** and
+`ps -o stat= -p <pid>` → **`Z`**. Canaried the other way too — reverting `smoke-view`'s helper alone
+reds the new lint with `smoke-view.mjs: kill(pid, 0) succeeds on a zombie`.
+
+**It fails closed without `ps`.** Measured in the container before `procps` was installed: `spawnSync`
+returns `status: null, error: ENOENT`, so `running()` answers *not running* — which turns the "it was
+running to begin with" assertions red rather than quietly passing the "it has exited" ones. A box
+with no `ps` therefore gets a loud wrong answer, not a silent right-looking one.
+
+The lint that keeps it: **`0.23.4 no smoke suite reports a ZOMBIE as a running process`** in
+`test.mjs` — no file in `scripts/` may contain bare `ps -p` or `process.kill(pid, 0); return true`,
+every file with a `(running|alive) = (pid)` helper must read `-o stat=` and test for `Z`, and the
+count of such files is pinned at four so a rename cannot turn the lint into a no-op.
+
+### What ran for this batch, and what did not
+
+| suite | macOS | macOS `CI=true` | Debian bookworm, tmux 3.3a, node 22.23.2, `--init`, non-root | that, `CI=true` |
+| --- | --- | --- | --- | --- |
+| unit (`node --test test.mjs`) | **458 tests, 455 pass, 3 skipped, 0 fail** | — | **same, byte-identical counts** | — |
+| `smoke-lifecycle` | **19/19, 23 s** | **19/19, 23 s** | **19/19, 22 s** | **19/19, 21 s** |
+| `smoke-adopt` | **16/16, 9 s** | **16/16, 10 s** | 6 FAILED · 7 BLOCKED — **pre-existing, and NOT this batch's**: `HEAD` gives 13 FAILED in the same container. Root cause found, see below | same |
+| `smoke-peer` | **16/16** | — | **16/16 ("all steps passed")** | — |
+| `smoke-view` | **6/6** | — | **SKIP** — `there is no ttyd on this machine, and this smoke is about ttyd`, exit 0, which is the suite saying so honestly | — |
+
+**Not re-run, and judged unaffected:** the other fourteen suites. The diff is confined to two smoke
+harnesses' step plumbing, two one-line liveness helpers, one new unit lint and one CI step; no
+product file was touched at all (`git diff --stat` for this batch: `scripts/smoke-lifecycle.mjs`,
+`scripts/smoke-adopt.mjs`, `scripts/smoke-peer.mjs`, `scripts/smoke-view.mjs`, `test.mjs`,
+`.github/workflows/tests.yml`, `TESTING.md`, `CHANGELOG.md`, `package.json`). Six of the fourteen
+need a real `claude` and spend tokens, and this batch was told not to. Prove: the full sweep at the
+next release gate.
+
+### The Linux finding this batch did not go looking for: `claude-jam adopt` is broken on tmux 3.3a
+
+Running `smoke-adopt` on Linux for the first time (it is not in the CI leg, and nobody had) found it
+**13-red at `HEAD`** with `no tmux pane %0 on socket jamadoptsock` — for a pane that demonstrably
+exists. It is not the smoke and it is not the container. `PANE_SEP` is **U+0001**, and **tmux 3.3a
+replaces it with `_` in `display-message -p` output** where tmux 3.7c passes it through, so
+`parsePaneInfo` sees one field instead of eight and `cmdAdopt` reports the pane as missing.
+Measured, same node script on both:
+
+- tmux 3.7c (macOS): `"%062996sleep…"` → **8 of 8 fields**
+- tmux 3.3a (Debian bookworm): `"%0_7484_sleep_/_psep_0_0_sleep"` → **1 of 8**
+
+So `claude-jam adopt` fails on Debian bookworm's packaged tmux for every user, not just for the
+suite, and the failure message points at the pane rather than at the separator. **Not fixed here** —
+it is a product change in `lib.mjs` with its own unit and smoke surface, and it is not what this
+batch was for. In Deferred, and flagged to Roy.
 
 ## The 2026-08-30 campaign
 

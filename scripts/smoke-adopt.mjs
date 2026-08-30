@@ -62,17 +62,55 @@ const tmux = (...a) => spawnSync(TMUX, ['-L', SOCKET, ...a], { encoding: 'utf8' 
 // The DEFAULT server. Everything through here is either read-only or about S.dflt, by exact name.
 const dtmux = (...a) => spawnSync(TMUX, ['-L', 'default', ...a], { encoding: 'utf8' });
 const paneOf = (t, sess = tmux) => (sess('capture-pane', '-p', '-t', t).stdout || '').replace(/\n+$/, '');
-const running = (pid) => !!pid && spawnSync('ps', ['-p', String(pid)], { encoding: 'utf8' }).status === 0;
+// 2026-08-30: `ps -p` alone SUCCEEDS on a ZOMBIE — a process that has exited and is only waiting
+// to be reaped. Every use here is "it was running before" or "it has exited now", and a zombie is
+// not running by either definition; a container whose PID 1 does not reap turned that into false
+// reds in smoke-lifecycle (TESTING.md). `ps -o stat=` is BSD and GNU both, and prints `Z`.
+const running = (pid) => {
+  if (!pid) return false;
+  const r = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 && !/^\s*Z/.test(r.stdout || '');
+};
 // One exact name per call, on the socket that name was created on, and only a name this script
 // made up. Never a filtered sweep, never kill-server.
 const killMine = (name, sess = tmux) => {
   if (typeof name === 'string' && name.startsWith('jamadopt')) sess('kill-session', '-t', `=${name}`);
 };
 
+// 0.23.4: this suite's steps share one fixture — the pane S6 adopts and the daemon it starts — and
+// a failure in S6 used to be printed as seven more, each of them a 15-to-40-second timeout on
+// something that was never built. Same treatment as smoke-lifecycle: `cleans` names what THIS step
+// made (by exact port, and the jam is ended by the name its own session.json records — never the
+// ADOPTED session, which is the one thing this feature must not touch), and `needs` names the steps
+// whose fixture it reads. A step whose fixture is missing is BLOCKED, not FAILED, and the RESULT
+// line counts the two apart: "8 failed" for one broken thing is how a number stops being read.
 let failed = 0;
-async function step(label, fn) {
-  try { await fn(); console.log(`PASS  ${label}`); }
-  catch (e) { failed++; console.log(`FAIL  ${label} — ${e.message}`); }
+let blocked = 0;
+const passed = new Set();
+function tidy(spec = {}) {
+  for (const port of spec.ports || []) {
+    try {
+      const info = JSON.parse(fs.readFileSync(path.join(stateDir(port), 'session.json'), 'utf8'));
+      if (info?.tmux) jam('end', info.tmux);
+    } catch { /* nothing was built — the usual reason a step failed this early */ }
+    fs.rmSync(stateDir(port), { recursive: true, force: true });
+  }
+  for (const name of spec.sessions || []) killMine(name);
+  for (const name of spec.dflt || []) killMine(name, dtmux); // S12's, on the DEFAULT server
+}
+async function step(id, label, fn, { needs = [], cleans = null } = {}) {
+  const missing = needs.filter((n) => !passed.has(n));
+  if (missing.length) {
+    blocked++;
+    console.log(`BLOCK ${label}\n      did not run: step ${missing.join(', ')} failed, so the fixture this one reads was never built`);
+    return;
+  }
+  try { await fn(); passed.add(id); console.log(`PASS  ${label}`); }
+  catch (e) {
+    failed++;
+    console.log(`FAIL  ${label} — ${e.message}`);
+    if (cleans) tidy(cleans);
+  }
 }
 const ok = (cond, what) => { if (!cond) throw new Error(what); };
 async function until(what, pred, ms = 20000) {
@@ -216,7 +254,7 @@ const daemonLog = () => (ownJam
 
 try {
   // =============================================================== the refusals ====
-  await step('S1 REFUSAL not inside tmux at all — the whole --resume alternative, id filled in', async () => {
+  await step('S1', 'S1 REFUSAL not inside tmux at all — the whole --resume alternative, id filled in', async () => {
     const r = spawnSync(JAM, ['adopt'], { encoding: 'utf8', env: { ...ENV, PWD: WORK }, cwd: WORK });
     const out = `${r.stdout || ''}${r.stderr || ''}`;
     console.log(`      ${out.trim().split('\n').slice(0, 3).join('\n      ')}`);
@@ -227,7 +265,7 @@ try {
     ok(!fs.existsSync(stateDir(P.own)), 'a refusal built a state dir');
   });
 
-  await step('S2 REFUSAL a pane id that is not one, and a socket name that would become a path', async () => {
+  await step('S2', 'S2 REFUSAL a pane id that is not one, and a socket name that would become a path', async () => {
     const bad = jam('adopt', '--pane', 'claude-jam:claude');
     ok(bad.code === 2, `expected exit 2, got ${bad.code}`);
     ok(/is not a tmux pane id/.test(bad.out), bad.out);
@@ -244,14 +282,14 @@ try {
     ok(noId.status === 2 && /needs --session-id/.test(`${noId.stdout}${noId.stderr}`), noId.stderr);
   });
 
-  await step('S3 REFUSAL a pane that does not exist on that socket', async () => {
+  await step('S3', 'S3 REFUSAL a pane that does not exist on that socket', async () => {
     const r = jam('adopt', '--pane', '%99999', '--socket', SOCKET, '--yes');
     ok(r.code === 1, `expected exit 1, got ${r.code}`);
     ok(/no tmux pane %99999 on socket jamadoptsock/.test(r.out), r.out);
     ok(/list-panes/.test(r.out), 'a refusal has to say how to find the right one');
   });
 
-  await step('S4 REFUSAL a directory with no claude transcript', async () => {
+  await step('S4', 'S4 REFUSAL a directory with no claude transcript', async () => {
     const p = makePane(S.pane, tmux, BARE);
     const r = jam('adopt', '--pane', p.id, '--socket', SOCKET, '--yes');
     ok(r.code === 1, `expected exit 1, got ${r.code}`);
@@ -259,7 +297,7 @@ try {
     killMine(S.pane);
   });
 
-  await step('S5 REFUSAL no terminal to confirm on, and no --yes: NOTHING is adopted', async () => {
+  await step('S5', 'S5 REFUSAL no terminal to confirm on, and no --yes: NOTHING is adopted', async () => {
     const p = makePane(S.pane);
     const r = jam('adopt', '--pane', p.id, '--socket', SOCKET);
     console.log(`      ${r.out.trim().split('\n').slice(0, 8).join('\n      ')}`);
@@ -274,7 +312,7 @@ try {
   });
 
   // ==================================================================== adopting ====
-  await step('S6 ADOPT a pane on a socket this smoke made — and `sessions` says `adopted`', async () => {
+  await step('S6', 'S6 ADOPT a pane on a socket this smoke made — and `sessions` says `adopted`', async () => {
     const p = makePane(S.pane);
     adopted = p;
     const r = jam('adopt', '--pane', p.id, '--socket', SOCKET, '--yes', '--port', String(P.own),
@@ -312,9 +350,9 @@ try {
     const table = jam('sessions').out;
     ok(/adopted/.test(table), table);
     ok(table.includes(`attach -t ${p.id}`), `the raw-TUI line does not name the adopted pane:\n${table}`);
-  });
+  }, { cleans: { ports: [P.own], sessions: [S.pane] } });
 
-  await step('S6b the BRIEFING lands in the adopted pane, whole, as the tool and not as a person', async () => {
+  await step('S6b', 'S6b the BRIEFING lands in the adopted pane, whole, as the tool and not as a person', async () => {
     // The half an adopted claude cannot be given any other way: it started before claude-jam
     // existed for it, so its --settings and its system prompt are already read and closed.
     const brief = await until('the briefing in the adopted pane',
@@ -336,9 +374,9 @@ try {
     const outbox = path.join(stateDir(P.own), 'outbox');
     const kept = fs.existsSync(outbox) ? fs.readdirSync(outbox) : [];
     ok(!kept.some((f) => f.includes('claude-jam')), `the briefing was kept: ${kept.join(', ')}`);
-  });
+  }, { needs: ['S6'] });
 
-  await step('S7 a guest sees the REAL adopted pane, and their message lands in it whole', async () => {
+  await step('S7', 'S7 a guest sees the REAL adopted pane, and their message lands in it whole', async () => {
     const g = connect(P.own, 'Guest');
     const welcome = await g.ready.then(() => g.events.find((e) => e.t === 'welcome'));
     // Everybody is told this jam was adopted, and that claude WAS told — the client turns both
@@ -359,9 +397,9 @@ try {
     }, 30000);
     ok(got === `[Guest]: ${said}`, `the pane got ${JSON.stringify(got)}`);
     guest = g; // S7b needs a client connected: the pane is classified only while somebody is in
-  });
+  }, { needs: ['S6'] });
 
-  await step('S7b a COMPACTION re-brief: the context went, so claude is told again', async () => {
+  await step('S7b', 'S7b a COMPACTION re-brief: the context went, so claude is told again', async () => {
     // The v0.31 classifier already reads this pane 2.5 times a second; v0.33 asks it a second
     // question off the same capture. There is no hook for this — a running claude cannot be given
     // one — so a compaction is only ever visible on the screen.
@@ -407,14 +445,14 @@ try {
       .filter((l) => /\[brief\]|\[prompt\]/.test(l)).slice(-4).map((l) => `        ${l.trim()}`).join('\n')}`);
     guest.ws.close();
     guest = null;
-  });
+  }, { needs: ['S6'] });
 
   // v0.34: the key is a CREDENTIAL. It rides in one direction only — the client's hello — and the
   // daemon compares it and drops it. This jam has a REAL transcript on disk (this smoke planted
   // it, under a $HOME of its own), so the /export scrub can be proven rather than assumed: the
   // key is written INTO that transcript first, because a scrub of something that was never there
   // proves nothing.
-  await step('S7c the host key leaks into nothing — no frame, no daemon log, no export', async () => {
+  await step('S7c', 'S7c the host key leaks into nothing — no frame, no daemon log, no export', async () => {
     const key = readHostKey(hostKeyPath(stateDir(P.own)));
     ok(key, `no host.key in ${stateDir(P.own)}`);
     ok((fs.statSync(hostKeyPath(stateDir(P.own))).mode & 0o777) === 0o600, 'host.key is not 0600');
@@ -471,25 +509,25 @@ try {
     }
     console.log(`      ${stateDir(P.own)}: host.key is 0600 and the only file holding it`);
     h.ws.close();
-  });
+  }, { needs: ['S6'] });
 
-  await step('S8 REFUSAL the same pane is never adopted twice', async () => {
+  await step('S8', 'S8 REFUSAL the same pane is never adopted twice', async () => {
     const r = jam('adopt', '--pane', adopted.id, '--socket', SOCKET, '--yes', '--port', String(P.dflt));
     ok(r.code === 1, `expected exit 1, got ${r.code}`);
     ok(/already being shared by a jam on :7921/.test(r.out), r.out);
     ok(/the pane and claude are left alone/.test(r.out), r.out);
     ok(!fs.existsSync(stateDir(P.dflt)), 'the refusal built a second state dir');
-  });
+  }, { needs: ['S6'] });
 
-  await step('S9 `claude-jam clean` removes nothing while an adopted jam is running', async () => {
+  await step('S9', 'S9 `claude-jam clean` removes nothing while an adopted jam is running', async () => {
     const r = jam('clean', '--yes');
     console.log(`      ${r.out.trim().split('\n')[0]}`);
     ok(/nothing to clean/.test(r.out), r.out);
     ok(fs.existsSync(stateDir(P.own)), 'clean took a live adopted jam\'s state dir');
     ok(tmux('has-session', '-t', `=${S.pane}`).status === 0, 'clean touched the adopted session');
-  });
+  }, { needs: ['S6'] });
 
-  await step('S10 REFUSAL a jam of claude-jam\'s OWN is not adopted — --attach is the way back', async () => {
+  await step('S10', 'S10 REFUSAL a jam of claude-jam\'s OWN is not adopted — --attach is the way back', async () => {
     const born = spawnSync(process.execPath, [HOST_MJS, '--tmux', S.jam, '--port', String(P.jam),
       '--view-port', String(P.jam + 1), '--name', 'Host', '--token', TOKEN, '--cwd', WORK,
       '--tmux-socket', SOCKET, '--no-attach', '--no-popup', '--no-announce'],
@@ -503,10 +541,10 @@ try {
     ok(/claude-jam host --attach/.test(r.out), r.out);
     const gone = jam('end', S.jam);
     ok(gone.code === 0, gone.out);
-  });
+  }, { cleans: { ports: [P.jam], sessions: [S.jam] } });
 
   // ====================================================== the rule that matters ====
-  await step('S11 END takes the daemon and NOTHING of the adopted session', async () => {
+  await step('S11', 'S11 END takes the daemon and NOTHING of the adopted session', async () => {
     const info = JSON.parse(fs.readFileSync(path.join(stateDir(P.own), 'session.json'), 'utf8'));
     const panePidBefore = Number((tmux('display-message', '-p', '-t', adopted.id, '#{pane_pid}').stdout || '').trim());
     ok(running(panePidBefore), 'the adopted pane was not running before the end');
@@ -524,9 +562,11 @@ try {
     ok(running(after), 'the process in the adopted pane is gone');
     ok(/\[fake-tui\]/.test(paneOf(adopted.id)), 'the adopted pane is no longer drawing');
     console.log(`      adopted pane ${adopted.id} still running, same pid ${after}`);
-  });
+    // Not `cleans`: what this step would tidy is the jam it just ended. If it failed, the S6 jam
+    // may still be up, and S13's comment says why that matters — so end that one, and nothing else.
+  }, { needs: ['S6'], cleans: { ports: [P.own] } });
 
-  await step(`S12 the DEFAULT tmux socket — one session (${S.dflt}), adopted and released`, async () => {
+  await step('S12', `S12 the DEFAULT tmux socket — one session (${S.dflt}), adopted and released`, async () => {
     // The case the feature exists for: the user's own tmux server, which is also the one
     // claude-jam must be most careful with. One session, created here, named uniquely.
     const p = makePane(S.dflt, dtmux);
@@ -559,8 +599,8 @@ try {
     const pidAfter = Number((dtmux('display-message', '-p', '-t', p.id, '#{pane_pid}').stdout || '').trim());
     ok(pidAfter === pidBefore && running(pidAfter), `pid changed: ${pidBefore} → ${pidAfter}`);
     console.log(`      ${S.dflt} on the default socket survived, same pid ${pidAfter}`);
-  });
-  await step('S13 a ROSTER re-brief: somebody joined, so claude is told who is in the room now', async () => {
+  }, { cleans: { ports: [P.dflt], dflt: [S.dflt] } });
+  await step('S13', 'S13 a ROSTER re-brief: somebody joined, so claude is told who is in the room now', async () => {
     // TESTING.md deferred this because the ten-minute rate limit is armed by the adoption
     // briefing seconds earlier, so nothing can cross it inside a smoke. JAM_BRIEF_MIN_GAP is the
     // hook that deferral asked for — an internal JAM_* var like JAM_HOOK_SECRET, so no flag, no
@@ -599,7 +639,7 @@ try {
     ok(/\[brief\] roster:/.test(rlog()), `no roster re-brief in the daemon log:\n${rlog().split('\n').filter((l) => /brief/.test(l)).join('\n')}`);
     console.log(`      ${rlog().split('\n').filter((l) => /\[brief\]/.test(l)).slice(-2).map((l) => l.trim()).join('\n      ')}`);
     try { rg.ws.close(); } catch { /* gone */ }
-  });
+  }, { cleans: { ports: [P.roster], sessions: [S.rpane] } });
 
 } catch (e) {
   // 2026-08-30 suite audit: without this, an exception BETWEEN steps was swallowed by the
@@ -626,7 +666,12 @@ try {
   killMine(S.dflt, dtmux);
   for (const d of [TMP, HOME, BIN, WORK, BARE]) fs.rmSync(d, { recursive: true, force: true });
   const secs = Math.round((Date.now() - started) / 1000);
-  console.log(failed ? `\n--- RESULT --- ${failed} step(s) FAILED in ${secs}s`
-    : `\n--- RESULT --- all steps passed in ${secs}s`);
-  process.exit(failed ? 1 : 0);
+  // The two counts are printed apart and never added. A blocked step still makes the run non-zero:
+  // it proved nothing, and a suite that did not run is not a suite that passed.
+  const verdict = [
+    failed ? `${failed} step(s) FAILED` : null,
+    blocked ? `${blocked} step(s) BLOCKED by an earlier failure — not failures of their own` : null,
+  ].filter(Boolean).join(' · ') || `all ${passed.size} steps passed`;
+  console.log(`\n--- RESULT --- ${verdict} in ${secs}s`);
+  process.exit(failed || blocked ? 1 : 0);
 }
