@@ -35,6 +35,35 @@ reds on the wording (`neverFatal` catches it, which is the defence in depth doin
 `neverFatal` → the lint reds. Remove both, i.e. 0.24.0's shape → step 11 reds with no reply at all,
 which is the daemon dying.
 
+### Fixed — six loopback request bodies did the same thing (security, host-local)
+
+Not guest-reachable: `/admit`, `/invite`, `/remote`, `/peer/*` and `/hook/<event>` all want loopback
+**and** the internal secret out of the jam's 0700 state dir, so the caller is already a process on
+the host's own machine. But the crash class is the same and six bodies exited the daemon on 0.24.0,
+measured 2026-08-30:
+
+- `POST /admit {"kind":"__proto__"}` — and `constructor`, `toString`, `valueOf`. `ladders` is a
+  plain object, `ladders['__proto__']` is `Object.prototype`, which is **truthy**, so the request
+  was routed to `answerHost` with a "ladder" that has no `requests` and the spread threw. This is
+  the rule AGENTS.md §2 already states — *never index a plain object with a caller's string* — and
+  `POST /admit` was the call site breaking it.
+- `POST /invite null`, `POST /remote null` — `m.mode` on `null`.
+- `POST /hook/notification null` — `payload.message` on `null`, in the one handler whose whole
+  contract is that a hook must never break the session.
+
+The bodies go through the same `parseFrame` the websocket uses (a non-object is a `400`, and a hook
+body that is not an object is simply an empty one). `Object.hasOwn(ladders, …)` is now the only way
+that object is indexed anywhere — including `standing()` and `askHost()`, which take internal
+literals and never needed it, so that the rule is total and a lint can hold it.
+
+**What carries it:** a `host.mjs` lint (no bare `JSON.parse(body`, no unguarded `ladders[`, and at
+least two real `Object.hasOwn(ladders,` sites so it cannot pass by the symbol vanishing) and
+**`smoke-answer` step 12**, which posts all eight bodies at a real daemon, asserts its pid is
+unchanged after each, and then asserts `/remote` with a real body still answers 200 — a step where
+everything 400s would prove nothing. **Canaried both ways, 2026-08-30**: the bare `ladders[` index
+back → the lint reds and step 12 reds with `fetch failed` (the daemon dying mid-step); the bare
+`JSON.parse(body` back → the same pair.
+
 ## 0.24.0
 
 ### Added — hosting from Windows, through WSL2 (SPEC v0.32 **W2**)

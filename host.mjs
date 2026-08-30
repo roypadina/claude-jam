@@ -2187,14 +2187,19 @@ function onRequest(req, res) {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e4) req.destroy(); });
     req.on('end', () => {
-      let m;
-      try { m = JSON.parse(body); } catch { return reply(400, { error: 'bad JSON' }); }
+      const f = parseFrame(body);
+      if (!f.ok) return reply(400, { error: f.error });
+      const m = f.frame;
       // Exactly the path a host client's frame takes. A request that expired or was already
       // answered in a client is a 404, and the popup exits silently. A popup cannot grant
       // STANDING approval (`always`) — one key, one request.
-      const err = ladders[m?.kind]
-        ? answerHost(m.kind, m?.name, m?.ok === true)
-        : admit(m?.name, m?.ok === true);
+      // `Object.hasOwn`, never a bare index: `ladders['__proto__']` is `Object.prototype`, which
+      // is truthy, so a plain index sent `kind:'__proto__'` (and `constructor`, `toString`,
+      // `valueOf`) into answerHost with a ladder that has no `requests` — measured 2026-08-30,
+      // it exited the daemon. This is AGENTS.md §2's rule, and this was the call site breaking it.
+      const err = Object.hasOwn(ladders, m.kind)
+        ? answerHost(m.kind, m.name, m.ok === true)
+        : admit(m.name, m.ok === true);
       reply(err ? 404 : 200, err ? { error: err } : { ok: true });
     });
     return;
@@ -2218,8 +2223,9 @@ function onRequest(req, res) {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e4) req.destroy(); });
     req.on('end', () => {
-      let m;
-      try { m = JSON.parse(body || '{}'); } catch { return reply(400, { error: 'bad JSON' }); }
+      const f = parseFrame(body || '{}');
+      if (!f.ok) return reply(400, { error: f.error });
+      const m = f.frame;
       const r = inviteOp(m);
       if (!r.ok) return reply(400, { error: r.error });
       if (r.op === 'list') return reply(200, { ok: true, invites, report: invitesReport(invites) });
@@ -2236,8 +2242,9 @@ function onRequest(req, res) {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e4) req.destroy(); });
     req.on('end', () => {
-      let m;
-      try { m = JSON.parse(body || '{}'); } catch { return reply(400, { error: 'bad JSON' }); }
+      const f = parseFrame(body || '{}');
+      if (!f.ok) return reply(400, { error: f.error });
+      const m = f.frame;
       if (m.mode == null) return reply(200, { ok: true, mode: relayMode, rows: relayProbe() });
       const r = setRemote(m.mode, { reissue: m.reissue === true });
       return r.ok ? reply(200, { ok: true, ...r }) : reply(400, { error: r.error });
@@ -2258,8 +2265,9 @@ function onRequest(req, res) {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
     req.on('end', () => {
-      let m;
-      try { m = JSON.parse(body || '{}'); } catch { return reply(400, { error: 'bad JSON' }); }
+      const f = parseFrame(body || '{}');
+      if (!f.ok) return reply(400, { error: f.error });
+      const m = f.frame;
       if (req.url === '/peer/list') return reply(200, { ok: true, enabled: PEER_ENABLED, peers: peerList() });
       const d = peerDispatch({ ...m, from: opts.name });
       if (!d.ok) return reply(200, { ok: false, refused: true, error: d.error });
@@ -2284,8 +2292,10 @@ function onRequest(req, res) {
 }
 
 function onHook(event, body) {
-  let payload = {};
-  try { payload = JSON.parse(body); } catch { /* hooks must never break the session */ }
+  // A hook must never break the session, so a body that is not an object is simply an empty one
+  // rather than a throw — `payload.message` on a `null` body exited the daemon (2026-08-30).
+  const f = parseFrame(body);
+  const payload = f.ok ? f.frame : {};
   if (event === 'stop') {
     // Stop fires the instant the turn ends, but claude flushes the turn's last record to
     // the JSONL a beat later (~100 ms measured) and the tail only polls every 300 ms.
@@ -3018,10 +3028,14 @@ const ladders = {
 // requests: ws -> record {name, ws, detail?, size?, timer, popped}. always: lowercased names.
 for (const l of Object.values(ladders)) { l.requests = new Map(); l.always = new Set(); }
 
-const standing = (kind, me) => ladders[kind].always.has(me.name.toLowerCase());
+// Both of these are called with internal literals today. They still go through `Object.hasOwn`,
+// so the rule "nothing indexes `ladders` with a bare key" is TOTAL and a lint can hold it — the
+// one call site that took a caller's string (POST /admit) is exactly how this bit.
+const standing = (kind, me) => Object.hasOwn(ladders, kind) && ladders[kind].always.has(me.name.toLowerCase());
 
 function askHost(kind, ws, me, rec = {}) {
-  const L = ladders[kind];
+  const L = Object.hasOwn(ladders, kind) ? ladders[kind] : null;
+  if (!L) return sendError(ws, `there is no ${JSON.stringify(String(kind).slice(0, 24))} approval to ask for`);
   const mine = L.requests.get(ws);
   if (mine) return sendError(ws, L.busy(mine));
   const r = { name: me.name, ws, popped: false, expires: Date.now() + LADDER_TTL, ...rec };
@@ -3040,7 +3054,12 @@ function askHost(kind, ws, me, rec = {}) {
 // The one decision, shared by the host client's command and by the in-TUI popup. No name =
 // the only request of that kind waiting. Returns null when it acted, else why it did not.
 function answerHost(kind, name, ok, always = false) {
-  const L = ladders[kind];
+  // Fail closed on the shared function rather than on each caller: `ladders` is a plain object, so
+  // a bare index walks the prototype and `ladders['__proto__']` is `Object.prototype` — truthy,
+  // with no `requests`, so the spread below threw and took the daemon with it. Every caller comes
+  // through here, which is why the guard belongs here and not at the one that was measured.
+  const L = Object.hasOwn(ladders, kind) ? ladders[kind] : null;
+  if (!L) return `there is no ${JSON.stringify(String(kind).slice(0, 24))} approval to answer`;
   const waiting = [...L.requests.entries()];
   let hit;
   if (name == null || name === '') {

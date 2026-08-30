@@ -8030,3 +8030,21 @@ test('v0.34.2 host.mjs: no handler may reach `m.t` before the envelope and the g
   assert.match(src, /const neverFatal = [\s\S]{0,600}?console\.error\([^)]*e\?\.stack/,
     'neverFatal no longer logs the stack it caught');
 });
+
+test('v0.34.2 host.mjs: a request body is an envelope too, and `ladders` is never bare-indexed', () => {
+  // Loopback + the 0700 hook secret, so not guest-reachable — but six bodies exited the daemon on
+  // 0.24.0 and four were the prototype walk AGENTS.md §2 forbids. The behavioural half is
+  // smoke-answer step 12.
+  const src = fs.readFileSync(path.join(import.meta.dirname, 'host.mjs'), 'utf8');
+  assert.equal(/JSON\.parse\(body/.test(src), false,
+    'an HTTP body is back on a bare JSON.parse — it must go through parseFrame');
+  // Every `ladders[...]` that is not a literal key must be guarded by Object.hasOwn on the same
+  // line: `ladders['__proto__']` is Object.prototype, truthy, with no `requests`.
+  const bad = src.split('\n').map((l, i) => [i + 1, l])
+    .filter(([, l]) => /\bladders\[/.test(l) && !/^\s*(\/\/|\*)/.test(l))
+    .filter(([, l]) => !/Object\.hasOwn\(ladders,/.test(l));
+  assert.deepEqual(bad, [], `host.mjs indexes ladders with an unguarded key: ${JSON.stringify(bad)}`);
+  // And it is still indexed at all — a lint that passes because the symbol vanished proves nothing.
+  assert.ok(src.split('\n').filter((l) => /Object\.hasOwn\(ladders,/.test(l)).length >= 2,
+    'expected at least the answerHost guard and the /admit call site');
+});
