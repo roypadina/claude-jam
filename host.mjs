@@ -9,6 +9,7 @@ import readline from 'node:readline';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJsonlLine, buildSettings, resolveClaude, buildJoinLine, buildViewUrl, inviteLines, resolveViewKey, resolveTtyd, VIEW_SH, buildTokenFile, classifyHello, localSocket, nameTaken, resolveJoinName, tokenMatches, validTokenValue, buildPopupArgs, resolveConfigDir, jsonlGlobs, claudeTarget, toolResultAction, sanitizeFrameRow, scrubRowJoins, frameDecision, frameCadence, FRAME_MIN_GAP, FRAME_FAST_GAP, mirrorSize, sendKeyArgs, validSlashCommand, guestSlashDecision, slashName, parseTunnelUrl, buildTunnelJoinLine, buildTunnelViewUrl, tunnelJoinLines, humanBytes, safeBaseName, uniqueName, xferFrames, pumpFrames, XFER_FRAME_MAX, EXPORT_MAX, UPLOAD_MAX, exportFileName, stripTokenBlock, scrubSecrets, clientCommand,
   // v0.17 Batch T: relay respawn, socket heartbeat, Tailscale Funnel.
@@ -77,7 +78,10 @@ import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHeal
 // v0.23: and so does mDNS — advertising is a platform binary, browsing is a platform binary.
 import { stateDir, secureDir, secureWrite, advertiseSpawn, readHostKey, assumePrivate } from './platform.mjs';
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+// `fileURLToPath`, NOT `new URL(...).pathname` (0.23.3). On Windows the pathname of a file: URL is
+// `/C:/dir/file.mjs` — with a leading slash — so `path.dirname` and `path.resolve` both build a path
+// that does not exist (`\\C:\\dir`). `cli.mjs` already did this correctly; these did not.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 // v0.23: what the TXT record's `v=` says. Read once, off the package.json beside this file, so
 // there is no second place a version number can be wrong.
 const JAM_VERSION = (() => {
@@ -487,7 +491,7 @@ async function launch() {
   // authoritative source; the file is simply not written, so nothing implies otherwise.
   if (!ADOPTED) fs.writeFileSync(path.join(opts.state, 'settings.json'), JSON.stringify(buildSettings(hooks), null, 2));
 
-  const self = new URL(import.meta.url).pathname;
+  const self = fileURLToPath(import.meta.url);
   const common = ['--port', String(opts.port), '--host', opts.host, '--name', opts.name,
     ...(opts.token ? ['--token', opts.token] : []),
     '--hook-secret', opts.hookSecret,

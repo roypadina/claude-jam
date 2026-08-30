@@ -4097,6 +4097,46 @@ function jsStringLiterals(src) {
 // `claude-jam host` is excluded by the lookbehind, and so is `--jam NAME`.
 const BARE_JAM_COMMAND = /(?<![-\w./])jam[ \t]+(host|join|sessions|ls|end|kill|clean|invite|invites|remote|--?[a-z])/;
 
+// 0.23.3 — a LINT, because one run on one platform cannot catch this and the Windows leg found it
+// the long way round. `new URL(import.meta.url).pathname` is `/C:/dir/file.mjs` on Windows — a
+// LEADING SLASH — so `path.dirname` gives `/C:/dir` and `path.resolve` gives `\\C:\\dir`, neither of
+// which exists. Two things were broken by it and neither could fail on macOS:
+//
+//   - `sessions.mjs`'s entry-point guard compared `path.resolve(argv[1])` with
+//     `path.resolve(new URL(...).pathname)`. On Windows they never match, so the ENTIRE command
+//     dispatch block was skipped and `node sessions.mjs <anything>` exited 0 having done nothing —
+//     all ten subcommands (list, sessions, end, clean, invite, invites, remote, find, discover,
+//     adopt), silently. `check-discovery-refusal.mjs` is what noticed, as a `find` that reported no
+//     jams instead of refusing.
+//   - `client-ink.mjs`'s HERE_DIR is how `/menu -> Help` reads MANUAL.md, so the Windows client
+//     that shipped in 0.23.0 could not read its own manual.
+//
+// `fileURLToPath` is the documented answer and handles the drive letter and the separators. Note
+// that `new URL('./x', import.meta.url)` handed STRAIGHT to fs is fine — fs accepts a file: URL —
+// so this only forbids taking `.pathname` off one.
+test('0.23.3 no module takes .pathname off a file: URL — that is broken on Windows', () => {
+  const files = [...fs.readdirSync(new URL('./', import.meta.url)).filter((f) => f.endsWith('.mjs')).map((f) => f),
+    ...fs.readdirSync(new URL('./scripts/', import.meta.url)).filter((f) => f.endsWith('.mjs')).map((f) => `scripts/${f}`)];
+  assert.ok(files.length >= 25, files.length);
+  const BAD = /new URL\([^)]*import\.meta\.url[^)]*\)\s*\.pathname/;
+  for (const f of files) {
+    const src = fs.readFileSync(new URL(`./${f}`, import.meta.url), 'utf8');
+    for (const [i, line] of src.split('\n').entries()) {
+      if (line.trimStart().startsWith('//')) continue; // the explanation above is allowed to say it
+      assert.ok(!BAD.test(line),
+        `${f}:${i + 1} takes .pathname off a file: URL — use fileURLToPath(import.meta.url):\n  ${line.trim()}`);
+    }
+  }
+  // And the fix is actually in place where it matters: the entry-point guard, and the client's
+  // MANUAL.md lookup. A lint that only forbids the wrong thing does not prove the right thing.
+  const sessions = fs.readFileSync(new URL('./sessions.mjs', import.meta.url), 'utf8');
+  assert.match(sessions, /path\.resolve\(fileURLToPath\(import\.meta\.url\)\)/,
+    'sessions.mjs\'s entry-point guard no longer resolves through fileURLToPath');
+  const ink = fs.readFileSync(new URL('./client-ink.mjs', import.meta.url), 'utf8');
+  assert.match(ink, /HERE_DIR = path\.dirname\(fileURLToPath\(import\.meta\.url\)\)/,
+    'the client\'s MANUAL.md directory is not resolved through fileURLToPath');
+});
+
 test('v0.21 no user-visible string emits a bare `jam ` command form', () => {
   assert.match('jam host --tmux x', BARE_JAM_COMMAND);      // the scanner is worth nothing
   assert.match('run `jam sessions` now', BARE_JAM_COMMAND); // if the pattern misses the thing
@@ -5041,16 +5081,24 @@ test('v0.23 the mDNS seam resolves its binary, and refuses with a reason and a f
   // Then the known locations, in order.
   assert.equal(resolveDnssd({}, (p) => p === DNSSD_PATHS[0]).bin, DNSSD_PATHS[0]);
   assert.equal(resolveDnssd({}, (p) => p === DNSSD_PATHS[2]).bin, DNSSD_PATHS[2]);
-  // Nothing anywhere is not an error: discovery is skipped, and the refusal names the fix for
-  // all three platforms rather than being a shrug.
+  // Nothing anywhere is not an error: discovery is skipped, and the refusal says what DOES work.
   const none = resolveDnssd({}, () => false);
   assert.equal(none.ok, false);
   assert.equal(none.why, DNSSD_MISSING);
-  assert.match(DNSSD_MISSING, /avahi-utils/);
-  assert.match(DNSSD_MISSING, /Bonjour/);
+  // 0.23.3: it used to be asserted to name `avahi-utils` and `Bonjour` as the fix on Linux and
+  // Windows. The Linux half was FALSE — measured 2026-08-30 in a Debian bookworm container:
+  // `apt-get install avahi-utils` provides avahi-browse / avahi-publish-service and NO `dns-sd`,
+  // so somebody following that advice got nowhere. The Windows half named a binary DNSSD_PATHS
+  // deliberately does not look for. A refusal that sends people to do something useless is worse
+  // than one that tells them the truth, so what is asserted now is the truth and the way forward.
+  assert.doesNotMatch(DNSSD_MISSING, /avahi-utils/, 'installing avahi-utils does NOT provide dns-sd (measured)');
+  assert.doesNotMatch(DNSSD_MISSING, /Bonjour/, 'Bonjour\'s dns-sd.exe is not a path this looks for');
+  assert.match(DNSSD_MISSING, /invite link/);      // what to do instead
+  assert.match(DNSSD_MISSING, /ws:\/\//);           // and the other way in
+  assert.match(DNSSD_MISSING, /not supported|does not support/); // the decision, in the message
   assert.match(DNSSD_MISSING, /JAM_DNSSD/);
   // And it says the rest of claude-jam is unaffected, because it is.
-  assert.match(DNSSD_MISSING, /everything else works/);
+  assert.match(DNSSD_MISSING, /Everything else works/);
   assert.equal(discoveryAvailable({ JAM_DNSSD: '/nope' }), false);
   assert.equal(typeof advertiseSpawn, 'function');
   assert.equal(typeof browseSpawn, 'function');
