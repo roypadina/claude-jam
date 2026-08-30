@@ -1369,7 +1369,15 @@ test('pumpFrames: every frame goes out, a few per tick, and a dead peer stops it
   const out = [];
   pumpFrames(frames[Symbol.iterator](), (f) => out.push(f.seq), () => true, 8);
   assert.equal(out.length, 8, 'the first tick must not send everything');
-  await new Promise((r) => setTimeout(r, 50));
+  // WAIT for the rest; do not sleep a fixed 50 ms and hope. The pump advances one setImmediate
+  // per tick, so 20 frames at 8 a tick needs two more turns of the event loop — and a loaded
+  // runner can stall past any fixed sleep. It did: this raced green on an idle Mac for months and
+  // then failed on windows-latest twice AND macos-latest once, every time with the same 8 of 20,
+  // which is the signature of a stalled loop rather than of a pump that drops frames. A deadline
+  // instead of a duration keeps the assertion honest — a pump that really stops still fails, it
+  // just takes up to two seconds to say so.
+  const deadline = Date.now() + 2000;
+  while (out.length < 20 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(out, [...Array(20).keys()]);
   // The peer went away: nothing more is sent.
   const gone = [];
