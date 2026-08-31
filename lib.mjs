@@ -386,7 +386,18 @@ export function parseFrame(raw) {
 // `hostKey` absent (an older caller, a daemon with no key) means nobody can be host: this fails
 // CLOSED on purpose — address-only host is the hole this exists to close.
 export function classifyHello(hello, currentToken, isLoopback, hostKey = null) {
-  const name = hello?.name;
+  // TRIMMED FIRST, then validated, then collision-checked — and it is the trimmed name that is
+  // carried everywhere after: the roster, the `[Name]: ` prefix, the ladders, `/kick`. A name is an
+  // identity label and leading or trailing whitespace has no legitimate meaning in one; its only
+  // effect is to create two identities that render identically to a human and to the agent (see
+  // `nameTaken`, and the 0.24.1 finding it closes).
+  //
+  // This ACCEPTS one thing it used to refuse: `" Roy"`, which `NAME_RE`'s alphanumeric-first rule
+  // turned away, now joins as `Roy`. That is the better answer — somebody who fat-fingered a space
+  // gets their name rather than an error, and if `Roy` is taken they get the ordinary "name taken",
+  // which is the truthful refusal. `NAME_RE` itself is untouched: trimming at the gate is the
+  // narrow fix, loosening the pattern would not be.
+  const name = typeof hello?.name === 'string' ? hello.name.trim() : hello?.name;
   if (!validName(name)) return { ok: false, code: 4400, error: 'bad name' };
   const g = hostGate({ claimed: hello?.host === true, local: !!isLoopback,
     presented: hello?.hostKey, expected: hostKey });
@@ -1801,8 +1812,17 @@ export function* xferFrames(xfer, data, chunk = XFER_CHUNK) {
 // Feed frames out a few per tick: a 20 MB upload is 320 frames, and doing them all in one turn
 // of the event loop stalls the sender (the daemon's HTTP endpoints, or the client's UI).
 // `alive` stops a transfer whose peer went away mid-stream.
-export function pumpFrames(frames, sendOne, alive = () => true, perTick = 8) {
+// v0.24.1: `ready` is the backpressure half. Without it this loop hands the socket every frame as
+// fast as `setImmediate` can turn over — 8 x 128 KiB a tick, so a 50 MB transfer is parked in the
+// outbound buffer in well under a second whatever the far end's link can take. That is a burst the
+// daemon CHOSE to create, and dropping somebody for it would be the false positive the whole
+// backpressure change exists to avoid. So the pump waits instead: same frames, same order, paced
+// by what the socket has actually drained.
+export const PUMP_WAIT_MS = 50;
+export function pumpFrames(frames, sendOne, alive = () => true, perTick = 8, ready = () => true) {
   const tick = () => {
+    if (!alive()) return;
+    if (!ready()) { setTimeout(tick, PUMP_WAIT_MS).unref?.(); return; }
     for (let i = 0; i < perTick; i++) {
       if (!alive()) return;
       const { value, done } = frames.next();
@@ -1888,6 +1908,58 @@ export function respawnDelay(attempt, min = RESPAWN_MIN_MS, max = RESPAWN_MAX_MS
 // mirror's own change-detection guard can legitimately send zero bytes for minutes.
 // `peers` is any iterable of [key, {alive}] — sockets, admitted or still knocking.
 export const HEARTBEAT_MS = 30000;
+// ------------------------------- v0.24.1: a participant who has stopped reading ----
+// Nothing read `ws.bufferedAmount`, so a socket that stopped reading made the daemon hold
+// everything the ROOM said on its behalf. Measured 2026-08-30: 2000 x 19 KB of another guest's
+// chat put daemon RSS up 139-282 MB, and the only thing that ever ended it was the heartbeat
+// above — which does end it, at about 60 s (two rounds; observed losing the deaf client from the
+// roster between 52 s and 62 s). So this is not a new kill. It bounds the same window by BYTES
+// instead of by seconds, and it closes with a reason where `terminate()` closes with nothing.
+//
+// Why drop rather than drop frames: jam shows a LIVE mirror. Skipping frames to keep a socket
+// alive leaves that client looking at a screen that silently disagrees with the host's, which is
+// worse than being disconnected — and a participant who is not reading is not participating, so
+// buffering the whole room on their behalf trades everybody for one dead client.
+export const BACKPRESSURE_DWELL_MS = 30000;
+export const BACKPRESSURE_FLOOR = 8 * 1024 * 1024;
+
+// The threshold is the biggest single frame THIS jam can hand one socket, so the watchdog can
+// never fire on something the daemon itself chose to send. That frame is a joiner's `welcome`, or
+// `/history all`, carrying the whole ring: `--history` events of at most `MAX_TEXT` each. Measured
+// at the shipped default (`--history 2000`) with a ring deliberately filled with 19 KB messages,
+// one welcome was **7.4 MiB** on the wire; the arithmetic ceiling for that ring is 40 MB, and that
+// is what this returns. The floor covers a small `--history`, where the ring says almost nothing
+// about how big a legitimate burst can be.
+//
+// ponytail: a jam whose ring really is 2000 maximum-length messages puts a welcome AT the
+// threshold, so an unlucky joiner on a link slower than ~11 Mbit/s could be dropped and get the
+// same welcome again on reconnect. Chunking the replay is the fix if that is ever seen; it is a
+// protocol change and nobody has hit it.
+export function backpressureMax(historyMax, { floor = BACKPRESSURE_FLOOR, maxText = MAX_TEXT } = {}) {
+  const n = Math.floor(Number(historyMax));
+  const ring = Number.isFinite(n) && n > 0 ? n * maxText : 0;
+  return Math.max(floor, ring);
+}
+
+// Over the threshold is not enough on its own — a big frame is over it for as long as it takes to
+// drain, and that is exactly the case that must NOT disconnect anybody. It has to STAY over, for
+// the dwell. `since` is the socket's own memory of when it first went over; 0 means it was not.
+export function backpressureDrop({ buffered = 0, since = 0, now = 0, max = 0,
+  dwell = BACKPRESSURE_DWELL_MS } = {}) {
+  if (!(Number(buffered) > Number(max))) return { drop: false, since: 0 };
+  const from = Number(since) || now;
+  const held = now - from;
+  return held >= dwell ? { drop: true, since: from, held } : { drop: false, since: from, held };
+}
+
+// 123 bytes is the WebSocket close-reason limit, and a reason over it makes `close()` throw —
+// which in a `send()` would be the very thing v0.34.2 stopped happening.
+export const BEHIND_CODE = 4430;
+export function behindReason(bytes, dwell = BACKPRESSURE_DWELL_MS) {
+  const r = `disconnected: ${humanBytes(bytes)} unread for ${Math.round(dwell / 1000)}s — this link cannot keep up. Rejoin and it starts fresh.`;
+  return r.length > 123 ? r.slice(0, 123) : r;
+}
+
 export function heartbeatSweep(peers = []) {
   const ping = [];
   const terminate = [];

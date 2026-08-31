@@ -417,10 +417,32 @@ test('classifyHello: host:true needs the key AND loopback', () => {
 });
 
 test('classifyHello: a bad name is refused before any token check', () => {
-  for (const name of ['', ' Roy', 'Roy!', 'a'.repeat(25), undefined, 42]) {
+  // v0.24.1: `' Roy'` used to be here, refused by NAME_RE's alphanumeric-first rule. The name is
+  // TRIMMED before it is validated now, so it joins as `Roy` — see the test below. Whitespace has
+  // no meaning in an identity label, and the version of it that mattered (`'Roy '`, which renders
+  // identically to another participant's name) is the reason the trim exists at all.
+  for (const name of ['', '   ', 'Roy!', 'a'.repeat(25), 'a'.repeat(26).trim(), undefined, 42, null, {}]) {
     assert.deepEqual(classifyHello({ name, token: 'smoketoken' }, 'smoketoken', true, KEY_A),
-      { ok: false, code: 4400, error: 'bad name' }, String(name));
+      { ok: false, code: 4400, error: 'bad name' }, JSON.stringify(name));
   }
+});
+
+test('v0.24.1 classifyHello: the name is trimmed before it is validated, and the trimmed one is what joins', () => {
+  const of = (name) => classifyHello({ name, token: 'smoketoken' }, 'smoketoken', true, KEY_A).name;
+  assert.equal(of('Roy '), 'Roy');
+  assert.equal(of(' Roy'), 'Roy');   // refused outright before v0.24.1
+  assert.equal(of('  Roy  '), 'Roy');
+  assert.equal(of('\tRoy\n'), 'Roy'); // trimmed away, so it never reaches NAME_RE's control-byte rule
+  // An INTERIOR space is part of the name and is untouched — "Ro y" is not "Roy".
+  assert.equal(of('Ro y'), 'Ro y');
+  assert.equal(of(' Ro y '), 'Ro y');
+  // Trimming happens BEFORE the length check, so 24 characters plus spaces is still a valid name…
+  assert.equal(of(`  ${'a'.repeat(24)}  `), 'a'.repeat(24));
+  // …and 25 real characters is still refused, which is the half that must not widen.
+  assert.equal(classifyHello({ name: ` ${'a'.repeat(25)} `, token: 'smoketoken' }, 'smoketoken', true, KEY_A).ok, false);
+  // NAME_RE itself is unchanged: trimming is the narrow fix, loosening the pattern is not.
+  assert.equal(validName('Roy '), true);   // still true — this is why nameTaken has to trim too
+  assert.equal(validName(' Roy'), false);
 });
 
 test('buildJoinLine: the address always, the token only when there is one', () => {
