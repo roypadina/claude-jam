@@ -1583,3 +1583,10 @@ tmux server on any socket, no jam daemon anywhere).
 ### Deferrals this campaign closes, and the ones it opens
 
 Struck-through entries above are discharged. New ones are appended above in date order.
+- 2026-08-31 · **0.24.1 was released without the 19-suite gate.** The account hit its session
+  limit mid-batch and six suites need live `claude` turns, so the release carries the unit suite
+  (474, 0 fail) and the three CI legs only. The security fixes it contains have unit coverage and
+  their canaries were run; what is unproven is the rest of the product against these changes —
+  particularly the backpressure drop, whose false-positive risk (an unlucky joiner on a slow link)
+  no unit test can see. Prove: the full sweep at the next release, or a deliberate run of
+  `smoke-xfer`, `smoke-mirror` and `smoke-scroll` before anyone relies on 0.24.1 remotely.

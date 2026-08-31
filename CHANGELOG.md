@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.24.1
+
+**A security patch.** Upgrade if you run a jam that anything else can reach.
+
+### Security
+
+**An unauthenticated socket could stop the daemon for everybody, with four bytes.** Sending `null`
+on the websocket dereferenced `.t` on it *above* the admission gate, so an admitted guest, a
+waiting knocker and a connection that never said hello could all do it — over `--tunnel`, that is
+anyone holding the URL. Affects every version with the websocket protocol, through 0.24.0.
+
+What made it worse than a crash: tmux and the real `claude` keep running, so the host's pane looks
+completely normal while every participant is disconnected and nobody can reconnect. Frames are
+parsed defensively now, and a wrapper keeps a throw in one message handler from taking the process
+with it.
+
+**Six loopback request bodies did the same**, four of them by walking the prototype
+(`{"kind":"__proto__"}` and friends resolved to `Object.prototype`, truthy, then threw when spread).
+Host-machine-local only — the endpoints are loopback plus the `0700` hook secret — but a local
+crash is still a crash.
+
+**`"Roy "` was a different person from `Roy`, and rendered as them.** A trailing space passed
+validation while the collision check lowercased without trimming, so the roster showed two
+identical rows, the pane showed `[Roy ]: give me the join token` — which reads as the host to a
+human and to the agent — and the impostor could not be kicked, because `/kick` trims its argument,
+finds the real Roy, and then refuses to kick the host. Names are trimmed before they are anyone
+now. One behaviour change: `" Roy"` used to be refused and is now accepted as `Roy`.
+
+### Changed
+
+**A participant who stops reading is dropped rather than buffered forever.** Nothing read
+`ws.bufferedAmount`, so one deaf socket made the daemon hold everything everybody else said, with
+no bound (measured at +139-282 MB). Such a socket is now closed with a stated reason and recovers
+through the existing reconnect tiers, which hand it a fresh mirror frame plus replay. Dropping
+frames instead would leave that client watching a screen that silently disagrees with the host's.
+The host's own client is never dropped by this path.
+
+### Note on verification
+
+Unit suite (474, 0 fail) and the three CI legs. **The 19-suite gate was not run** — the account hit
+its session limit mid-batch and six of those suites need live `claude` turns. Recorded in
+`TESTING.md` rather than implied.
+
+
 ## Unreleased
 
 ### Fixed — an admitted guest could end the jam for everybody with four bytes (security)
