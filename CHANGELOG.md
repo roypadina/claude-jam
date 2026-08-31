@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **`claude-jam --version`** (`-v`, `-V`, `version`) prints the build. It used to fall through to
+  the usage text and exit 0, so the first question asked of every bug report — which build is on
+  PATH — had no answer, on a machine that can easily carry a global npm install *and* a clone. The
+  number is read from `package.json` at runtime, which every install path ships, rather than kept
+  as a constant that would drift. Added ahead of the Windows testing phase, where telling one
+  install from another is the whole game.
+- The launcher/Windows parity lint could not spell an upper-case case label, so it would have
+  stopped covering `-V` silently. Its alphabet now includes upper case.
+
 ## 0.24.1
 
 **A security patch.** Upgrade if you run a jam that anything else can reach.
