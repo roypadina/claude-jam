@@ -34,7 +34,7 @@ Or from a clone on disk:
 ```
 
 `/plugin` lists what is installed and removes it again. The plugin needs `claude-jam` itself on
-`PATH` (`brew install roypadina/tap/claude-jam`, or `npm i -g claude-jam`); it does not install
+`PATH` (`brew install roypadina/tap/claude-jam`, or `npm i -g @roypadina/claude-jam`); it does not install
 it for you, and it says so rather than guessing when it is missing.
 
 ## What `/jam` does that you should know about

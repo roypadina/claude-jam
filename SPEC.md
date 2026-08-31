@@ -2159,7 +2159,7 @@ ACL-restricted on Windows), `openExternal(url)`. macOS keeps today's `pngpaste`/
   current user, and say so in the security docs rather than pretending modes carry over.
 - Keys: verify F2/F3/PgUp/Shift+Enter/Esc sequences under Windows Terminal; the CSI-u newline
   handling already shipped must be re-verified there.
-- Install: **`npm i -g claude-jam`** — Roy approved npm as the Windows (and cross-platform)
+- Install: **`npm i -g @roypadina/claude-jam`** — Roy approved npm as the Windows (and cross-platform)
   distribution on 2026-08-29, and the name is free on the registry (404 as of that date).
   Homebrew stays the macOS path; both install the same package. Publishing checklist: `files`
   whitelist in package.json so smokes/fixtures/spec stay out of the tarball, `bin` entries for
