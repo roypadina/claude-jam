@@ -50,10 +50,7 @@ from Windows.** `TESTING.md` lists each of those with the experiment that would 
 So: worth trying, not yet worth trusting. If you try it —
 
 ```powershell
-# Not on npm yet, so `npm i -g @roypadina/claude-jam` 404s. Build the tarball first:
-git clone https://github.com/roypadina/claude-jam; cd claude-jam
-npm install; npm pack
-npm i -g .\roypadina-claude-jam-0.23.2.tgz
+npm i -g @roypadina/claude-jam
 claude-jam join <invite-link>          # from Windows Terminal, not the legacy cmd.exe console
 ```
 
@@ -83,20 +80,20 @@ claude-jam join <invite-link>          # from Windows Terminal, not the legacy c
 brew install roypadina/tap/claude-jam
 ```
 
-npm installs the same thing anywhere node ≥ 22 runs, and it is the only path on Windows — **but the
-package is not on the registry yet**, so as of 0.23.2 this command 404s:
+npm installs the same thing anywhere node ≥ 22 runs, and it is the only path on Windows:
 
 ```sh
-npm i -g @roypadina/claude-jam   # NOT YET PUBLISHED — 404 until it is
+npm i -g @roypadina/claude-jam
 ```
 
-Until it is published, the npm route is a local tarball, which installs the identical thing and is
-also how the Windows client would be tried today:
+Published as of 0.24.1. The **scope is only how npm names the package** — the commands it installs
+are still `claude-jam` and `jam`. Upgrade with `@latest`, remove with `npm rm -g`. A local tarball
+still works if you want to install a checkout rather than a release:
 
 ```sh
 git clone https://github.com/roypadina/claude-jam && cd claude-jam
-npm install && npm pack        # → roypadina-claude-jam-0.23.2.tgz
-npm i -g ./roypadina-claude-jam-0.23.2.tgz
+npm install && npm pack        # → roypadina-claude-jam-0.24.1.tgz
+npm i -g ./roypadina-claude-jam-0.24.1.tgz
 ```
 
 Or from source:
