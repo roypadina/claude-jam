@@ -111,7 +111,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   // 0.23.3: and the Linux one, which used to be untestable because it was a loop over fs.
   LINUX_SOUNDS, FREEDESKTOP_SOUND_DIR, ALSA_SOUND_DIR, linuxSoundPlan,
   terminalSupport, WINDOWS_TERMINAL_HINT, canAttachTmux, NO_TMUX_ATTACH,
-  windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS,
+  windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS, WIN_VERSION_CMDS,
   // 0.23.6: the hook that could not reach the daemon — the one failure a hook cannot report.
   HOOK_ERROR_FILE, hookErrorNote,
   // v0.32 W2: the WSL2 Windows host — detection, the DrvFs refusal, the path boundary, the join note.
@@ -121,6 +121,8 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 // v0.32 W0: the platform seam, asserted from outside — it is the only module allowed to spawn
 // a platform binary, and this file is what says so.
 import { clipboardImage, notify, playSound, SOUNDS, MAC_SOUND_DIR, soundFile,
@@ -4653,6 +4655,24 @@ test('v0.32 W1 windowsCli: join runs, everything host-side is refused WITH the r
   }
 });
 
+// 0.24.2: which build is this. Both entry points answer it, and the answer is the REAL one — the
+// launcher and cli.mjs are spawned as programs, so a version read from the wrong place, or a
+// package.json the install did not ship, fails here rather than during a bug report.
+test('0.24.2 --version prints the package version, from both entry points', () => {
+  const pkg = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+  const expect = `claude-jam ${pkg.version}`;
+  for (const cmd of WIN_VERSION_CMDS) assert.equal(windowsCli([cmd]).action, 'version', cmd);
+  // The bash launcher is POSIX-only; cli.mjs on Windows is the branch above, and it is exercised
+  // by running cli.mjs itself, which forwards to the launcher off win32.
+  if (process.platform === 'win32') return;
+  for (const entry of ['./claude-jam', './cli.mjs']) {
+    const r = spawnSync(fileURLToPath(new URL(entry, import.meta.url)), ['--version'],
+      { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${entry}: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), expect, entry);
+  }
+});
+
 // A lint, not a behaviour test: the launcher is the one dispatcher, and this file must not fall
 // behind it. When somebody adds `claude-jam mirror` to the bash `case`, a Windows user typing it
 // would otherwise get the generic usage instead of a sentence saying why it is not there.
@@ -4662,11 +4682,14 @@ test('v0.32 W1 windowsCli classifies every subcommand the launcher dispatches', 
   // The label alphabet only — a `[^)]*` here matches across newlines and swallows the comment
   // block above each case, which is how the first run of this lint "found" a subcommand called
   // "host # v0.33: share the session…".
-  const labels = [...body.matchAll(/^ {2}([a-z|_-]+)\)/gm)].map((m) => m[1]);
+  // Uppercase is in the alphabet because 0.24.2 added `-V`, and an alphabet that cannot spell a
+  // label does not report it missing — it silently stops covering it, which is the one failure
+  // mode a lint must not have.
+  const labels = [...body.matchAll(/^ {2}([A-Za-z|_-]+)\)/gm)].map((m) => m[1]);
   const cmds = labels.flatMap((l) => l.split('|')).map((c) => c.trim()).filter((c) => c && c !== '*');
   assert.ok(cmds.length >= 14, cmds.join(' ')); // it had 16 at v0.34; a parse that finds none must fail
   assert.ok(cmds.includes('host') && cmds.includes('join'), cmds.join(' '));
-  const known = new Set([WIN_JOIN_CMD, ...WIN_HOST_SIDE_CMDS, ...WIN_HELP_CMDS]);
+  const known = new Set([WIN_JOIN_CMD, ...WIN_HOST_SIDE_CMDS, ...WIN_HELP_CMDS, ...WIN_VERSION_CMDS]);
   for (const c of cmds) {
     assert.ok(known.has(c), `the launcher dispatches \`${c}\` and windowsCli has never heard of it`);
     // And it must not answer with the generic "unknown word" usage for something that exists.

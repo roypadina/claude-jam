@@ -8,6 +8,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
   echo "usage: claude-jam                  (no arguments) the launcher menu: host, join,"
   echo "                                   my jams, end a jam. --no-menu prints this instead."
+  echo "       claude-jam --version        which build this is (put it in a bug report)"
   echo "usage: claude-jam host [--port N] [--name X] [--cwd DIR] [--tmux NAME] [--token V]"
   echo "                [--invite-only] [--jam-name X] [--no-announce] [--view]"
   echo "                [--tunnel] [--funnel]"
@@ -116,5 +117,9 @@ case "$cmd" in
   --no-menu) usage 0 ;;
   # -h/--help/help is a question, not a mistake: the same text, exit 0, and never a jam.
   -h|--help|help) usage 0 ;;
+  # 0.24.2: which build is this. Read from package.json, which every install path ships, because a
+  # version constant in a second file is a drift bug waiting to be written. The path goes on argv
+  # so a directory with a space in it still works.
+  -v|-V|--version|version) exec node -p "'claude-jam ' + (require(process.argv[1]).version || 'unknown')" "$DIR/package.json" ;;
   *) usage 2 ;;
 esac

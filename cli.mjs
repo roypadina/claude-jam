@@ -15,6 +15,7 @@
 //            everything host-side is refused with its reason and the WSL2 route.
 // Homebrew installs the launcher directly and never comes through here.
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { windowsCli, WIN_USAGE } from './lib.mjs';
@@ -37,7 +38,15 @@ if (process.platform !== 'win32') {
 
 const plan = windowsCli(argv);
 
-if (plan.action === 'join') {
+if (plan.action === 'version') {
+  // The Windows half of `--version`; the bash launcher answers the same question with its own
+  // one-line read of the same file. `unknown` rather than a crash: a version number is a label on
+  // a bug report, and a tool that dies printing its own name is a worse answer than a vague one.
+  let v = 'unknown';
+  try { v = JSON.parse(readFileSync(path.join(HERE, 'package.json'), 'utf8')).version || v; } catch { /* keep unknown */ }
+  console.log(`claude-jam ${v}`);
+  process.exit(0);
+} else if (plan.action === 'join') {
   // The renderers read process.argv themselves — the launcher hands them `$@` after `join`, so
   // this hands them the same thing. A dynamic import, not a spawn, for the same reason
   // client.mjs uses one: one process keeps the tty, the signals and the exit code.

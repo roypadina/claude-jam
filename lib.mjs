@@ -6216,6 +6216,7 @@ export const WIN_HOST_WHY = 'hosting a jam needs tmux and the claude CLI, which 
 export const WIN_USAGE = [
   'usage: claude-jam join <invite-link>',
   '       claude-jam join <ws-url> --name X [--token Y] [--basic] [--no-sound]',
+  '       claude-jam --version   which build this is (put it in a bug report)',
   '',
   'On Windows claude-jam is a CLIENT — it joins a jam somebody else is hosting.',
   `Hosting, the launcher menu, sessions, invites and \`find\` are not here: ${WIN_HOST_WHY}`,
@@ -6234,6 +6235,13 @@ export const WIN_JOIN_CMD = 'join';
 export const WIN_HOST_SIDE_CMDS = ['host', 'adopt', 'sessions', 'ls', 'find', 'discover',
   'end', 'kill', 'clean', 'invite', 'invites', 'remote'];
 export const WIN_HELP_CMDS = ['-h', '--help', 'help', '--no-menu'];
+// The first question asked of any bug report is which build produced it, and until 0.24.2 there
+// was no way to answer it: `--version` fell through to the usage text and exited 0, so a Windows
+// machine with both a global npm install and a clone could not say which one was on PATH. The
+// answer is read from package.json at runtime rather than kept as a constant here — every install
+// path ships it (npm always includes it, Homebrew's `libexec.install Dir["*"]` copies it, a clone
+// has it), and a second copy of a version number is a drift bug waiting to be written.
+export const WIN_VERSION_CMDS = ['-v', '-V', '--version', 'version'];
 
 export function windowsCli(argv = []) {
   const list = (Array.isArray(argv) ? argv : []).map((a) => String(a ?? ''));
@@ -6243,6 +6251,7 @@ export function windowsCli(argv = []) {
   // Windows the same keystroke gets the usage — with the reason at the top of it, not hidden.
   if (!cmd) return { action: 'usage', code: 0 };
   if (WIN_HELP_CMDS.includes(cmd)) return { action: 'usage', code: 0 };
+  if (WIN_VERSION_CMDS.includes(cmd)) return { action: 'version', code: 0 };
   if (cmd === WIN_JOIN_CMD) {
     // `claude-jam join` with nothing after it opens the menu's Join screen on POSIX, which is
     // the network picker. Same reason: no menu here, so say what to type instead.
