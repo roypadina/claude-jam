@@ -190,14 +190,23 @@ await step('…and so is a name that only LOOKS different — a trailing space i
       (f) => f.t === 'error' && /already taken here/.test(f.text));
     await dup.wantClose(4409);
   }
-  // A TAB never gets that far — NAME_RE has always refused it, and 4400 is a different refusal.
-  const tabbed = peer({ name: '\tEli', token: TOKEN });
+  // An INTERIOR control byte never gets that far — NAME_RE has always refused it, and 4400 is a
+  // different refusal. (A tab AROUND the name is trimmed away by v0.24.1 and then collides, which
+  // is why this one has to be interior to test what it means to test.)
+  const tabbed = peer({ name: 'E\tli', token: TOKEN });
   await tabbed.wantClose(4400);
   // An INTERIOR space is a different name and must still get in — "E li" does not read as "Eli".
   const other = peer({ name: 'E li', token: TOKEN });
   const w = await other.want('welcome', (f) => f.t === 'welcome');
   eq(w.you, 'E li', 'an interior space is a different person and still joins');
-  console.log('      "Eli ", "Eli  ", "eLi " refused 4409; "\\tEli" 4400; "E li" admitted');
+  // And the OTHER half of v0.24.1: the name is trimmed before it is validated, so a free name with
+  // whitespace round it joins under the trimmed one. `" Noa"` was refused outright before this.
+  const padded = peer({ name: '  Ada  ', token: TOKEN });
+  const pw = await padded.want('welcome', (f) => f.t === 'welcome');
+  eq(pw.you, 'Ada', 'a padded free name joins under the trimmed one');
+  if (!pw.roster.includes('Ada')) throw new Error(`roster is ${pw.roster.join(',')}`);
+  if (pw.roster.some((n) => n !== n.trim())) throw new Error(`a roster name carries whitespace: ${JSON.stringify(pw.roster)}`);
+  console.log(`      "Eli ", "Eli  ", "eLi " refused 4409; "E\\tli" 4400; "E li" admitted; "  Ada  " joined as "Ada"`);
 });
 
 await step('a wrong token knocks, and admit ok:false closes it 4403', async () => {

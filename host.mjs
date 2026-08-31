@@ -75,6 +75,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   wslTranslatePath,
   // v0.34.2: the envelope every frame has to be before a handler is allowed to read `m.t`.
   parseFrame,
+  // v0.24.1: and what to do about a participant who has stopped reading.
+  backpressureMax, backpressureDrop, behindReason, BEHIND_CODE, BACKPRESSURE_DWELL_MS,
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
@@ -1070,7 +1072,40 @@ let toolResults = 0; // `⎿` lines broadcast this turn; capped so a big grep ca
 
 function startTurn() { busyGen++; toolResults = 0; }
 
-function send(ws, ev) { try { ws.send(JSON.stringify(ev)); } catch { /* closing */ } }
+// v0.24.1: the one funnel every outbound frame goes through, so it is the one place that can ask
+// whether the far end is still taking them. See backpressureMax/backpressureDrop in lib.mjs for
+// the threshold, the dwell, and why the answer is "drop the socket" rather than "drop frames".
+// Both knobs are overridable, and for the same reason JAM_BRIEF_MIN_GAP is: the shipped values are
+// 40 MB and 30 s, so an end-to-end test of them would have to buffer 40 MB and then wait half a
+// minute per case. Internal JAM_* env vars like JAM_HOOK_SECRET and JAM_TMUX_BIN, deliberately not
+// flags — nothing a human reads gains an entry. Absent = the shipped values.
+const envNum = (k) => { const v = Number(process.env[k]); return Number.isFinite(v) && v > 0 ? v : null; };
+const BACKPRESSURE_MAX = envNum('JAM_BACKPRESSURE_MAX') ?? backpressureMax(HISTORY_MAX);
+const BACKPRESSURE_DWELL = envNum('JAM_BACKPRESSURE_DWELL') ?? BACKPRESSURE_DWELL_MS;
+function send(ws, ev) {
+  try {
+    ws.send(JSON.stringify(ev));
+    watchBehind(ws);
+  } catch { /* closing */ }
+}
+
+function watchBehind(ws) {
+  if (ws.jamBehindDropped) return; // already closed for this; do not log it once per frame
+  const me = clients.get(ws);
+  // The host's own client is never dropped by this path. It is the client the launcher spawned on
+  // this machine, it is the only one that can /end, /kick or take the keyboard, and disconnecting
+  // the person running the jam to protect the jam is not a trade worth making.
+  if (me?.host) return;
+  const d = backpressureDrop({ buffered: ws.bufferedAmount, since: ws.jamBehindAt,
+    now: Date.now(), max: BACKPRESSURE_MAX, dwell: BACKPRESSURE_DWELL });
+  ws.jamBehindAt = d.since;
+  if (!d.drop) return;
+  ws.jamBehindDropped = true;
+  console.log(`[backpressure] ${me?.name || 'an unadmitted socket'} has held `
+    + `${humanBytes(ws.bufferedAmount)} unread for ${Math.round(d.held / 1000)}s `
+    + `(cap ${humanBytes(BACKPRESSURE_MAX)}) — disconnecting them; the jam is unaffected`);
+  try { ws.close(BEHIND_CODE, behindReason(ws.bufferedAmount, BACKPRESSURE_DWELL)); } catch { /* already gone */ }
+}
 
 // Errors are host->client events too, so they carry id/ts like everything else.
 function sendError(ws, text) { send(ws, { t: 'error', id: nextId++, ts: Date.now(), text }); }
@@ -3499,7 +3534,12 @@ function streamXfer(ws, header, data) {
   }
   send(ws, { ...header, id: nextId++, ts: Date.now() });
   // A few frames per tick, so a 50 MB transcript does not stall the hook endpoints.
-  pumpFrames(xferFrames(header.xfer, data), (f) => send(ws, f), () => clients.has(ws));
+  // v0.24.1: and it never gets ahead of what the socket has drained. One tick's worth in flight is
+  // plenty for throughput on any link and keeps a 50 MB transfer from parking 50 MB in the
+  // outbound buffer, which the backpressure watchdog would then read as a client that had stopped
+  // reading. A transfer to a slow guest is now slow, which is the honest outcome.
+  pumpFrames(xferFrames(header.xfer, data), (f) => send(ws, f), () => clients.has(ws),
+    undefined, () => ws.bufferedAmount < XFER_FRAME_MAX * 8);
 }
 
 // --- v0.12: the session transcript ---
