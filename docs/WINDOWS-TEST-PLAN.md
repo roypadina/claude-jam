@@ -76,12 +76,17 @@ Never do these, on either machine:
    M holds the mirror image of that listener open, so a post from W wakes M's session with no
    polling and no scheduled wakeups on either side.
 
-   **What must never go on that topic:** ntfy.sh is a public server and the topic name is the only
-   thing protecting it. No join token, no `cjam1_…` invite link, no `--tunnel` URL (a tunnel URL
-   plus a token *is* access to a live Claude session), no host key, no hook secret, no transcript
-   content. Status, phase numbers, PASS/FAIL, and LAN/tailnet addresses only — which is enough,
-   because the jams in this plan run **knock-only**: W connects and M accepts, so no secret ever
-   has to cross a channel at all. Anything genuinely secret goes through Roy.
+   **What may and may not go on that topic.** ntfy.sh is a public server and the topic name — 64
+   bits of randomness — is the only thing protecting it. **Roy has authorised join tokens, `cjam1_…`
+   invite links and `--tunnel` URLs on it for this testing phase** (2026-09-02): the jams are
+   throwaway, short-lived and nobody else is joining, and having M able to hand W a relay URL
+   directly is worth more than the relaying it saves. Take the trade with eyes open — an invite link
+   needs no host approval, so for the life of that jam the topic name *is* the door.
+
+   Still never on it, and these are not the same question: the **host key** (it is host authority —
+   a process holding it can type into the real Claude session), the **hook secret**, and
+   **transcript content** (the conversation, which is not ours to publish to a third-party server).
+   Rotate nothing through it that outlives the jam.
 5. **W's findings come home as a file**, uploaded through the product: write
    `~/win-findings.md`, then `/send ~/win-findings.md` from W's client. M approves it, and it lands
    in the host's `jam-uploads/`. That delivers the report and tests `/send` in one move.
