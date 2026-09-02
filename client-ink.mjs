@@ -30,7 +30,7 @@ import React from 'react';
 import { Box, Text, Static, render as inkRender, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { Select, Spinner, Badge } from '@inkjs/ui';
-import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage, historyDivider, toolLiveLine,
+import { parseClientLine, inviteLines, labelWidth, mdLite, userColor, nextBlock, extractKeys, inputControls, applyInputAct, KEY_SEQS, PASSTHROUGH_SEQS, onboardingLines, fitFrame, toolTurnSummary, LIVE_TOOL_ROWS, humanBytes, resumeInstructions, xferFrames, pumpFrames, approvalBar, barKeyAction, APPROVAL_COMMANDS, claudeTarget, reconnectMessage, historyDivider, toolLiveLine,
   // v0.17 Batch P: the bell and its gate, @mentions, the RTT chip, jam's own autocomplete.
   BELL, bellAllowed, mentionsMe, rttText, commandMatches, COMMAND_HINTS_MAX,
   // v0.18: the host ended the jam — one line, exit 0, and no reconnect at a daemon that is
@@ -318,8 +318,18 @@ inkStdin.unref = () => inkStdin;
     // v0.29: and a task somebody wants to run on THIS machine comes out ahead of both. It is the
     // most consequential thing this client ever puts on screen, and Esc has to reach a running
     // one without competing with the mirror's "back to live".
-    const rest = barKeys(peerKeys(scrollKeys(r.text)));
-    if (rest) inkStdin.write(rest);
+    // 0.24.2: and the control chords ink-text-input would TYPE come out here too. Its only guard
+    // is Ctrl+C, so Ctrl+U used to insert a literal `u` into the message — the one key a terminal
+    // user presses to wipe a line. The decision is inputControls'; this applies it.
+    const ctl = inputControls(barKeys(peerKeys(scrollKeys(r.text))));
+    for (const act of ctl.acts) {
+      const next = applyInputAct(act, store.input);
+      if (next === store.input) continue;
+      store.input = next; // outside React, for the same reason the single-key rule needs it
+      setInputExternal(next);
+      touch();
+    }
+    if (ctl.text) inkStdin.write(ctl.text);
   });
   process.stdin.resume();
 }
