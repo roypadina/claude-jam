@@ -1,6 +1,6 @@
 {
   "name": "@roypadina/claude-jam",
-  "version": "0.24.1",
+  "version": "0.24.2",
   "description": "Two or more humans, one real interactive Claude Code session",
   "license": "MIT",
   "author": "Roy Padina",
