@@ -112,7 +112,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   LINUX_SOUNDS, FREEDESKTOP_SOUND_DIR, ALSA_SOUND_DIR, linuxSoundPlan,
   terminalSupport, WINDOWS_TERMINAL_HINT, canAttachTmux, NO_TMUX_ATTACH,
   windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS, WIN_VERSION_CMDS,
-  inputControls, applyInputAct, INPUT_CTRL_KEEP, INPUT_CTRL_ACTS,
+  inputControls, applyInputAct, INPUT_CTRL_KEEP, INPUT_CTRL_ACTS, attachTargetFor,
   // 0.23.6: the hook that could not reach the daemon — the one failure a hook cannot report.
   HOOK_ERROR_FILE, hookErrorNote,
   // v0.32 W2: the WSL2 Windows host — detection, the DrvFs refusal, the path boundary, the join note.
@@ -4678,6 +4678,50 @@ test('v0.32 W1 windowsCli: join runs, everything host-side is refused WITH the r
   for (const gone of ['claude-jam host ', 'claude-jam sessions', 'claude-jam invite ', 'the launcher menu:']) {
     assert.ok(!usage.includes(gone), `the Windows usage offers ${gone}`);
   }
+});
+
+// v0.24.2: `--attach --tmux NAME` with no --port looked on the DEFAULT port's socket, so a jam on
+// any other port was reported missing while `claude-jam sessions` listed it live. Roy hit it with
+// two real jams (wintest :7801, friends :7811). The name is the only identifier a human has at
+// that point, so it is resolved rather than demanded.
+test('v0.24.2 attachTargetFor resolves a jam by NAME across ports', () => {
+  const rows = [
+    { name: 'wintest', port: 7801, socket: 'claude-jam-7801', state: 'live' },
+    { name: 'friends', port: 7811, socket: 'claude-jam-7811', state: 'live' },
+    // A row with no live tmux session has no name, and must not be a candidate.
+    { name: null, port: 7821, socket: 'claude-jam-7821', state: 'no-session' },
+  ];
+  const hit = attachTargetFor(rows, 'friends');
+  assert.equal(hit.ok, true);
+  assert.equal(hit.port, 7811);
+  assert.equal(hit.socket, 'claude-jam-7811');
+
+  // The default name resolves the same way — nothing special-cases 7777 any more.
+  assert.equal(attachTargetFor([{ name: 'claude-jam', port: 7777, socket: 'claude-jam-7777' }], 'claude-jam').port, 7777);
+
+  // No match names what IS live, which the old refusal did not: it named only what was asked for.
+  const none = attachTargetFor(rows, 'nosuch');
+  assert.equal(none.ok, false);
+  assert.deepEqual(none.names, ['wintest', 'friends']);
+  assert.match(none.why, /no jam called "nosuch"/);
+  assert.match(none.why, /live right now: wintest, friends/);
+  // And with nothing running at all it says so rather than printing an empty list.
+  assert.match(attachTargetFor([], 'x').why, /no jams are running right now/);
+
+  // AMBIGUOUS is refused, never guessed: `claude-jam clean` can leave one name on two sockets, and
+  // attaching a human to the jam they did not mean is worse than a message naming both ports.
+  const two = attachTargetFor([
+    { name: 'dup', port: 7900, socket: 'claude-jam-7900' },
+    { name: 'dup', port: 7850, socket: 'claude-jam-7850' },
+  ], 'dup');
+  assert.equal(two.ok, false);
+  assert.deepEqual(two.ambiguous, [7850, 7900]);
+  assert.match(two.why, /live on more than one tmux server \(ports 7850, 7900\)/);
+  assert.match(two.why, /--tmux dup --port <one of those>/);
+
+  // Total on junk: a row that is not an object, a missing port, a null name list.
+  assert.equal(attachTargetFor(null, 'x').ok, false);
+  assert.equal(attachTargetFor([null, 'x', { name: 'a' }, { port: 1 }], 'a').ok, false);
 });
 
 // 0.24.2, and it is a bug the Windows run found on every platform: ink-text-input guards exactly

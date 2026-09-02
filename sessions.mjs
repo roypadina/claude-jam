@@ -42,7 +42,7 @@ import { OWNED_OPTIONS, SESSION_FILE, portFromStateDir, parseSessionJson, verify
   // say yes at all. The tmux and fs calls that feed them are below, and all of them are reads.
   resolveAdoptTarget, PANE_QUERIES, parsePaneInfo, paneCommandNote, claudeProjectGlobs,
   pickAdoptSession, sessionPreview, adoptConfirmText, adoptNoTmuxText, adoptAlreadyJamText,
-  adoptAlreadyAdoptedText, adoptPlan, resolveConfigDir } from './lib.mjs';
+  adoptAlreadyAdoptedText, adoptPlan, resolveConfigDir, attachTargetFor } from './lib.mjs';
 
 // `fileURLToPath`, NOT `new URL(...).pathname` (0.23.3). On Windows the pathname of a file: URL is
 // `/C:/dir/file.mjs` — with a leading slash — so `path.dirname` and `path.resolve` both build a path
@@ -278,6 +278,13 @@ export async function listRows(tmpdir = stateDir()) {
     });
   }
   return rows;
+}
+
+// v0.24.2: the async half of attachTargetFor — enumerate with the same listRows() the listing
+// uses, then let the pure function decide. `stateDir()` respects TMPDIR, so a test's jams and a
+// human's never see each other.
+export async function findAttachTarget(name, tmpdir = stateDir()) {
+  return attachTargetFor(await listRows(tmpdir), name);
 }
 
 // ------------------------------------------------------------------ ending one ----

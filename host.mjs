@@ -80,7 +80,8 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
 } from './lib.mjs';
 // The tmux/fs/HTTP half of v0.18, shared with the `claude-jam sessions|end|clean` command line so the
 // launcher's `[e]nd it` and `claude-jam end` are one code path with one set of gates.
-import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy } from './sessions.mjs';
+import { ownedSession, killOwned, removeStateDir, hasSession, endJam, daemonHealth, portBusy,
+  findAttachTarget } from './sessions.mjs';
 // v0.32 W0: $TMPDIR, and every file that must be readable by its owner and nobody else, come
 // from the one module that knows what operating system this is.
 // v0.23: and so does mDNS — advertising is a platform binary, browsing is a platform binary.
@@ -209,6 +210,11 @@ opts.state ||= stateDir(opts.port);
 // `--tmux-socket default` puts jam back on the user's own server (F3's bare-key binding is then
 // skipped, because on a shared server it would be theirs too).
 let SOCKET = tmuxSocketFor(opts.port, opts.tmuxSocket);
+// v0.24.2: whether the human PINNED the port or the socket, read off argv rather than inferred
+// from the value — 7777 is both the default and a legitimate choice, so a value comparison cannot
+// tell them apart. Only `--attach` uses these; everything else keeps its old behaviour.
+const PORT_GIVEN = process.argv.includes('--port');
+const SOCKET_GIVEN = process.argv.includes('--tmux-socket');
 const ownSocket = () => SOCKET !== TMUX_DEFAULT_SOCKET;
 // v0.33: the pane this daemon drives instead of one it created, and the tmux server that pane
 // lives on. Validated here rather than trusted, because `--adopt-pane` becomes the `-t` of every
@@ -449,6 +455,20 @@ async function retargetForAdopt() {
 // v0.18-5: `claude-jam host` when the name it wants is taken, and `claude-jam host --attach`. A jam of jam's
 // own offers four ways out; anything else is refused untouched — that session belongs to
 // somebody, and jam has exactly one thing to say about it.
+// v0.24.2: `--attach --tmux NAME` with no --port used to look on the DEFAULT port's socket, so it
+// could not find a jam on any other port — see attachTargetFor. An explicit --port or
+// --tmux-socket is still the override and is left exactly alone.
+async function resolveAttachSocket() {
+  if (!opts.attach || PORT_GIVEN || SOCKET_GIVEN) return;
+  const hit = await findAttachTarget(opts.tmux);
+  if (!hit.ok) { console.error(hit.why); process.exit(1); }
+  if (hit.port === opts.port && (hit.socket || TMUX_DEFAULT_SOCKET) === SOCKET) return;
+  opts.port = hit.port;
+  opts.viewPort = hit.port + 1;
+  opts.state = stateDir(hit.port);
+  SOCKET = hit.socket || tmuxSocketFor(hit.port, opts.tmuxSocket);
+}
+
 async function resolveTargetSession() {
   const taken = hasSession(opts.tmux, SOCKET);
   const owned = taken ? ownedSession(opts.tmux, SOCKET) : null;
@@ -491,6 +511,7 @@ async function launch() {
   // v0.33: an adopted jam never contends for a name a human chose — the tmux session it makes is
   // the daemon's own and nothing looks at it, so it takes the first free one rather than asking.
   if (ADOPTED) await retargetForAdopt();
+  await resolveAttachSocket();
   const { attach } = await resolveTargetSession();
   if (attach) return attachHostClient(attach);
   if (opts.resume) console.log(`resuming session ${opts.resume}`);
