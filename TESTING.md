@@ -1208,6 +1208,25 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   CR, indistinguishable from Enter, so the docs offer `\` at end of line and a `sendInput` binding
   to `\\u001b[13;2u` in `settings.json`. The binding recipe has never been applied to a real
   `settings.json`. Prove: apply it, press the key, see a newline in the input field.
+- 2026-09-02 · **WSL client: the toast and the sound are now PROVEN TO FIRE, and only "seen" and
+  "heard" remain deferred.** The first real WSL client (dell-2026, WSL 2.6.3) found that a WSL
+  client is `process.platform === 'linux'`, so both seams took the Linux branches — no notification
+  path exists there at all, and a fresh distribution has no `paplay`, no `aplay` and no freedesktop
+  theme, so every sound was silence and only the BEL fired. 0.24.2 routes both through interop.
+  Measured after the fix, on that machine, three ways: `soundFile('nudge')` resolves to
+  `powershell.exe` + `C:\Windows\Media\tada.wav` (mode `wav`); a direct seam call returned spawn
+  status **0**, having played the file to completion, and `notify()` returned **true**; and a LIVE
+  jam nudge spawned **both** PowerShell processes, caught by PID with their command lines —
+  `PID 22060` the `SoundPlayer(...).PlaySync()` one and `PID 35364` the BurntToast/WinRT toast one,
+  0.003 s apart. What is STILL deferred, and stays so with nobody at that keyboard: whether the
+  sound is **audible**, and whether the toast is **seen** on screen within its lifetime (BurntToast
+  routes to the Action Center). Spawn-and-exit-0 is the evidence that exists. Prove the rest: a
+  person at that machine, or a screenshot taken inside the toast's lifetime.
+  - An earlier `matched=0` from a process watcher on the same machine was a non-overlapping
+    strict-regex window, not a failure, and was explained rather than left as a doubt: an
+    interop-spawned `powershell.exe` can present a null `CommandLine` in `Win32_Process`. The
+    broadened watcher then caught both, plus an unrelated PowerShell from the tester's own tooling,
+    which is what proves the watcher could see them at all.
 - 2026-08-30 · **W1: no toast has been seen.** `notify()` on Windows spawns a PowerShell script
   that tries BurntToast and falls back to the WinRT `ToastText02` notifier under PowerShell's own
   AppId. Unit tests cover the argv and that title and body are never inside the script; whether a
@@ -1220,6 +1239,10 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   kind took (`# v0.32 W1 sound modes on <release>: {...}`) rather than asserting a branch, because
   falling back to the beep is a correct answer. Prove: read that line from the first Windows CI
   run, and separately have a person hear a knock and a join and confirm they are distinguishable.
+  **Partly discharged 2026-09-02 for the WSL path** (see the 2026-09-02 entry above): a real
+  machine resolved `nudge` to `C:\Windows\Media\tada.wav` and played it to completion, so the
+  candidate list is no longer a guess for at least that file on Windows 11 26200. The NATIVE win32
+  client remains unmeasured, and audibility remains a human claim.
 - 2026-08-30 · **W1: `/paste` has never moved a real image on Windows.** The CI test proves the
   whole FAILURE path (powershell.exe found, the script parsed and ran, "no image on the clipboard"
   surfaced, the temp directory removed) because a CI runner's clipboard is empty. The success path
