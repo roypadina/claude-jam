@@ -4679,6 +4679,28 @@ test('v0.32 W1 windowsCli: join runs, everything host-side is refused WITH the r
   }
 });
 
+// 0.24.2, from the first real WSL client: a WSL client is `process.platform === 'linux'`, so it
+// took the Linux branches — no notification at all, and on a fresh distribution (no paplay, no
+// aplay, no freedesktop theme) no sound either. The person is sitting at a Windows desktop, so the
+// Windows seam is the right one, reached the way the clipboard already reaches it. The DECISION is
+// still winSoundPlan's; what is new is that its `exists` probe can answer about a Windows path from
+// inside WSL, because wslTranslatePath knows what `C:\Windows\Media\x.wav` is called there.
+test('0.24.2 a WSL client resolves the WINDOWS sound, probing through /mnt/c', () => {
+  const onWindowsDrive = new Set(['/mnt/c/Windows/Media/tada.wav']); // nudge's first candidate
+  const exists = (f) => {
+    const t = wslTranslatePath(f, { distro: 'Ubuntu' });
+    return Boolean(t.path) && onWindowsDrive.has(t.path);
+  };
+  const plan = winSoundPlan('nudge', exists, { WINDIR: 'C:\\Windows' });
+  assert.equal(plan.mode, 'wav');
+  assert.equal(plan.file, 'C:\\Windows\\Media\\tada.wav');
+  // And with nothing on the drive it is the beep PATTERN, which needs no file at all — so a
+  // distribution that cannot see %WINDIR% still gets a knock that is not a join.
+  const beep = winSoundPlan('nudge', () => false, { WINDIR: 'C:\\Windows' });
+  assert.equal(beep.mode, 'beep');
+  assert.notEqual(beep.args.join(' '), winSoundPlan('knock', () => false, {}).args.join(' '));
+});
+
 // 0.24.2: which build is this. Both entry points answer it, and the answer is the REAL one — the
 // launcher and cli.mjs are spawned as programs, so a version read from the wrong place, or a
 // package.json the install did not ship, fails here rather than during a bug report.

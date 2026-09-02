@@ -8,6 +8,17 @@
   number is read from `package.json` at runtime, which every install path ships, rather than kept
   as a constant that would drift. Added ahead of the Windows testing phase, where telling one
   install from another is the whole game.
+- **A nudge to a WSL client was a terminal bell and nothing else.** A client inside WSL is
+  `process.platform === 'linux'`, so `notify()` and `playSound()` took the Linux branches — and
+  Linux has no notification path at all, while a fresh distribution has no `paplay`, no `aplay` and
+  no freedesktop sound theme. So the toast was UNREACHABLE BY CONSTRUCTION and every sound was
+  silence, on the one platform where the person is provably sitting at a Windows desktop looking at
+  Windows Terminal. A feature whose entire job is "look at your screen" produced nothing visible or
+  audible. Found on the first real WSL client (dell-2026, 2026-09-02). Both now fall through to the
+  Windows seam through interop, exactly as the clipboard already does — a toast from
+  `powershell.exe`, and a `.wav` from `%WINDIR%\Media` probed as `/mnt/c/Windows/Media/…` because
+  that is what the path is called from inside WSL, with the beep pattern when even that is absent.
+  A configured Linux desktop still wins: somebody who installed a player and a theme meant it.
 - **The join block printed one address, and picked it by accident.** `externalIp()` spawned a bare
   `tailscale`, which macOS keeps inside the app bundle and off PATH — the very reason
   `resolveTailscale()` exists — so the probe always failed there and the fallback took whichever

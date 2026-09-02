@@ -30,7 +30,7 @@ import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, va
   aclUser, aclArgs, parseIcaclsPrincipals,
   PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, winSoundPlan,
   linuxSoundPlan,
-  parseWslInfo, WSL_NO_INTEROP, windowsUncPath, WSL_UNC_MODERN } from './lib.mjs';
+  parseWslInfo, WSL_NO_INTEROP, windowsUncPath, WSL_UNC_MODERN, wslTranslatePath } from './lib.mjs';
 
 export const IS_MAC = process.platform === 'darwin';
 export const IS_WINDOWS = process.platform === 'win32';
@@ -201,6 +201,19 @@ function notifyWindows(title, body) {
 
 export function notify(title, body) {
   if (IS_WINDOWS) return notifyWindows(title, body);
+  // 0.24.2, found on the first real WSL client (dell-2026, 2026-09-02): a WSL client is
+  // `process.platform === 'linux'`, so it took the Linux branch — which has no notification at
+  // all — and the toast was UNREACHABLE BY CONSTRUCTION on the one platform where the person is
+  // demonstrably sitting at a Windows desktop looking at Windows Terminal. A nudge whose entire
+  // job is "look at your screen" produced nothing but a BEL.
+  //
+  // So WSL takes the Windows branch, exactly as the clipboard already does, and for the same
+  // reason: `powershell.exe` is on PATH through interop, and this file's own W2 note says the
+  // Linux branches are the default with "the Windows one reachable when it is the better answer".
+  // Not gated on WSL_INTEROP — that variable is absent for a daemon started by systemd, and
+  // spawn's own 'error' handler makes a wrong guess cost one silent child rather than a throw,
+  // which is the policy clipboardImage settled on.
+  if (IS_WSL()) return notifyWindows(title, body);
   if (!IS_MAC) return false;
   try {
     const child = spawn('osascript', ['-e', 'on run argv',
@@ -262,6 +275,22 @@ export function soundFile(kind) {
       // The binary is on PATH or it is not; spawn's 'error' handler is what finds out, and a wrong
       // guess costs one silent child rather than an exception. See linuxSoundPlan's own note.
       hit = linuxSoundPlan(k, fs.existsSync);
+      // 0.24.2: and under WSL, fall through to the WINDOWS sound rather than to silence. Measured
+      // on the first real WSL client: no paplay, no aplay, no freedesktop theme — which is the
+      // ordinary state of a fresh distribution — so every sound was silence while the person sat
+      // at a Windows desktop that has %WINDIR%\Media. A configured Linux desktop still wins,
+      // because someone who installed a player and a theme meant it; this is the fallback.
+      //
+      // The `exists` probe is the interesting part: winSoundPlan asks about `C:\Windows\Media\x.wav`,
+      // which from inside WSL is `/mnt/c/Windows/Media/x.wav`, so the existing translator answers
+      // it — and when it cannot, winSoundPlan's own beep-pattern branch needs no file at all.
+      if (!hit && IS_WSL()) {
+        const plan = winSoundPlan(k, (f) => {
+          const t = wslTranslatePath(f, wslInfo());
+          return Boolean(t.path) && fs.existsSync(t.path);
+        }, { WINDIR: 'C:\\Windows' });
+        if (plan) hit = { bin: POWERSHELL, file: plan.file, args: plan.args, env: plan.env, mode: plan.mode };
+      }
     }
   }
   soundCache.set(k, hit);
