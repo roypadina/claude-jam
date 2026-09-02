@@ -298,7 +298,11 @@ are the point.
 These are predictions, written before the run so they cannot be retrofitted. Each names what would
 prove it.
 
-- **S1 — the join block's address is chosen by accident.** `externalIp()` in `host.mjs` spawns a
+- **S1 — FIXED 2026-09-02, and it was real.** Measured: M's join block printed only
+  `ws://100.86.8.97:7801` (tailnet) while W reached **both** that and `192.168.0.144:7801`. So the
+  LAN guest's address was simply missing. The fix prints every address labelled with its network,
+  resolves the Tailscale CLI properly instead of spawning it bare, and puts every address into an
+  invite link. The prediction, kept for the record: `externalIp()` in `host.mjs` spawns a
   bare `tailscale`, but on macOS the CLI lives inside the app bundle and is not on PATH (that is
   why `resolveTailscale()` exists, and this call does not use it). The fallback then walks
   `os.networkInterfaces()` and returns the first non-internal IPv4 — which on M is the **tailnet**

@@ -8,6 +8,17 @@
   number is read from `package.json` at runtime, which every install path ships, rather than kept
   as a constant that would drift. Added ahead of the Windows testing phase, where telling one
   install from another is the whole game.
+- **The join block printed one address, and picked it by accident.** `externalIp()` spawned a bare
+  `tailscale`, which macOS keeps inside the app bundle and off PATH — the very reason
+  `resolveTailscale()` exists — so the probe always failed there and the fallback took whichever
+  non-internal IPv4 `os.networkInterfaces()` listed first. On a Mac with Tailscale that is the
+  tailnet address, so **a guest on the same LAN was handed the one address they cannot reach**, and
+  the documented "the printed line already uses the tailnet IP" was true by luck of interface
+  order. Found by prediction before the first two-machine test and confirmed by it: both addresses
+  answered `/health` from the second machine. Now every address is printed, labelled with the
+  network it needs (`or on LAN: …`), and an **invite link carries all of them** — the client
+  already tries a link's addresses in order with a 3 s timeout each, so one link works on either
+  network.
 - **The first real Windows run** (`dell-2026`, WSL 2.6.3, 2026-09-02) found `windowsUncPath`
   spelling the WSL share `\\wsl$\<distro>\…` while that machine's own `wslpath -w` answers
   `\\wsl.localhost\<distro>\…`, which failed `check-wsl.mjs`. The older spelling still resolves on

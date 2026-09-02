@@ -572,6 +572,29 @@ test('joinLines: invite first, view second, the knock hint when there is no toke
   assert.deepEqual(joinLines(join, view, null), [`invite: ${join}`, NO_TOKEN_HINT, `view: ${view}`]);
   assert.deepEqual(joinLines(null, view, null), [NO_TOKEN_HINT, `view: ${view}`]);
   assert.deepEqual(joinLines(null, null, null), [NO_TOKEN_HINT]);
+  // 0.24.2: a machine on both a tailnet and a LAN has two working addresses. It printed one,
+  // chosen by whichever interface os.networkInterfaces() yielded first — so a guest on the LAN
+  // was handed the tailnet address and nothing else (measured against a real second machine,
+  // 2026-09-02: both answered /health). Every address is printed, labelled with the network it
+  // needs, because a host copying a line has to know which network their guest must be on.
+  const lan = 'node client.mjs ws://192.168.0.144:7801 --name <You>';
+  assert.deepEqual(joinLines(join, null, 'tok', [{ label: 'LAN', line: lan }]),
+    [`invite: ${join}`, `   or on LAN: ${lan}`]);
+  // The primary is the first of the same list, so it must never be repeated as an alternative.
+  assert.deepEqual(joinLines(join, null, 'tok', [{ label: 'tailnet', line: join }]), [`invite: ${join}`]);
+  // Junk in the list is not a line: a null, a string and a record with no line all drop out.
+  assert.deepEqual(joinLines(join, null, 'tok', [null, 'x', { label: 'LAN' }]), [`invite: ${join}`]);
+  assert.deepEqual(joinLines(join, null, 'tok', null), [`invite: ${join}`]);
+
+  // And the same addresses go INTO a link, so one link works on either network — the client
+  // already tries a link's addresses in order with a 3 s timeout each.
+  assert.deepEqual(inviteWsAddresses({ ips: ['100.86.8.97', '192.168.0.144'], port: 7801 }),
+    ['ws://100.86.8.97:7801', 'ws://192.168.0.144:7801']);
+  assert.deepEqual(inviteWsAddresses({ tunnelHost: 'a-b-c.trycloudflare.com', ips: ['100.86.8.97', '192.168.0.144'], port: 7801 }),
+    ['wss://a-b-c.trycloudflare.com', 'ws://100.86.8.97:7801', 'ws://192.168.0.144:7801']);
+  // The single-address form still works, and a port of 0 yields no ws address at all.
+  assert.deepEqual(inviteWsAddresses({ ip: '10.0.0.2', port: 7801 }), ['ws://10.0.0.2:7801']);
+  assert.deepEqual(inviteWsAddresses({ ips: ['10.0.0.2'], port: 0 }), []);
 });
 
 test('inviteLines: tunnel pair first, LAN below — the one list every surface prints', () => {

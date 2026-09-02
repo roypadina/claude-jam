@@ -842,24 +842,58 @@ async function waitForHealth() {
   process.exit(1);
 }
 
-function externalIp() {
-  const ts = spawnSync('tailscale', ['ip', '-4'], { encoding: 'utf8' });
-  const ip = ts.stdout?.trim().split('\n')[0];
-  if (ip && /^\d/.test(ip)) return ip;
+// 0.24.2, and this is a defect the first two-machine test found before the guest had even joined.
+//
+// It used to return ONE address, and it picked it twice by accident. `tailscale` was spawned bare —
+// but macOS ships that CLI inside the app bundle and puts nothing on PATH, which is the entire
+// reason `resolveTailscale()` exists two lines from here — so on the machine most likely to have
+// Tailscale the probe always failed. The fallback then took whichever non-internal IPv4
+// `os.networkInterfaces()` happened to yield first, which on this Mac is `utun5`: the join block
+// printed the TAILNET address and never the LAN one, so the documented behaviour ("if Tailscale is
+// installed the printed line already uses the tailnet IP") was true by luck of interface order —
+// and a guest on the LAN was handed the one address they cannot reach.
+//
+// Measured on 2026-09-02 from a real second machine (dell-2026): BOTH addresses answered
+// `/health`. So the answer is not to choose better, it is to stop choosing — print every address
+// that can work, labelled with the network it needs, and put all of them in an invite link (the
+// client already tries a link's addresses in order with a 3 s timeout each).
+const TAILNET_V4 = /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./; // Tailscale's 100.64/10 CGNAT range
+function localAddresses() {
+  const out = [];
+  const push = (ip, label) => {
+    if (ip && /^\d/.test(ip) && !out.some((a) => a.ip === ip)) out.push({ ip, label });
+  };
+  // The CLI is authoritative about which of several addresses is the tailnet one, so ask it —
+  // through the same resolver --funnel uses, not a bare spawn.
+  const ts = spawnSync(tailscaleBin, ['ip', '-4'], { encoding: 'utf8' });
+  for (const line of String(ts.stdout ?? '').trim().split('\n')) push(line.trim(), 'tailnet');
   for (const list of Object.values(os.networkInterfaces())) {
-    for (const n of list || []) if (n.family === 'IPv4' && !n.internal) return n.address;
+    for (const n of list || []) {
+      if (n.family !== 'IPv4' || n.internal) continue;
+      // With no CLI (or a sandboxed one) the range is the only clue left, and it is a good one.
+      push(n.address, TAILNET_V4.test(n.address) ? 'tailnet' : 'LAN');
+    }
   }
-  return '127.0.0.1';
+  return out.length ? out : [{ ip: '127.0.0.1', label: 'this machine' }];
 }
+// The primary — token.json, the view URL, anything that still wants a single address. First place
+// goes to the tailnet when there is one, because it is the address that keeps working when the
+// laptop moves; the LAN line is printed right under it rather than lost.
+function externalIp() { return localAddresses()[0].ip; }
 
 // Shared by launch() and daemon() (same process, re-exec'd with --daemon) and by the
 // welcome frame, so both invite lines are built in exactly one place. `join` is null while
 // no token is set, `view` while there is no ttyd view. tunnelJoin/tunnelView (v0.11) are
 // null until --tunnel is given and cloudflared has resolved a hostname for that port.
 function joinInfo() {
-  const ip = externalIp();
+  const addrs = localAddresses();
+  const ip = addrs[0].ip;
   return {
     join: buildJoinLine(ip, opts.port, currentToken, opts.clientCmd),
+    // Every other address that works, labelled with the network it needs. The primary above is
+    // the first of the same list, so this never contradicts it.
+    joinAlts: addrs.slice(1).map((a) => ({ label: a.label,
+      line: buildJoinLine(a.ip, opts.port, currentToken, opts.clientCmd) })),
     view: viewOn ? buildViewUrl(ip, opts.viewPort, viewKey) : null,
     tunnelJoin: buildTunnelJoinLine(tunnelHosts.ws, currentToken, opts.clientCmd),
     tunnelView: buildTunnelViewUrl(tunnelHosts.view, viewKey),
@@ -894,8 +928,10 @@ function joinInfo() {
 // own literal — which is how `announce` came to be missing from one of them. One builder, so a
 // field added here reaches `/menu` from every path that can change it.
 function accessFrame() {
-  const { join, view, tunnelJoin, tunnelView, uploads, exportPolicy, uploadUsed: used } = joinInfo();
-  return { t: 'token', token: currentToken, join, view, tunnelJoin, tunnelView,
+  const { join, joinAlts, view, tunnelJoin, tunnelView, uploads, exportPolicy, uploadUsed: used } = joinInfo();
+  // joinAlts rides the frame for the same reason `announce` had to: the client renders the invite
+  // lines from THIS object, so a field missing here is a line the host client silently does not show.
+  return { t: 'token', token: currentToken, join, joinAlts, view, tunnelJoin, tunnelView,
     remote: relayMode, inviteOnly, relayPending: relayPending(),
     jamName: opts.jamName, announce: announceState(),
     uploads, exportPolicy, uploadQuota, uploadUsed: used };
@@ -1006,7 +1042,8 @@ const newInviteSecret = () => randomBytes(24).toString('base64url').slice(0, INV
 // Where a link points, in the order the guest tries them: the public relay first (it works from
 // anywhere), then the LAN/Tailscale address — which is what keeps a link alive after a
 // cloudflared respawn changed the tunnel hostname (v0.22B's documented caveat).
-const inviteWs = () => inviteWsAddresses({ tunnelHost: tunnelHosts.ws, ip: externalIp(), port: opts.port });
+const inviteWs = () => inviteWsAddresses({ tunnelHost: tunnelHosts.ws,
+  ips: localAddresses().map((a) => a.ip), port: opts.port });
 
 function mintInvite({ name, maxUses = 0, ttl = INVITE_TTL_MS, now = Date.now() } = {}) {
   const ws = inviteWs();
