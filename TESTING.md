@@ -1222,11 +1222,15 @@ The first one is the umbrella, and no row of `docs/COMPATIBILITY.md` may be upgr
   sound is **audible**, and whether the toast is **seen** on screen within its lifetime (BurntToast
   routes to the Action Center). Spawn-and-exit-0 is the evidence that exists. Prove the rest: a
   person at that machine, or a screenshot taken inside the toast's lifetime.
-  - An earlier `matched=0` from a process watcher on the same machine was a non-overlapping
-    strict-regex window, not a failure, and was explained rather than left as a doubt: an
-    interop-spawned `powershell.exe` can present a null `CommandLine` in `Win32_Process`. The
-    broadened watcher then caught both, plus an unrelated PowerShell from the tester's own tooling,
-    which is what proves the watcher could see them at all.
+  - An earlier `matched=0` from a process watcher on the same machine was **a watcher window that
+    did not overlap a nudge** — nothing had been fired inside it — and not a failure. Worth keeping
+    for the correction as much as the fact: the first hypothesis offered for it was that an
+    interop-spawned `powershell.exe` presents a null `CommandLine` in `Win32_Process`, and the next
+    run **disproved that on this machine** — `watch3` logged the full `SoundPlayer` and BurntToast
+    command lines for both `[JAM]` processes and for an unrelated PowerShell from the tester's own
+    tooling. So interop PowerShell surfaces with a readable command line here; PID-based watching
+    is still sound practice, but not for that reason. A plausible cause that survives one run and
+    dies in the next is exactly what this file exists to record.
 - 2026-08-30 · **W1: no toast has been seen.** `notify()` on Windows spawns a PowerShell script
   that tries BurntToast and falls back to the WinRT `ToastText02` notifier under PowerShell's own
   AppId. Unit tests cover the argv and that title and body are never inside the script; whether a
