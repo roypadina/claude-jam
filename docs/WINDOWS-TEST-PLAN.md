@@ -51,7 +51,7 @@ Never do these, on either machine:
 
    ```sh
    mkfifo /tmp/jam.in
-   claude-jam join <the join URL> --name WinAgent --token <token> --basic \
+   claude-jam join <the join URL> --name WinAgent --basic \
      > /tmp/jam.out 2>&1 < /tmp/jam.in &
    JAMPID=$!                       # the ONLY pid W may kill, and only with kill $JAMPID
    exec 3> /tmp/jam.in             # holds the fifo open; without this the client sees EOF
@@ -61,7 +61,28 @@ Never do these, on either machine:
 
    `--basic` is the readline client: no mirror, no F2/F3. It is the right client for an agent and
    the wrong one for judging the mirror, so the interactive legs below are Roy's keyboard, not W's.
-4. **W's findings come home as a file**, uploaded through the product: write
+4. **Before the first jam exists, the channel is ntfy** — one shared topic on `https://ntfy.sh`,
+   which Roy hands to W (it is a password, so it is not in this repo). Each side titles its posts
+   with its own letter and reads the other's:
+
+   ```sh
+   # W → M
+   curl -s -H "X-Title: W" -d "phase 0 done: 11 PASS, 2 UNEXPECTED (0.2 stdin.isTTY false, 0.10 …)" \
+     "https://ntfy.sh/$TOPIC"
+   # W reads M's replies (blocks until one arrives, then exits)
+   curl -s -N -m 3600 "https://ntfy.sh/$TOPIC/json?title=M" | grep -m1 '"event":"message"'
+   ```
+
+   M holds the mirror image of that listener open, so a post from W wakes M's session with no
+   polling and no scheduled wakeups on either side.
+
+   **What must never go on that topic:** ntfy.sh is a public server and the topic name is the only
+   thing protecting it. No join token, no `cjam1_…` invite link, no `--tunnel` URL (a tunnel URL
+   plus a token *is* access to a live Claude session), no host key, no hook secret, no transcript
+   content. Status, phase numbers, PASS/FAIL, and LAN/tailnet addresses only — which is enough,
+   because the jams in this plan run **knock-only**: W connects and M accepts, so no secret ever
+   has to cross a channel at all. Anything genuinely secret goes through Roy.
+5. **W's findings come home as a file**, uploaded through the product: write
    `~/win-findings.md`, then `/send ~/win-findings.md` from W's client. M approves it, and it lands
    in the host's `jam-uploads/`. That delivers the report and tests `/send` in one move.
 
@@ -96,7 +117,12 @@ Stop and report after phase 0. M reads it before anything is hosted.
 M starts the jam with a **fake** claude (`JAM_CLAUDE=scripts/fake-tui.mjs`), so every connectivity
 leg costs nothing. Real `claude` comes in phase 4, once.
 
-**M:** `JAM_CLAUDE=$PWD/scripts/fake-tui.mjs claude-jam host --port 7801 --name Roy --jam-name wintest --token <random> --cwd ~/Code/Padina/claude-jam`
+**M:** `JAM_CLAUDE=$PWD/scripts/fake-tui.mjs claude-jam host --port 7801 --name Roy --jam-name wintest --cwd ~/Code/Padina/claude-jam`
+
+**Knock-only, on purpose.** No `--token` anywhere in phases 1–3: W connects, M sees `⚑ Dana wants
+to join` and accepts. Nothing secret has to reach W, so the ntfy channel stays safe to use for
+coordination — and the knock/accept path gets exercised for free. The token and invite-link doors
+get one step each (2.8, 2.5–2.7), where Roy relays the secret by hand.
 
 M records **which address the join block printed** — this is suspect **S1** below — and gives W the
 LAN form: `ws://192.168.0.144:7801`.
@@ -104,7 +130,7 @@ LAN form: `ws://192.168.0.144:7801`.
 | # | who | step | expected |
 | --- | --- | --- | --- |
 | 1.1 | W, Git Bash | `curl.exe -s -m 3 http://192.168.0.144:7801/health` | `{"ok":true,…}`. If this fails the rest of phase 1 is a network finding, not a claude-jam one |
-| 1.2 | W, Git Bash, **Roy's keyboard** | `claude-jam join ws://192.168.0.144:7801 --name Dana --token <token>` | the mirror of M's screen, in colour. **Roy reports: is it the whole screen, is it aligned, does the status row fit** |
+| 1.2 | W, Git Bash, **Roy's keyboard** | `claude-jam join ws://192.168.0.144:7801 --name Dana` | `waiting for host approval…`, M accepts, then the mirror of M's screen, in colour. **Roy reports: is it the whole screen, is it aligned, does the status row fit** |
 | 1.3 | Roy at W | press **F2**, then F2 back | transcript ⇄ mirror. Windows Terminal key decoding, first real test |
 | 1.4 | Roy at W | **PgUp**, **PgDn**, **Shift+↑**, **End**, **Esc** | scrollback through M's real pane; `End`/`Esc` returns to live |
 | 1.5 | Roy at W | type `hello from windows` + Enter | it reaches M's pane as `[Dana]: hello from windows` — success criterion 1 |
@@ -117,7 +143,7 @@ LAN form: `ws://192.168.0.144:7801`.
 | 1.12 | W, agent | the scripted `--basic` client from above, as `WinAgent`, **while Dana stays connected** | two Windows clients at once; `/who` shows three participants |
 | 1.13 | Roy at W | `Ctrl+C` / `/quit` in the interactive client | leaves the jam running for everybody |
 
-Then repeat **1.2 and 1.3 from WSL** (`claude-jam join ws://192.168.0.144:7801 …` inside the
+Then repeat **1.2 and 1.3 from WSL** (`claude-jam join ws://192.168.0.144:7801 --name Dana-wsl` inside the
 distribution) — a WSL guest reaches the LAN outbound with no configuration, and that is the
 comparison that tells a Git Bash tty problem apart from a claude-jam one.
 
@@ -130,12 +156,13 @@ Nothing restarts. Same jam, different address.
 | # | who | step | expected |
 | --- | --- | --- | --- |
 | 2.1 | W, Git Bash | `curl.exe -s -m 3 http://100.86.8.97:7801/health` | `{"ok":true,…}` — the tailnet path, Windows→Mac |
-| 2.2 | W, Git Bash | `claude-jam join ws://100.86.8.97:7801 --name Dana --token <token>` | joins, and everything in phase 1 still holds |
-| 2.3 | W, Git Bash | `claude-jam join ws://roys-macbook-pro.tail7bd91e.ts.net:7801 --name Dana2 --token <token>` | MagicDNS name, not just the IP. A DNS failure here is a tailnet finding worth writing down |
+| 2.2 | W, Git Bash | `claude-jam join ws://100.86.8.97:7801 --name Dana` | joins, and everything in phase 1 still holds |
+| 2.3 | W, Git Bash | `claude-jam join ws://roys-macbook-pro.tail7bd91e.ts.net:7801 --name Dana2` | MagicDNS name, not just the IP. A DNS failure here is a tailnet finding worth writing down |
 | 2.4 | W, WSL | the same two joins from inside WSL | does the WSL VM reach the tailnet at all — it has no Tailscale of its own, so this measures WSL's NAT plus Windows' Tailscale |
 | 2.5 | M | mint an invite link: `claude-jam invite Dana --expires 24h --jam wintest` | **first real remote guest on an invite link, ever** |
 | 2.6 | W | `claude-jam join cjam1_…` (nothing else) | in, with no name and no token typed. The link carries an address LIST — record which address it actually connected on |
 | 2.7 | M | `/kick Dana revoke`, then W tries the same link | refused, out loud, with the reason |
+| 2.8 | M then W | M runs `/token set <value>`; **Roy carries the value to W by hand** (never over ntfy); W joins with `--token` | the token door, and a wrong token must be refused before anything else happens |
 
 ---
 
@@ -183,9 +210,9 @@ are the point.
 
 | # | who | step | expected |
 | --- | --- | --- | --- |
-| 5.1 | W, WSL | `claude-jam host --port 7802 --name Roy-Win --jam-name wsltest --token <random> --cwd ~` | it starts. **Record the whole join block**: it must carry the `from Windows on this PC:` line and the WSL2 explanation |
+| 5.1 | W, WSL | `claude-jam host --port 7802 --name Roy-Win --jam-name wsltest --cwd ~` (knock-only again — M knocks, Roy accepts at W) | it starts. **Record the whole join block**: it must carry the `from Windows on this PC:` line and the WSL2 explanation |
 | 5.2 | W, PowerShell | `curl.exe -s -m 3 http://localhost:7802/health` | `{"ok":true,…}`. This is WSL2 localhost forwarding, and it is a claim until it runs |
-| 5.3 | W, Git Bash | `claude-jam join ws://localhost:7802 --name Roy2 --token <token>` | a Windows client on a WSL host — the same machine twice, two stacks |
+| 5.3 | W, Git Bash | `claude-jam join ws://localhost:7802 --name Roy2` | a Windows client on a WSL host — the same machine twice, two stacks |
 | 5.4 | M | `curl -s -m 3 --max-time 3 http://<W LAN ip>:7802/health` | **a refusal or timeout is the EXPECTED result** without mirrored networking or a portproxy. Record which it was |
 | 5.5 | M | `curl -s -m 3 http://100.101.225.77:7802/health` | Windows' Tailscale cannot serve a port inside the VM, so expect this to fail too — and this is exactly the question Roy asked. Record it |
 | 5.6 | W, PowerShell **as Administrator** | the portproxy + firewall rule from the wiki's §4 | then 5.4 again — M should get through, and M then **joins the jam over the LAN** |
