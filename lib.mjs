@@ -109,8 +109,16 @@ export function buildViewUrl(ip, port, key) {
 
 // Everything the host can hand out, same order and wording wherever it is shown: the
 // daemon log, the host client's welcome, `/join` and every `/token` reply.
-export function joinLines(join, view, token) {
+// 0.24.2: `alts` is every OTHER address this machine can be reached on, each labelled with the
+// network it needs (`LAN`, `tailnet`). A machine on both has two working addresses and used to
+// print one — chosen by interface order — so a guest on the LAN was handed the tailnet address and
+// nothing else. The label is the whole point: a host copying a line has to know which network the
+// person they are sending it to must be on.
+export function joinLines(join, view, token, alts = []) {
   const lines = join ? [`invite: ${join}`] : [];
+  for (const a of Array.isArray(alts) ? alts : []) {
+    if (a && a.line && a.line !== join) lines.push(`   or on ${a.label}: ${a.line}`);
+  }
   // The address is useful with or without a token; the hint says which way the guest gets in.
   if (!token) lines.push(NO_TOKEN_HINT);
   if (view) lines.push(`view: ${view}`);
@@ -1721,7 +1729,7 @@ export function tunnelJoinLines(tunnelJoin, tunnelView) {
 export function inviteLines(info = {}) {
   const wsl = info.wsl && info.wsl.wsl ? wslJoinLines(info.join, info.view, info.wsl) : [];
   return [...tunnelJoinLines(info.tunnelJoin, info.tunnelView),
-    ...joinLines(info.join, info.view, info.token), ...wsl];
+    ...joinLines(info.join, info.view, info.token, info.joinAlts), ...wsl];
 }
 
 // ------------------------------- v0.12 / v0.13: export and file transfers ----
@@ -2970,10 +2978,14 @@ export function inviteAddresses(list = []) {
 
 // Tunnel first, then LAN — the tunnel is the one that works from anywhere, and the LAN address is
 // what keeps a link alive after a cloudflared respawn changed the hostname (v0.22B's caveat).
-export function inviteWsAddresses({ tunnelHost = null, ip = null, port = 0 } = {}) {
+// 0.24.2: `ips` is every local address, not one — a link minted on a machine with both a tailnet
+// and a LAN address now carries both, and the client already tries them in order with a 3 s
+// timeout each. `ip` is still accepted for one caller that has a single address to offer.
+export function inviteWsAddresses({ tunnelHost = null, ip = null, ips = [], port = 0 } = {}) {
+  const list = (Array.isArray(ips) && ips.length ? ips : [ip]).filter(Boolean);
   return inviteAddresses([
     tunnelHost ? `wss://${tunnelHost}` : null,
-    ip && port ? `ws://${ip}:${port}` : null,
+    ...(port ? list.map((a) => `ws://${a}:${port}`) : []),
   ]);
 }
 
