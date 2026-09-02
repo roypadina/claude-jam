@@ -112,6 +112,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   LINUX_SOUNDS, FREEDESKTOP_SOUND_DIR, ALSA_SOUND_DIR, linuxSoundPlan,
   terminalSupport, WINDOWS_TERMINAL_HINT, canAttachTmux, NO_TMUX_ATTACH,
   windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS, WIN_VERSION_CMDS,
+  inputControls, applyInputAct, INPUT_CTRL_KEEP, INPUT_CTRL_ACTS,
   // 0.23.6: the hook that could not reach the daemon — the one failure a hook cannot report.
   HOOK_ERROR_FILE, hookErrorNote,
   // v0.32 W2: the WSL2 Windows host — detection, the DrvFs refusal, the path boundary, the join note.
@@ -4677,6 +4678,40 @@ test('v0.32 W1 windowsCli: join runs, everything host-side is refused WITH the r
   for (const gone of ['claude-jam host ', 'claude-jam sessions', 'claude-jam invite ', 'the launcher menu:']) {
     assert.ok(!usage.includes(gone), `the Windows usage offers ${gone}`);
   }
+});
+
+// 0.24.2, and it is a bug the Windows run found on every platform: ink-text-input guards exactly
+// one chord (Ctrl+C) and TYPES every other one, so Ctrl+U put a literal `u` in the message instead
+// of wiping the line. Reproduced on macOS against the real client as `Roy > abcu`.
+test('0.24.2 inputControls: a control chord never becomes a letter in your message', () => {
+  // The two that are implemented come back as acts, not as text.
+  assert.deepEqual(inputControls('\x15'), { text: '', acts: ['killline'] });
+  assert.deepEqual(inputControls('\x17'), { text: '', acts: ['killword'] });
+  // Everything else in C0 is dropped rather than typed. Ctrl+A, Ctrl+K, Ctrl+E, Ctrl+D.
+  for (const ch of ['\x01', '\x0b', '\x05', '\x04', '\x00', '\x1f']) {
+    assert.deepEqual(inputControls(`a${ch}b`), { text: 'ab', acts: [] }, JSON.stringify(ch));
+  }
+  // And the ones the client and ink still need go through untouched.
+  for (const ch of ['\r', '\n', '\t', '\x7f', '\b', '\x03', '\x1b']) {
+    assert.equal(inputControls(ch).text, ch, JSON.stringify(ch));
+  }
+  // Text, UTF-8 and anything above U+001F must never be touched: this filter sits in the path of
+  // every character of every message, so a mangled multi-byte character here would be a data bug.
+  assert.deepEqual(inputControls('héllo · 世界 🙂'), { text: 'héllo · 世界 🙂', acts: [] });
+  // A chord in the middle of a paste takes its action and leaves the rest of the text.
+  assert.deepEqual(inputControls('one\x15two'), { text: 'onetwo', acts: ['killline'] });
+  assert.deepEqual(inputControls(''), { text: '', acts: [] });
+  assert.deepEqual(inputControls(null), { text: '', acts: [] });
+
+  // What the acts do to the value. killword eats the trailing whitespace with the word, as a
+  // shell does, and both are idempotent on an empty line rather than throwing.
+  assert.equal(applyInputAct('killline', 'anything at all'), '');
+  assert.equal(applyInputAct('killword', 'one two three'), 'one two');
+  assert.equal(applyInputAct('killword', 'one two   '), 'one');
+  assert.equal(applyInputAct('killword', 'single'), '');
+  assert.equal(applyInputAct('killword', ''), '');
+  assert.equal(applyInputAct('killline', ''), '');
+  assert.equal(applyInputAct('nonsense', 'kept'), 'kept');
 });
 
 // 0.24.2, from the first real WSL client: a WSL client is `process.platform === 'linux'`, so it

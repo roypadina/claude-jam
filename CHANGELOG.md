@@ -8,6 +8,15 @@
   number is read from `package.json` at runtime, which every install path ships, rather than kept
   as a constant that would drift. Added ahead of the Windows testing phase, where telling one
   install from another is the whole game.
+- **Ctrl-U typed a `u` instead of wiping the line**, and so did every other control chord —
+  `ink-text-input` guards exactly one (Ctrl+C) and inserts the letter for all the rest. These are
+  the keys a terminal user's fingers reach for in an input box, so the reflex silently corrupted
+  the message. Surfaced by the Windows run (tmux `send-keys C-u` was used to clear the field before
+  another test, and the stray `u` turned up in the pane log), reproduced immediately on macOS:
+  `Roy ❯ abcu`. Now `Ctrl-U` kills the line, `Ctrl-W` kills the last word, and every other C0
+  control is dropped rather than typed. Named ceiling: both act on the end of the line, because the
+  text field keeps its own cursor — `Ctrl-A`/`Ctrl-E` are dropped rather than faked, since moving
+  that cursor from outside is not possible without our own input component.
 - **A nudge to a WSL client was a terminal bell and nothing else.** A client inside WSL is
   `process.platform === 'linux'`, so `notify()` and `playSound()` took the Linux branches — and
   Linux has no notification path at all, while a fresh distribution has no `paplay`, no `aplay` and

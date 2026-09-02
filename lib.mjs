@@ -4124,6 +4124,48 @@ export const HOST_FLAGS = [
 ];
 
 // The keyboard, in one place, because it is the half no command list can teach.
+// ------------------------------------------- 0.24.2: control keys the text field would TYPE ----
+// Found through a Windows test and it is on every platform: `ink-text-input`'s only guard is
+// `key.ctrl && input === 'c'`, so EVERY other control chord falls into its final `else` and
+// inserts the letter verbatim. Ctrl+U types `u`, Ctrl+W types `w`, Ctrl+A types `a`. Those are
+// exactly the keys a terminal user's fingers reach for in an input box — Ctrl+U to wipe a line is
+// muscle memory — so the reflex silently corrupted the message instead of clearing it. Reproduced
+// on macOS as `Roy ❯ abcu`; the Windows run only found it because tmux `send-keys C-u` was used to
+// clear the field before another test.
+//
+// The two we can honestly implement are implemented, because the client owns the input value:
+// Ctrl+U kills the line and Ctrl+W the last word. Everything else in C0 is DROPPED rather than
+// typed — a key that does nothing is a fair answer, a key that types a letter you did not ask for
+// is not.
+//
+// THE CEILING, named: this edits the VALUE, and the text field keeps its own cursor. So Ctrl+U and
+// Ctrl+W act on the end of the line, which is where the cursor is in the overwhelming case (you
+// type, then you wipe). Mid-line they will not do what readline would, and Ctrl+A / Ctrl+E are
+// dropped rather than faked, because moving that cursor from out here is not possible — it would
+// need a text field we own. If that ever matters, the fix is our own input component, not a guess.
+export const INPUT_CTRL_KEEP = new Set(['\r', '\n', '\t', '\x7f', '\b', '\x03', '\x1b']);
+export const INPUT_CTRL_ACTS = { '\x15': 'killline', '\x17': 'killword' };
+export function inputControls(text) {
+  let out = '';
+  const acts = [];
+  for (const ch of String(text ?? '')) {
+    if (Object.hasOwn(INPUT_CTRL_ACTS, ch)) { acts.push(INPUT_CTRL_ACTS[ch]); continue; }
+    // C0 and DEL-adjacent controls only. Printable text, UTF-8 and anything above U+001F is
+    // untouched — this must never be a place where a character of somebody's message goes missing.
+    if (ch < ' ' && !INPUT_CTRL_KEEP.has(ch)) continue;
+    out += ch;
+  }
+  return { text: out, acts };
+}
+// What the two acts do to a value, kept here so the client only applies an answer. killword eats
+// any trailing whitespace with the word, which is what every shell does.
+export function applyInputAct(act, value = '') {
+  const v = String(value ?? '');
+  if (act === 'killline') return '';
+  if (act === 'killword') return v.replace(/\s*\S+\s*$/, '');
+  return v;
+}
+
 export const KEY_HELP = [
   { key: 'F2', desc: 'flip between the live TUI and the transcript' },
   { key: 'F3', desc: 'host: attach the real TUI · F3 again (or Ctrl-b d) comes back' },
@@ -4134,6 +4176,7 @@ export const KEY_HELP = [
   { key: 'End / G', desc: 'live TUI: back to the live screen — Esc does it too' },
   { key: 'a / d', desc: 'host: answer the ⚑ approval bar without typing a command' },
   { key: 'Esc', desc: 'dismiss the approval bar · Esc again re-arms the single keys' },
+  { key: 'Ctrl-U / Ctrl-W', desc: 'wipe the input line · delete the last word' },
   { key: 'Ctrl-C', desc: 'leave the client (the jam keeps running)' },
 ];
 
