@@ -6406,17 +6406,30 @@ export function wslTranslatePath(input, { distro = '', root = WSL_MOUNT_ROOT } =
 // file that lives inside the distribution, so `jam-uploads/shot.png` can be opened from Explorer,
 // an editor, or anything else on the Windows side. Null when the distro is not known — a guessed
 // distro name in a path is worse than no line at all.
-export function windowsUncPath(p, distro = '') {
+// The prefix is a PARAMETER with a modern default, and that is 0.24.2 paying for a measurement.
+// On a real Windows 11 box (WSL 2.6.3, dell-2026, 2026-09-02) `wslpath -w /tmp` answers
+// `\\wsl.localhost\<distro>\tmp` — not `\\wsl$\…`, which this function hard-coded and
+// check-wsl.mjs asserted equality against, so the check failed on the first real machine it ever
+// ran on. `\\wsl$` is the older spelling and Windows still resolves it, so nothing was broken;
+// what was wrong was claiming to agree with `wslpath` while spelling it the other way.
+//
+// Both spellings stay accepted on the way IN (wslTranslatePath's regex), because a person pastes
+// whichever their Windows gave them. Only the line jam PRINTS has to pick one, and the caller that
+// can ask the system (platform.mjs's windowsPathFor) passes what `wslpath` actually said.
+export const WSL_UNC_MODERN = '\\\\wsl.localhost';
+export const WSL_UNC_LEGACY = '\\\\wsl$';
+export function windowsUncPath(p, distro = '', prefix = WSL_UNC_MODERN) {
   const s = String(p ?? '');
   if (!s.startsWith('/') || !WSL_DISTRO_RE.test(String(distro))) return null;
   const drive = windowsDriveMount(s);
-  // A file already on a Windows drive has a real Windows path; going through \\wsl$ to reach it
-  // would work but is the slow way round, and is not what a person wants pasted into Explorer.
+  // A file already on a Windows drive has a real Windows path; going through the UNC share to
+  // reach it would work but is the slow way round, and is not what a person wants in Explorer.
   if (drive) {
     const rest = s.slice(WSL_MOUNT_ROOT.length + 1).replace(/\//g, '\\');
     return `${drive.toUpperCase()}:${rest ? `\\${rest.replace(/^\\+/, '')}` : '\\'}`;
   }
-  return `\\\\wsl$\\${distro}${s.replace(/\//g, '\\')}`;
+  const pre = String(prefix || WSL_UNC_MODERN).replace(/\\+$/, '');
+  return `${pre}\\${distro}${s.replace(/\//g, '\\')}`;
 }
 
 // What the join block says when the daemon is inside WSL2, and it exists because the addresses

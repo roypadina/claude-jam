@@ -22,8 +22,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseWslInfo, windowsDriveMount, wslTranslatePath, windowsUncPath, wslJoinLines,
-  inviteLines, privacyRefusal, WSL_MOUNT_ROOT, stateDirFor, buildJoinLine } from '../lib.mjs';
-import { assumePrivate, wslInfo } from '../platform.mjs';
+  inviteLines, privacyRefusal, WSL_MOUNT_ROOT, stateDirFor, buildJoinLine,
+  WSL_UNC_MODERN } from '../lib.mjs';
+import { assumePrivate, wslInfo, wslUncPrefix, windowsPathFor } from '../platform.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
@@ -93,14 +94,26 @@ check('wslpath agrees with windowsUncPath (Linux -> Windows) on this distributio
   if (!IN_WSL) skip(notWsl);
   if (!info.distro) skip('WSL_DISTRO_NAME is unset in this process, so the \\\\wsl$ name is unknown '
     + '(start the jam from a WSL shell, or the join note simply omits the line)');
+  // 0.24.2: what jam PRINTS is windowsPathFor(), which asks `wslpath` first — so the strict
+  // equality belongs there. The pure builder is checked separately and on the part that is
+  // actually portable: the distro name and the path body. Its PREFIX is reported rather than
+  // asserted, because both spellings exist and which one is canonical is a property of the
+  // Windows build, not of claude-jam — asserting the constant is what made this check fail on the
+  // first real machine it ever ran on (dell-2026, WSL 2.6.3: `\\wsl.localhost`, not `\\wsl$`).
+  note(`this WSL spells the share prefix ${wslUncPrefix()} (jam's built-in default is ${WSL_UNC_MODERN})`);
   for (const p of ['/tmp', os.homedir()]) {
     const r = spawnSync('wslpath', ['-w', p], { encoding: 'utf8' });
     if (r.error) skip(`wslpath is not on PATH (${r.error.code})`);
     ok(r.status === 0, `wslpath -w ${p} exited ${r.status}`);
     const real = (r.stdout || '').trim();
-    const mine = windowsUncPath(p, info.distro);
-    note(`${p} -> wslpath ${real} · claude-jam ${mine}`);
-    ok(real.toLowerCase() === String(mine).toLowerCase(), `DISAGREE on ${p}: wslpath says ${real}, claude-jam says ${mine}`);
+    const printed = windowsPathFor(p);
+    const built = windowsUncPath(p, info.distro, wslUncPrefix());
+    note(`${p} -> wslpath ${real} · jam prints ${printed} · builder ${built}`);
+    ok(String(printed).toLowerCase() === real.toLowerCase(),
+      `DISAGREE on ${p}: wslpath says ${real}, jam prints ${printed}`);
+    ok(String(built).toLowerCase() === real.toLowerCase(),
+      `the fallback builder disagrees on ${p}: wslpath says ${real}, builder says ${built} — the `
+      + 'distro name or the path body is wrong, which no prefix difference explains');
   }
 });
 

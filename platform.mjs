@@ -30,7 +30,7 @@ import { UPLOAD_MAX, humanBytes, stateDirFor, configDirPath, historyFilePath, va
   aclUser, aclArgs, parseIcaclsPrincipals,
   PS_ARGS, PS_ENV_FILE, PS_ENV_TITLE, PS_ENV_BODY, PS_CLIP_PNG, PS_TOAST, winSoundPlan,
   linuxSoundPlan,
-  parseWslInfo, WSL_NO_INTEROP } from './lib.mjs';
+  parseWslInfo, WSL_NO_INTEROP, windowsUncPath, WSL_UNC_MODERN } from './lib.mjs';
 
 export const IS_MAC = process.platform === 'darwin';
 export const IS_WINDOWS = process.platform === 'win32';
@@ -359,6 +359,21 @@ function toWindowsPath(p) {
   if (r.error || r.status !== 0) return null;
   const out = (r.stdout || '').trim();
   return out || null;
+}
+
+// 0.24.2, from the first real Windows run: how to name a Linux-side file so a person can open it
+// on the Windows side. `wslpath -w` is the AUTHORITY — it knows which UNC spelling this Windows
+// uses (`\\wsl.localhost\…` on current builds, `\\wsl$\…` on older ones) — so ask it, and fall
+// back to building the path only when it cannot answer. The fallback carries the spelling this
+// distribution actually uses when that could be measured, rather than the constant that was wrong
+// on the first machine it met.
+export function wslUncPrefix() {
+  const root = toWindowsPath('/');
+  const m = /^(\\\\[^\\]+)\\/.exec(String(root ?? ''));
+  return m ? m[1] : WSL_UNC_MODERN;
+}
+export function windowsPathFor(p) {
+  return toWindowsPath(p) || windowsUncPath(p, wslInfo().distro, wslUncPrefix());
 }
 
 // The Windows clipboard, from inside the distribution. Exactly W1's script (PS_CLIP_PNG, asserted

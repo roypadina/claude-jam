@@ -116,6 +116,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   HOOK_ERROR_FILE, hookErrorNote,
   // v0.32 W2: the WSL2 Windows host — detection, the DrvFs refusal, the path boundary, the join note.
   parseWslInfo, windowsDriveMount, wslTranslatePath, windowsUncPath, wslJoinLines, wslLocalhostUrl,
+  WSL_UNC_MODERN, WSL_UNC_LEGACY,
   WSL_MOUNT_ROOT, WSL_NO_INTEROP,
 } from './lib.mjs';
 import fs from 'node:fs';
@@ -7965,8 +7966,19 @@ test('v0.32 W2 wslTranslatePath: the Windows spellings of a path, and the two it
 });
 
 test('v0.32 W2 windowsUncPath: how Windows names a file that lives in the distribution', () => {
+  // 0.24.2: the DEFAULT is the modern spelling, which is what `wslpath -w` answers on a current
+  // Windows (measured on dell-2026, WSL 2.6.3). The legacy `\\wsl$` still resolves there, so this
+  // is a canonical-form change, not a fix for something broken — and the prefix is an argument
+  // because the authority is the machine, not this constant.
   assert.equal(windowsUncPath('/home/roy/p/jam-uploads/a.png', 'Ubuntu'),
-    '\\\\wsl$\\Ubuntu\\home\\roy\\p\\jam-uploads\\a.png');
+    '\\\\wsl.localhost\\Ubuntu\\home\\roy\\p\\jam-uploads\\a.png');
+  assert.equal(windowsUncPath('/home/roy/x', 'Ubuntu', WSL_UNC_LEGACY), '\\\\wsl$\\Ubuntu\\home\\roy\\x');
+  // A trailing separator on the prefix must not double up.
+  assert.equal(windowsUncPath('/home/roy/x', 'Ubuntu', '\\\\wsl.localhost\\'),
+    '\\\\wsl.localhost\\Ubuntu\\home\\roy\\x');
+  // Both spellings still translate on the way IN, which is the direction a person pastes.
+  assert.deepEqual(wslTranslatePath('\\\\wsl.localhost\\Ubuntu\\home\\roy\\x', { distro: 'Ubuntu' }), { path: '/home/roy/x' });
+  assert.deepEqual(wslTranslatePath('\\\\wsl$\\Ubuntu\\home\\roy\\x', { distro: 'Ubuntu' }), { path: '/home/roy/x' });
   // A file already on a Windows drive has a real Windows path; \\wsl$ would work and is the slow
   // way round, and is not what anybody wants pasted into Explorer.
   assert.equal(windowsUncPath('/mnt/c/Users/roy/p/a.png', 'Ubuntu'), 'C:\\Users\\roy\\p\\a.png');

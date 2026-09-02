@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.24.2
 
 - **`claude-jam --version`** (`-v`, `-V`, `version`) prints the build. It used to fall through to
   the usage text and exit 0, so the first question asked of every bug report — which build is on
@@ -8,6 +8,13 @@
   number is read from `package.json` at runtime, which every install path ships, rather than kept
   as a constant that would drift. Added ahead of the Windows testing phase, where telling one
   install from another is the whole game.
+- **The first real Windows run** (`dell-2026`, WSL 2.6.3, 2026-09-02) found `windowsUncPath`
+  spelling the WSL share `\\wsl$\<distro>\…` while that machine's own `wslpath -w` answers
+  `\\wsl.localhost\<distro>\…`, which failed `check-wsl.mjs`. The older spelling still resolves on
+  Windows, so nothing was broken — what was wrong was claiming to agree with `wslpath`. The prefix
+  is now a parameter with the modern default, `platform.mjs` asks `wslpath` for the real one, and
+  the check asserts the line jam PRINTS rather than a constant. Both spellings are still accepted
+  on input, which is the direction a person pastes.
 - The launcher/Windows parity lint could not spell an upper-case case label, so it would have
   stopped covering `-V` silently. Its alphabet now includes upper case.
 
