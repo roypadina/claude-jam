@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { parseWslInfo, windowsDriveMount, wslTranslatePath, windowsUncPath, wslJoinLines,
   inviteLines, privacyRefusal, WSL_MOUNT_ROOT, stateDirFor, buildJoinLine,
   WSL_UNC_MODERN } from '../lib.mjs';
-import { assumePrivate, wslInfo, wslUncPrefix, windowsPathFor } from '../platform.mjs';
+import { assumePrivate, wslInfo, wslUncPrefix, windowsPathFor, soundFile } from '../platform.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
@@ -196,6 +196,24 @@ check('the DEFAULT state dir is on the Linux filesystem, so an ordinary jam is n
 });
 
 // ------------------------------------------------------------------ 4. interop ----
+// ------------------------------------------- 5b. the nudge, which took the wrong branch ----
+// 0.24.2: a WSL client is `process.platform === 'linux'`, so notify() and playSound() took the
+// LINUX branches — no notification exists there at all, and a fresh distribution has no paplay, no
+// aplay and no freedesktop theme, so a nudge produced a BEL and nothing else while the person sat
+// at a Windows desktop. Both now fall through to the Windows seam through interop. This PRINTS what
+// this machine resolved, because "a toast appeared" and "a sound was heard" are human claims — but
+// which BINARY and which FILE is a fact, and it is the fact that was wrong.
+check('a nudge on this machine resolves to the Windows seam, not to silence', () => {
+  if (!IN_WSL) skip(notWsl);
+  const plan = soundFile('nudge');
+  note(`playSound('nudge') -> ${plan ? `${plan.bin} ${plan.mode || ''} ${plan.file || '(beep pattern)'}` : 'NOTHING (silent)'}`);
+  note(`notify() would spawn: ${STANDIN ? '(stand-in: powershell.exe is not here)' : 'powershell.exe with the toast script'}`);
+  ok(plan, 'a nudge resolves to silence on this machine: no Linux player, and the Windows '
+    + 'fallback did not resolve either — which is the 0.24.2 defect, not a configuration problem');
+  ok(plan.bin === 'powershell.exe' || plan.bin === 'paplay' || plan.bin === 'aplay',
+    `unexpected player ${plan.bin}`);
+});
+
 check('Windows-binary interop is on, which is what /paste needs', () => {
   if (!IN_WSL) skip(notWsl);
   if (STANDIN) skip('detection is standing in (JAM_WSL_OSRELEASE), so there is no Windows behind '
