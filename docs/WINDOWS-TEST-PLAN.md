@@ -14,7 +14,7 @@ Both machines are on the same LAN **and** the same tailnet (`tail7bd91e.ts.net`)
 
 ```
 M   LAN 192.168.0.144     tailnet 100.86.8.97     roys-macbook-pro.tail7bd91e.ts.net
-W   LAN <W measures it>   tailnet 100.101.225.77  dell-2026.tail7bd91e.ts.net
+W   LAN 192.168.0.136     tailnet 100.101.225.77  dell-2026.tail7bd91e.ts.net
 ```
 
 ## The one rule that matters more than the results
@@ -91,6 +91,58 @@ Never do these, on either machine:
    `~/win-findings.md`, then `/send ~/win-findings.md` from W's client. M approves it, and it lands
    in the host's `jam-uploads/`. That delivers the report and tests `/send` in one move.
 
+## Unattended mode — nobody is at W's keyboard
+
+Roy is at M only; `dell-2026`'s screen is off and he is not watching it (2026-09-02). Every step
+this plan wrote as "Roy's keyboard" therefore has to be driven by W itself, and **M is the only
+observer** — so W reports everything to M, and M prints it for Roy. Three mechanisms, in order of
+faithfulness:
+
+1. **In WSL: tmux.** `tmux` is installed in the distribution, so the client can be driven and read
+   exactly, with no human and no guessing:
+
+   ```sh
+   tmux -L jamtest new-session -d -s c1 -x 150 -y 44 'claude-jam join <url> --name Dana-wsl'
+   tmux -L jamtest send-keys -t c1 F2                 # or PgUp, End, Escape, 'hello' Enter
+   tmux -L jamtest capture-pane -p -t c1 | head -60   # the rendered screen, as text
+   tmux -L jamtest kill-session -t '=c1'              # exact name, own socket, at the end
+   ```
+
+   `-L jamtest` is W's own tmux server: it cannot see or touch anything else. This is the same trick
+   claude-jam's own smoke tests use, and it is the mechanism to prefer for anything about *content*
+   — did the mirror paint, did the status row fit, did F2 swap.
+2. **In Git Bash: `winpty`,** which ships with Git for Windows and is the only way to give node a
+   real tty there. `winpty node ~/claude-jam-src/cli.mjs join … | tee ~/jam-raw.log` captures the
+   raw ANSI stream; upload the log and M reads it. Less pleasant than tmux, and it is the only thing
+   that exercises the **native Windows** renderer, which is the point of W1.
+3. **Screenshots**, for the things that are pictures rather than text — a **toast**, and how the
+   terminal really looks:
+
+   ```powershell
+   Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+   $r=[System.Windows.Forms.SystemInformation]::VirtualScreen
+   $b=New-Object System.Drawing.Bitmap $r.Width,$r.Height
+   [System.Drawing.Graphics]::FromImage($b).CopyFromScreen($r.Location,[System.Drawing.Point]::Empty,$r.Size)
+   $b.Save("$env:TEMP\jam-shot.png",[System.Drawing.Imaging.ImageFormat]::Png)
+   ```
+
+   Then `curl -s -T "$TEMP/jam-shot.png" -H "X-Title: W" -H "X-Filename: shot.png" https://ntfy.sh/$TOPIC`
+   — M can open the image. **A black or lock-screen capture is itself the finding**: report it and
+   fall back to (1) or (2). Do not retry it in a loop.
+
+**What cannot be done unattended, and must be reported as such rather than guessed:**
+
+- **Whether a sound is AUDIBLE.** W can prove the player was invoked and exited 0 (and which `.wav`
+  it resolved to); "Roy heard it" is a different claim and stays NOT EXERCISED until a human is
+  there. Say which one you measured.
+- **Whether a toast was SEEN.** A screenshot taken inside its lifetime, or the Action Center, is
+  evidence; the absence of a screenshot is not.
+
+**Files go over ntfy as attachments** — `curl -s -T <file> -H "X-Title: W" -H "X-Filename: <name>"
+"https://ntfy.sh/$TOPIC"` — and M fetches the `attachment.url` from the message. Verified in both
+directions on 2026-09-02. Findings files, captured screens, screenshots and logs all travel that
+way; W pushes nothing to git.
+
 ---
 
 # Phase 0 — W alone, no jam yet (cheap, and it gates everything else)
@@ -106,7 +158,7 @@ No Mac involvement. Nothing here needs a jam, so a failure costs one line, not a
 | 0.5 | Git Bash | `node ~/claude-jam-src/scripts/check-wsl.mjs` | expect **NOT EXERCISED** for every WSL branch (this is not WSL). A `FAIL` here is a real bug |
 | 0.6 | WSL | `node ~/claude-jam-src/scripts/check-wsl.mjs` (clone again inside WSL if `/mnt` is slow) | **the W2 measurement this whole feature is waiting for.** 8 checks. Paste the whole output, `--- RESULT ---` line included |
 | 0.7 | WSL | `node -e "console.log(require('os').tmpdir())"`; `stat -c '%a %U' /tmp`; `stat -c '%a' /mnt/c/tmp 2>/dev/null` | is `$TMPDIR` on the Linux side, is `/tmp` 1777, does DrvFs really report 777 |
-| 0.8 | Git Bash | `cd ~/claude-jam-src && npm ci && node --test test.mjs` | 475 pass, 0 fail on a real Windows machine. 3 tests are macOS/Linux-only and skip |
+| 0.8 | Git Bash | `cd ~/claude-jam-src && npm ci && node --test test.mjs` | **measured 2026-09-02: 478 pass, 0 fail, 0 skipped** — three tests are win32-only and RUN there, which is why the count is higher than the Mac's |
 | 0.9 | Git Bash | `node ~/claude-jam-src/scripts/check-terminal-gate.mjs` | both directions of the terminal gate, on the real thing |
 | 0.10 | Git Bash | `npm i -g @roypadina/claude-jam` then `claude-jam --version` and `claude-jam --help` | **never run by anyone.** Expect `claude-jam 0.24.1` and the Windows usage block. If npm's shim calls `bash`, that is the W1 bug returning |
 | 0.11 | Git Bash | `claude-jam host`, `claude-jam sessions`, `claude-jam find`, `claude-jam invite Roy` | each must **refuse** naming WSL2, exit 2. A silent exit 0 is the `.pathname` class of bug |
@@ -135,18 +187,18 @@ LAN form: `ws://192.168.0.144:7801`.
 | # | who | step | expected |
 | --- | --- | --- | --- |
 | 1.1 | W, Git Bash | `curl.exe -s -m 3 http://192.168.0.144:7801/health` | `{"ok":true,…}`. If this fails the rest of phase 1 is a network finding, not a claude-jam one |
-| 1.2 | W, Git Bash, **Roy's keyboard** | `claude-jam join ws://192.168.0.144:7801 --name Dana` | `waiting for host approval…`, M accepts, then the mirror of M's screen, in colour. **Roy reports: is it the whole screen, is it aligned, does the status row fit** |
-| 1.3 | Roy at W | press **F2**, then F2 back | transcript ⇄ mirror. Windows Terminal key decoding, first real test |
-| 1.4 | Roy at W | **PgUp**, **PgDn**, **Shift+↑**, **End**, **Esc** | scrollback through M's real pane; `End`/`Esc` returns to live |
-| 1.5 | Roy at W | type `hello from windows` + Enter | it reaches M's pane as `[Dana]: hello from windows` — success criterion 1 |
-| 1.6 | Roy at W | `/c windows side channel` | M sees it in the host client; **the hosted claude must never see it** (M checks the pane) |
-| 1.7 | Roy at W | `/who`, `/menu`, `/help` | a guest's menu lists guest things only |
-| 1.8 | Roy at W | multi-line: `line one \` Enter `line two`, then **Shift+Enter** | the trailing `\` must work; whether Shift+Enter does is a Windows Terminal CSI-u finding |
-| 1.9 | Roy at W | press **F3** | must print the "no tmux on Windows" refusal, not spawn anything |
-| 1.10 | M | `/ping Dana look at this` | W's client shows the highlighted nudge — **and Roy reports whether a Windows toast appeared and whether a sound was heard**. Both are unproven claims today |
-| 1.11 | Roy at W | `/sound`, then `/ping Roy back at you` | three tiers reported; M hears its own sound |
+| 1.2 | W, Git Bash (winpty) | `claude-jam join ws://192.168.0.144:7801 --name Dana` | `waiting for host approval…`, M accepts, then the mirror of M's screen, in colour. **W captures the rendered screen (tmux capture-pane in WSL, the raw ANSI log in Git Bash) and ships it to M**: is it the whole screen, is it aligned, does the status row fit |
+| 1.3 | W, WSL under tmux | press **F2**, then F2 back | transcript ⇄ mirror. Windows Terminal key decoding, first real test |
+| 1.4 | W, WSL under tmux | **PgUp**, **PgDn**, **Shift+↑**, **End**, **Esc** | scrollback through M's real pane; `End`/`Esc` returns to live |
+| 1.5 | W | type `hello from windows` + Enter | it reaches M's pane as `[Dana]: hello from windows` — success criterion 1 |
+| 1.6 | W | `/c windows side channel` | M sees it in the host client; **the hosted claude must never see it** (M checks the pane) |
+| 1.7 | W | `/who`, `/menu`, `/help` | a guest's menu lists guest things only |
+| 1.8 | W, WSL under tmux | multi-line: `line one \` Enter `line two`, then **Shift+Enter** | the trailing `\` must work; whether Shift+Enter does is a Windows Terminal CSI-u finding |
+| 1.9 | W | press **F3** | must print the "no tmux on Windows" refusal, not spawn anything |
+| 1.10 | M | `/ping Dana look at this` | W's client shows the highlighted nudge. The toast needs a **screenshot** inside its lifetime; the sound can only be reported as "the player ran and exited 0, resolving to <file>" — audibility stays NOT EXERCISED with nobody there |
+| 1.11 | W | `/sound`, then `/ping Roy back at you` | three tiers reported; M hears its own sound |
 | 1.12 | W, agent | the scripted `--basic` client from above, as `WinAgent`, **while Dana stays connected** | two Windows clients at once; `/who` shows three participants |
-| 1.13 | Roy at W | `Ctrl+C` / `/quit` in the interactive client | leaves the jam running for everybody |
+| 1.13 | W | `Ctrl+C` / `/quit` in the interactive client | leaves the jam running for everybody |
 
 Then repeat **1.2 and 1.3 from WSL** (`claude-jam join ws://192.168.0.144:7801 --name Dana-wsl` inside the
 distribution) — a WSL guest reaches the LAN outbound with no configuration, and that is the
@@ -199,7 +251,7 @@ about getting work done.
 | 4.6 | W | `/cost`, `/status`, `/context` | run with no round trip. Then `/model` — that one goes to M for approval |
 | 4.7 | W | `/exit` | refused outright |
 | 4.8 | W, Git Bash | `/send C:\Windows\System32\drivers\etc\hosts` | the Windows path is translated and offered to M |
-| 4.9 | W | `Win+Shift+S` (snip), then `/paste windows clipboard` | **unverified on Windows today.** An image offered is a pass; a refusal naming PowerShell/clipboard is also a result — record which, verbatim |
+| 4.9 | W | put an image on the clipboard **without a keyboard** — PowerShell: `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('C:\Windows\Web\Wallpaper\Windows\img0.jpg'))` — then `/paste windows clipboard` | **unverified on Windows today.** An image offered is a pass; a refusal naming PowerShell/clipboard is also a result — record which, verbatim |
 | 4.10 | M | `/send` an image back; W runs `/get` | lands in W's `./jam-downloads/` |
 | 4.11 | W | `/export` | M is asked; the transcript arrives; **W greps it for the host key, the join token and the hook secret and finds none** |
 | 4.12 | W | `/files`, `/diff`, `/tools`, `/history 50` | each answers on Windows |
@@ -218,10 +270,10 @@ are the point.
 | 5.1 | W, WSL | `claude-jam host --port 7802 --name Roy-Win --jam-name wsltest --cwd ~` (knock-only again — M knocks, Roy accepts at W) | it starts. **Record the whole join block**: it must carry the `from Windows on this PC:` line and the WSL2 explanation |
 | 5.2 | W, PowerShell | `curl.exe -s -m 3 http://localhost:7802/health` | `{"ok":true,…}`. This is WSL2 localhost forwarding, and it is a claim until it runs |
 | 5.3 | W, Git Bash | `claude-jam join ws://localhost:7802 --name Roy2` | a Windows client on a WSL host — the same machine twice, two stacks |
-| 5.4 | M | `curl -s -m 3 --max-time 3 http://<W LAN ip>:7802/health` | **a refusal or timeout is the EXPECTED result** without mirrored networking or a portproxy. Record which it was |
-| 5.5 | M | `curl -s -m 3 http://100.101.225.77:7802/health` | Windows' Tailscale cannot serve a port inside the VM, so expect this to fail too — and this is exactly the question Roy asked. Record it |
-| 5.6 | W, PowerShell **as Administrator** | the portproxy + firewall rule from the wiki's §4 | then 5.4 again — M should get through, and M then **joins the jam over the LAN** |
-| 5.7 | W, WSL | `claude-jam remote tunnel --jam wsltest` (or `--tunnel` at launch) | M joins on the `wss://` URL. This is the route that needs none of 5.6 |
+| 5.4 | M | `curl -s -m 3 http://192.168.0.136:7802/health` | **the expectation changed on 2026-09-02: W runs `networkingMode=mirrored`**, so this may well SUCCEED with no portproxy at all. Measure it — a success proves mirrored networking end to end, a timeout means the firewall is the gate. Do not assume either |
+| 5.5 | M | `curl -s -m 3 http://100.101.225.77:7802/health` | under mirrored networking the VM shares Windows' interfaces, so the tailnet address may reach it — which would make Tailscale the whole answer for a Windows host and retire the portproxy. Measure it |
+| 5.6 | W, PowerShell **as Administrator** | ONLY IF 5.4 failed: the portproxy + firewall rule from the wiki's §4. Roy is not at that keyboard, so an elevation prompt blocks — report it rather than working around it | then 5.4 again — M should get through, and M then **joins the jam over the LAN** |
+| 5.7 | W, WSL | **needs `cloudflared` inside the distribution, which is not installed (0.13)** — install it there when this leg is reached, and say so. `claude-jam remote tunnel --jam wsltest` (or `--tunnel` at launch) | M joins on the `wss://` URL. This is the route that needs none of 5.6 |
 | 5.8 | M | in that jam: a message, `/c`, F2, PgUp, `/who` | a Mac guest on a Windows host, end to end |
 | 5.9 | W, WSL | `TMPDIR=/mnt/c/tmp claude-jam host --port 7803 --name X` | must **refuse**, naming DrvFs and 0777. This is the one privacy gate WSL can actually reach |
 | 5.10 | W, WSL | `/send /mnt/c/Users/<you>/something.png`, and `/send \\wsl$\<Distro>\home\<you>\notes.md` | both translated. `\\wsl$\OtherDistro\…` and a `\\fileserver\…` share must both be refused |
@@ -265,10 +317,13 @@ prove it.
   toast from claude-jam or heard a Windows sound.
 - **S5 — Windows Terminal key decoding.** F2 / PgUp / PgDn / Shift+arrows / Shift+Enter / Esc.
   `Esc` in particular is the one that shares a prefix with everything.
-- **S6 — DrvFs's real shape.** The 0777 refusal was measured in a container wearing the shape, not
-  on a real Windows drive. Step 5.9 is the first real one.
+- **S6 — DrvFs's real shape. DISCHARGED 2026-09-02**: `check-wsl.mjs` on dell-2026 confirmed a real
+  Windows drive reports 0777 under DrvFs and that the state-dir refusal fires on it. The container
+  had been wearing the shape; the shape is real.
 - **S7 — WSL2 localhost forwarding, mirrored networking, the portproxy.** Straight from Microsoft's
-  documentation, never run.
+  documentation, never run. Half-answered: W *has* `networkingMode=mirrored` plus
+  `hostAddressLoopback`, which is the configuration the plan assumed nobody would have — so phase 5
+  measures the good case, and the portproxy path stays unrun.
 - **S8 — `--funnel`.** Still blocked on Funnel being enabled for the tailnet, and carrying an open
   upstream bug (tailscale/tailscale#18827: WebSockets through `tailscale serve` close every 10–40 s,
   which a 30 s heartbeat cannot outrun). **Out of scope for this phase** unless Roy enables it.
