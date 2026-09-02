@@ -718,8 +718,13 @@ try {
   await step('6end', '6 /end in the host client: `n` ends nothing, `y` ends it for everybody', async () => {
     const w = watcher(P.live);
     await w.want('the welcome', (f) => f.t === 'welcome');
-    drive(`env ${driveEnv()} node ${HOST_MJS} --attach --tmux ${S.live} --port ${P.live} --name Host --cwd ${ROOT} --tmux-socket ${SOCKET}`);
-    await until('`--attach` to open the client', () => /fake claude/.test(pane(S.drive)), 25000);
+    // v0.24.2: NO --port and NO --tmux-socket, deliberately. That is the regression: the socket is
+    // named per port, so --attach used to look on the 7777 default's server and report this jam
+    // missing while `claude-jam sessions` listed it live. This suite's jam is never on 7777, so
+    // the old code cannot reach the client at all from here.
+    drive(`env ${driveEnv()} node ${HOST_MJS} --attach --tmux ${S.live} --name Host --cwd ${ROOT}`);
+    await until('`--attach` with no --port to resolve the jam by name and open the client',
+      () => /fake claude/.test(pane(S.drive)), 25000);
     line('/end');
     await until('the confirmation', () => /really end this jam for everyone/.test(back(S.drive)), 10000);
     console.log(`      ${back(S.drive).split('\n').filter((l) => /really end/.test(l)).at(-1).trim()}`);

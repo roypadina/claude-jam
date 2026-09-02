@@ -8,6 +8,19 @@
   number is read from `package.json` at runtime, which every install path ships, rather than kept
   as a constant that would drift. Added ahead of the Windows testing phase, where telling one
   install from another is the whole game.
+- **`claude-jam host --attach --tmux <name>` could not find a jam that was not on the default
+  port.** Each jam runs on its own tmux server, socket `claude-jam-<port>`, so the socket is a
+  function of the port — and `--attach` never had one, so it fell back to 7777 and reported
+  `there is no tmux session called "friends" to attach to` while `claude-jam sessions` listed that
+  jam as live on :7811. Every reattach hint claude-jam prints is portless too (the welcome banner,
+  both adopt refusals, the "already a jam" refusal, the usage text), so all of them were correct
+  only for a jam that happened to be on 7777. The name is the only identifier a human has at that
+  point, so it is now resolved: `--attach` looks the jam up through the same `listRows()` the
+  listing uses and takes that row's port and socket. `--port` and `--tmux-socket` remain the
+  override; a name that is live on two servers — which `claude-jam clean` can leave behind — is
+  refused with both ports rather than guessed; and a name that matches nothing now lists the jams
+  that ARE live, which the old refusal did not. Ownership gates are untouched: a resolved row is
+  no more trusted than a flag-supplied one, and `ownedSession()` still decides.
 - **Ctrl-U typed a `u` instead of wiping the line**, and so did every other control chord —
   `ink-text-input` guards exactly one (Ctrl+C) and inserts the letter for all the rest. These are
   the keys a terminal user's fingers reach for in an input box, so the reflex silently corrupted

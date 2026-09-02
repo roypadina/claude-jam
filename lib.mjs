@@ -2780,6 +2780,41 @@ export function exitPromptText(guests = 0) {
 // v0.34: the raw `or:` line is a HOST client, so it carries `--host-key-file` — since v0.34
 // `--host` alone gets a guest (loudly), because the key file is what proves the claim. The PATH
 // is not a secret; the file behind it is 0600 and only a local process can read it.
+// v0.24.2: which jam does `--attach --tmux NAME` mean? Each jam runs on its own tmux server,
+// socket `claude-jam-<port>`, so the socket is a function of the PORT — and `--attach` never had
+// the port. It fell back to the 7777 default and looked for the session on `claude-jam-7777`, so
+// attaching to a jam on any other port failed with "there is no tmux session called NAME" while
+// `claude-jam sessions` listed it as live. Every reattach hint we print is portless too, so the
+// hints were only correct for a jam that happened to be on 7777.
+//
+// A name is the only identifier a human has here, so resolve it instead of asking for the port.
+// Rows come from listRows(), the same enumerator `claude-jam sessions` uses, so nothing new
+// enumerates anything and a resolved row is exactly as trusted as before — ownedSession() still
+// gates the attach itself.
+//
+// Ambiguity is REFUSED rather than guessed: `claude-jam clean` can leave the same name live on two
+// sockets, and picking one would attach a human to a jam they did not mean, which is worse than a
+// message naming both ports.
+export function attachTargetFor(rows = [], name = '') {
+  const want = String(name ?? '');
+  const live = (Array.isArray(rows) ? rows : []).filter((r) => r && r.name && r.port);
+  const hits = live.filter((r) => r.name === want);
+  if (hits.length === 1) return { ok: true, port: hits[0].port, socket: hits[0].socket || null, row: hits[0] };
+  if (hits.length > 1) {
+    return { ok: false, ambiguous: hits.map((r) => r.port).sort((a, b) => a - b),
+      why: `"${want}" is live on more than one tmux server (ports ${hits.map((r) => r.port).sort((a, b) => a - b).join(', ')}).\n`
+        + `  say which:  claude-jam host --attach --tmux ${want} --port <one of those>\n`
+        + '  see them:   claude-jam sessions' };
+  }
+  // No match. The names that ARE live make the next command obvious, which the old refusal did
+  // not — it named only the session the caller asked for.
+  const names = [...new Set(live.map((r) => r.name))];
+  return { ok: false, names,
+    why: `there is no jam called "${want}" to attach to.\n`
+      + (names.length ? `  live right now: ${names.join(', ')}\n` : '  no jams are running right now.\n')
+      + '  `claude-jam sessions` lists claude-jam\'s own; `claude-jam host` starts one.' };
+}
+
 export function reattachLines({ tmux = DEFAULT_TMUX, port = 7777, clientCmd = 'node client.mjs', name = 'Host',
   token = null, socket = TMUX_DEFAULT_SOCKET, adopt = null, state = null } = {}) {
   return [

@@ -541,6 +541,11 @@ claude-jam owns the tmux sessions it creates, so nobody has to remember a `tmux 
   not a terminal, is not asked — and every one of those cases except `--end-on-exit` **keeps**
   the jam.
 - **`claude-jam host --attach`** reopens the host's client on a jam that is already running.
+  `--tmux <name>` is enough: v0.24.2 looks the jam up in claude-jam's own listing and takes its
+  port and tmux socket from there, because each jam runs on its own tmux server (`claude-jam-<port>`)
+  and `--attach` never had the port — it assumed the default and could not find a jam anywhere
+  else. `--port`/`--tmux-socket` still override, and a name that is live twice is refused with both
+  ports rather than guessed at.
 - **`claude-jam sessions`** (or `claude-jam ls`) lists claude-jam's own sessions: name, port, state, uptime, session
   id, who is here, which relays are on, cwd. `claude-jam sessions --json` for scripting. A `!` marks
   anything unhealthy — an `orphan` state dir whose tmux session is gone, a session whose daemon
@@ -1019,7 +1024,8 @@ Retired in v0.14 and accepted as no-ops: `--split`, `--no-split`, `--no-cmux`, `
 - Their screen looks cropped or half empty → their terminal is smaller than the host's window;
   the dim `— mirror:` line says how much was cut. The host's own client keeps the window sized
   to their terminal, so a guest with a bigger terminal simply sees blank space.
-- Host wants their client back after closing it → `claude-jam host --attach` (or the
+- Host wants their client back after closing it → `claude-jam host --attach [--tmux <name>]`, on
+  any port (v0.24.2 resolves the name) — or the
   `claude-jam join ws://127.0.0.1:<port> … --host --host-key-file <state>/host.key` line the
   launcher printed — the key file is what makes it the HOST, not `--host` on its own).
 - Host wants a clean restart → `claude-jam end` (or `claude-jam host` on the same name and answer
