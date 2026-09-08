@@ -36,18 +36,32 @@ Terminal, no WSL and no tmux. Read the honest state of that below before you rel
 The bell is portable. The desktop notification and the join/knock sounds beside it are macOS
 (`osascript`, `afplay`) and Windows (PowerShell); Linux uses `paplay`/`aplay` if they are there.
 
-### The Windows client, honestly (v0.32 W1)
+### The Windows client, honestly (0.24.2)
 
-It is **implemented and unit-tested on real Windows in CI, and no human has ever run it.** Nobody
-on this project has a Windows machine. Every decision the Windows code makes — the PowerShell
-argv for a clipboard read, the `%APPDATA%` path, the ACL that replaces `0600`, the `%WINDIR%\Media`
-sound table, the key sequences, the terminal check — is a pure function asserted on a
-`windows-latest` runner on every push, and the client entry point's terminal gate is spawned and
-checked there for real. What CI cannot do is look at a screen or listen: **no toast has been seen,
-no knock has been heard, no key has been pressed in Windows Terminal, and no jam has been joined
-from Windows.** `TESTING.md` lists each of those with the experiment that would settle it.
+**A jam has now been joined from Windows** — 2026-09-02, a WSL2 client on a Windows 11 box, over
+the LAN, driven by an agent with nobody at that keyboard. What that run proved, and what it did
+not, is the honest state of this platform:
 
-So: worth trying, not yet worth trusting. If you try it —
+**Proven on a real Windows machine:** knock and token admission · the live mirror · F2 · PgUp /
+PgDn / Shift+arrows / End / Esc · `[Name]:` attribution arriving at the real pane · `/c` staying
+out of the pane entirely (checked in the pane log, not on a screen) · reconnect and re-knock after
+the daemon restarted · `check-wsl.mjs` all-pass, including the DrvFs `0777` state-dir refusal on a
+real Windows drive · the toast and the sound processes actually spawning.
+
+**Found and fixed because of it:** the WSL share prefix (`wslpath` says `\\wsl.localhost`, not
+`\\wsl$`) · a WSL client taking the **Linux** notify/sound branch, so a nudge was a terminal bell
+and nothing else · `Ctrl-U` typing a literal `u` (every control chord did — that one is on every
+platform) · the join block printing one address chosen by interface order, so a LAN guest got the
+tailnet address and nothing else.
+
+**Still not run by anyone:** the **native** Windows client — Git Bash has never opened one, so
+whether node even gets a tty in mintty is unmeasured · `--tunnel` from Windows · the tailnet and
+MagicDNS addresses · invite links from a real remote guest · a real `claude` behind it (that run
+used a fixture) · hosting from WSL2 · and whether a toast is **seen** or a sound **heard**, which
+needs a human in the room. `docs/WINDOWS-TEST-PLAN.md` is the plan, `TESTING.md` the measurements,
+`docs/COMPATIBILITY.md` the row-by-row matrix.
+
+So: worth trying, and now worth more trust than it was. If you try it —
 
 ```powershell
 npm i -g @roypadina/claude-jam
@@ -86,14 +100,14 @@ npm installs the same thing anywhere node ≥ 22 runs, and it is the only path o
 npm i -g @roypadina/claude-jam
 ```
 
-Published as of 0.24.1. The **scope is only how npm names the package** — the commands it installs
+Published as of 0.24.2. The **scope is only how npm names the package** — the commands it installs
 are still `claude-jam` and `jam`. Upgrade with `@latest`, remove with `npm rm -g`. A local tarball
 still works if you want to install a checkout rather than a release:
 
 ```sh
 git clone https://github.com/roypadina/claude-jam && cd claude-jam
-npm install && npm pack        # → roypadina-claude-jam-0.24.1.tgz
-npm i -g ./roypadina-claude-jam-0.24.1.tgz
+npm install && npm pack        # → roypadina-claude-jam-0.24.2.tgz
+npm i -g ./roypadina-claude-jam-0.24.2.tgz
 ```
 
 Or from source:
@@ -108,6 +122,9 @@ The command is **`claude-jam`**. `jam` is still installed as a deprecated alias 
 anything you already typed keeps working; nothing in this project prints that name.
 
 ## The menu
+
+`claude-jam --version` says which build is on PATH — worth knowing before you need it, since a
+machine can carry a global npm install and a clone at once, and every bug report starts there.
 
 `claude-jam` with **no arguments** opens a launcher: Host a jam · Join a jam · My jams · End a
 jam. The Host screen collects the directory, your name, the jam's name, the access mode
