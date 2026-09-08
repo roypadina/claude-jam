@@ -1617,3 +1617,25 @@ Struck-through entries above are discharged. New ones are appended above in date
   particularly the backpressure drop, whose false-positive risk (an unlucky joiner on a slow link)
   no unit test can see. Prove: the full sweep at the next release, or a deliberate run of
   `smoke-xfer`, `smoke-mirror` and `smoke-scroll` before anyone relies on 0.24.1 remotely.
+- 2026-09-08 · **the 19-suite gate RAN, and it earned its keep on the first attempt.** 0.24.1 had
+  shipped without it and 0.24.2 nearly did: `node --test` (479) and two smokes were green while
+  `smoke-answer` was red, and the red was a **regression 0.24.2 itself introduced** — a `spawnSync`
+  on a frame path (see the CHANGELOG). Found with `git bisect run node scripts/smoke-answer.mjs`
+  over `v0.24.1..HEAD`, which named the commit in four steps, and confirmed by
+  `JAM_TAILSCALE=/nonexistent` turning the suite green — a cause, not a correlation. My first
+  hypothesis was 0.24.1's backpressure drop, the gap this file had already flagged as untested;
+  `v0.24.1` passing the suite disproved it, and it is recorded here as wrong rather than quietly
+  dropped.
+  Second finding in the same area, and it came from LOOKING at the join block rather than from a
+  suite: two of the four addresses offered to guests were a corporate VPN's point-to-point tunnels.
+  Both fixed, both with a test.
+  Composition of the run: 12 self-contained suites, then the 7 that need a daemon (`ink`, `xfer`,
+  `smoke`, `mirror`, `popup`, `slash` in SPEC's documented order against one real
+  `claude --model haiku` daemon, then `knock` against a token-less one). `smoke.mjs` did a real
+  round trip — `pong` from a live agent. Every suite was re-run at the final commit `d7d102a`, and
+  `smoke-knock` re-run once more after the address change, because a gate split across two commits
+  is not a gate.
+  Two harness errors of mine on the way, recorded so the next person does not repeat them:
+  `smoke-knock` needs a **token-less** daemon, and `mirror`/`slash`/`ink` need a **real** claude in
+  a driver tmux session with a real terminal size. Pointing them at a fixture jam produces a wall
+  of failures that are not the product's.
