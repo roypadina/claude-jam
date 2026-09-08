@@ -879,23 +879,48 @@ async function waitForHealth() {
 // that can work, labelled with the network it needs, and put all of them in an invite link (the
 // client already tries a link's addresses in order with a 3 s timeout each).
 const TAILNET_V4 = /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./; // Tailscale's 100.64/10 CGNAT range
+// 0.24.2b — TWO corrections to 0.24.2's own fix, both from smoke-answer going red.
+//
+// 1. INTERFACES FIRST, the CLI only as a fallback. `spawnSync` blocks node's WHOLE event loop —
+//    the websocket reads, the pane polling and the paste verification with it — and this function
+//    is reached from joinInfo(), which the welcome and every access push call. The Tailscale CLI
+//    measures 27 ms idle on this Mac and far worse under load (the App Store build's CLI talks to
+//    the GUI over IPC), and that was enough to time out a paste at 15 s: smoke-answer failed five
+//    steps with "timed out waiting for the submit" and a pane that had received 723 of 16977
+//    bytes. `os.networkInterfaces()` is a syscall, not a process, and the 100.64/10 range names a
+//    tailnet address on its own — so the CLI is only asked when no interface looks like one, which
+//    on any machine actually running Tailscale is never.
+// 2. CACHED for 30 s. Addresses do change (a laptop moves networks), so this is a TTL and not a
+//    once-per-process memo — but no burst of frames pays for the same answer twice.
+//
+// The general rule this cost us: nothing on a frame path may spawn a process synchronously.
+const ADDR_TTL_MS = 30000;
+let addrCache = { at: 0, list: null };
 function localAddresses() {
+  if (addrCache.list && Date.now() - addrCache.at < ADDR_TTL_MS) return addrCache.list;
   const out = [];
   const push = (ip, label) => {
     if (ip && /^\d/.test(ip) && !out.some((a) => a.ip === ip)) out.push({ ip, label });
   };
-  // The CLI is authoritative about which of several addresses is the tailnet one, so ask it —
-  // through the same resolver --funnel uses, not a bare spawn.
-  const ts = spawnSync(tailscaleBin, ['ip', '-4'], { encoding: 'utf8' });
-  for (const line of String(ts.stdout ?? '').trim().split('\n')) push(line.trim(), 'tailnet');
   for (const list of Object.values(os.networkInterfaces())) {
     for (const n of list || []) {
       if (n.family !== 'IPv4' || n.internal) continue;
-      // With no CLI (or a sandboxed one) the range is the only clue left, and it is a good one.
       push(n.address, TAILNET_V4.test(n.address) ? 'tailnet' : 'LAN');
     }
   }
-  return out.length ? out : [{ ip: '127.0.0.1', label: 'this machine' }];
+  // Only now, and only if nothing here looks like a tailnet address: the CLI is authoritative
+  // about a tailnet whose address is outside the usual range, and it is worth one spawn every
+  // 30 s to be right about it — but not one per frame.
+  if (!out.some((a) => a.label === 'tailnet')) {
+    const ts = spawnSync(tailscaleBin, ['ip', '-4'], { encoding: 'utf8' });
+    for (const line of String(ts.stdout ?? '').trim().split('\n')) push(line.trim(), 'tailnet');
+  }
+  // The tailnet address goes first when there is one: it is the address that survives the laptop
+  // moving networks, and the LAN line is printed right under it rather than lost.
+  out.sort((a, b) => (a.label === 'tailnet' ? 0 : 1) - (b.label === 'tailnet' ? 0 : 1));
+  const list = out.length ? out : [{ ip: '127.0.0.1', label: 'this machine' }];
+  addrCache = { at: Date.now(), list };
+  return list;
 }
 // The primary — token.json, the view URL, anything that still wants a single address. First place
 // goes to the tailnet when there is one, because it is the address that keeps working when the
