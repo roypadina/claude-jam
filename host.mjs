@@ -39,6 +39,7 @@ import { sanitize, stripControl, neutralizePrefixes, validName, isUuid, parseJso
   KICK_CODE, resolveKick,
   // v0.20: jam's own tmux server, and the F3 that comes back out.
   tmuxSocketFor, tmuxSocketArgs, tmuxAttachLine, TMUX_DEFAULT_SOCKET, DEFAULT_TMUX, F3_BIND_ARGS, statusRightText,
+  localAddressPlan,
   // v0.19: the durable half of what jam tells claude, as an appended system prompt.
   SYSTEM_PROMPT_FILE, CLAUDE_CAPS_FILE, buildSystemPrompt, systemPromptProbeArgs,
   systemPromptSupported,
@@ -878,53 +879,35 @@ async function waitForHealth() {
 // `/health`. So the answer is not to choose better, it is to stop choosing — print every address
 // that can work, labelled with the network it needs, and put all of them in an invite link (the
 // client already tries a link's addresses in order with a 3 s timeout each).
-const TAILNET_V4 = /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./; // Tailscale's 100.64/10 CGNAT range
-// 0.24.2b — TWO corrections to 0.24.2's own fix, both from smoke-answer going red.
+// 0.24.2b — see localAddressPlan in lib.mjs for WHICH addresses are worth handing out (a VPN
+// tunnel is not), and the two corrections that came out of smoke-answer going red:
 //
 // 1. INTERFACES FIRST, the CLI only as a fallback. `spawnSync` blocks node's WHOLE event loop —
-//    the websocket reads, the pane polling and the paste verification with it — and this function
-//    is reached from joinInfo(), which the welcome and every access push call. The Tailscale CLI
-//    measures 27 ms idle on this Mac and far worse under load (the App Store build's CLI talks to
-//    the GUI over IPC), and that was enough to time out a paste at 15 s: smoke-answer failed five
-//    steps with "timed out waiting for the submit" and a pane that had received 723 of 16977
-//    bytes. `os.networkInterfaces()` is a syscall, not a process, and the 100.64/10 range names a
-//    tailnet address on its own — so the CLI is only asked when no interface looks like one, which
-//    on any machine actually running Tailscale is never.
-// 2. CACHED for 30 s. Addresses do change (a laptop moves networks), so this is a TTL and not a
-//    once-per-process memo — but no burst of frames pays for the same answer twice.
+//    the websocket reads, the pane polling and the paste verification with it — and this is
+//    reached from joinInfo(), which the welcome and every access push call. The Tailscale CLI
+//    measures 27 ms idle here and far worse under load (the App Store build's CLI talks to the GUI
+//    over IPC), which was enough to time out a paste at 15 s: five smoke-answer steps failed, one
+//    with a pane that had received 723 of 16977 bytes. os.networkInterfaces() is a syscall, and
+//    Tailscale's 100.64/10 range names a tailnet address on its own, so the CLI is asked only when
+//    nothing looks like one — on a machine actually running Tailscale, never.
+// 2. CACHED for 30 s, because addresses DO change when a laptop moves networks, so this is a TTL
+//    and not a once-per-process memo — but no burst of frames pays for the same answer twice.
 //
-// The general rule this cost us: nothing on a frame path may spawn a process synchronously.
+// The rule this cost us: nothing on a frame path may spawn a process synchronously.
 const ADDR_TTL_MS = 30000;
 let addrCache = { at: 0, list: null };
 function localAddresses() {
   if (addrCache.list && Date.now() - addrCache.at < ADDR_TTL_MS) return addrCache.list;
-  const out = [];
-  const push = (ip, label) => {
-    if (ip && /^\d/.test(ip) && !out.some((a) => a.ip === ip)) out.push({ ip, label });
-  };
-  for (const list of Object.values(os.networkInterfaces())) {
-    for (const n of list || []) {
-      if (n.family !== 'IPv4' || n.internal) continue;
-      push(n.address, TAILNET_V4.test(n.address) ? 'tailnet' : 'LAN');
-    }
-  }
-  // Only now, and only if nothing here looks like a tailnet address: the CLI is authoritative
-  // about a tailnet whose address is outside the usual range, and it is worth one spawn every
-  // 30 s to be right about it — but not one per frame.
-  if (!out.some((a) => a.label === 'tailnet')) {
+  let plan = localAddressPlan(os.networkInterfaces());
+  if (!plan.some((a) => a.label === 'tailnet')) {
     const ts = spawnSync(tailscaleBin, ['ip', '-4'], { encoding: 'utf8' });
-    for (const line of String(ts.stdout ?? '').trim().split('\n')) push(line.trim(), 'tailnet');
+    const ips = String(ts.stdout ?? '').trim().split('\n').map((l) => l.trim()).filter(Boolean);
+    if (ips.length) plan = localAddressPlan(os.networkInterfaces(), ips);
   }
-  // The tailnet address goes first when there is one: it is the address that survives the laptop
-  // moving networks, and the LAN line is printed right under it rather than lost.
-  out.sort((a, b) => (a.label === 'tailnet' ? 0 : 1) - (b.label === 'tailnet' ? 0 : 1));
-  const list = out.length ? out : [{ ip: '127.0.0.1', label: 'this machine' }];
+  const list = plan.length ? plan : [{ ip: '127.0.0.1', label: 'this machine' }];
   addrCache = { at: Date.now(), list };
   return list;
 }
-// The primary — token.json, the view URL, anything that still wants a single address. First place
-// goes to the tailnet when there is one, because it is the address that keeps working when the
-// laptop moves; the LAN line is printed right under it rather than lost.
 function externalIp() { return localAddresses()[0].ip; }
 
 // Shared by launch() and daemon() (same process, re-exec'd with --daemon) and by the
