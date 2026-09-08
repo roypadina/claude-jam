@@ -113,6 +113,7 @@ import { sanitize, stripControl, neutralizePrefixes, clean, validName, isUuid, p
   terminalSupport, WINDOWS_TERMINAL_HINT, canAttachTmux, NO_TMUX_ATTACH,
   windowsCli, WIN_USAGE, WIN_JOIN_CMD, WIN_HOST_SIDE_CMDS, WIN_HELP_CMDS, WIN_VERSION_CMDS,
   inputControls, applyInputAct, INPUT_CTRL_KEEP, INPUT_CTRL_ACTS, attachTargetFor,
+  localAddressPlan, TAILNET_V4_RE, TUNNEL_IFACE_RE,
   // 0.23.6: the hook that could not reach the daemon — the one failure a hook cannot report.
   HOOK_ERROR_FILE, hookErrorNote,
   // v0.32 W2: the WSL2 Windows host — detection, the DrvFs refusal, the path boundary, the join note.
@@ -4678,6 +4679,49 @@ test('v0.32 W1 windowsCli: join runs, everything host-side is refused WITH the r
   for (const gone of ['claude-jam host ', 'claude-jam sessions', 'claude-jam invite ', 'the launcher menu:']) {
     assert.ok(!usage.includes(gone), `the Windows usage offers ${gone}`);
   }
+});
+
+// 0.24.2b: which addresses are worth handing to a guest. Measured on the machine that found it:
+// four non-internal IPv4 addresses, of which two were a corporate VPN's point-to-point tunnels
+// (utun5/utun6) that the first version happily printed as "LAN" — three LAN lines, two unreachable.
+test('0.24.2b localAddressPlan keeps the tailnet and the real LAN, drops VPN tunnels', () => {
+  const real = {
+    lo0: [{ family: 'IPv4', address: '127.0.0.1', internal: true }],
+    utun4: [{ family: 'IPv4', address: '100.86.8.97', internal: false }],  // Tailscale
+    en8: [{ family: 'IPv4', address: '192.168.0.144', internal: false }],  // the LAN
+    utun5: [{ family: 'IPv4', address: '192.168.247.24', internal: false }], // VPN
+    utun6: [{ family: 'IPv4', address: '192.168.220.5', internal: false }],  // VPN
+  };
+  assert.deepEqual(localAddressPlan(real), [
+    { ip: '100.86.8.97', label: 'tailnet' },
+    { ip: '192.168.0.144', label: 'LAN' },
+  ]);
+  // Tailscale is matched on its RANGE, not on the interface it happens to use — utun is otherwise
+  // a tunnel, and that is the one tunnel worth handing out.
+  assert.deepEqual(localAddressPlan({ utun9: [{ family: 'IPv4', address: '100.64.0.1', internal: false }] }),
+    [{ ip: '100.64.0.1', label: 'tailnet' }]);
+  // 100.128.x is OUTSIDE 100.64/10 and is a normal address; on a tunnel it is still dropped.
+  assert.deepEqual(localAddressPlan({ en0: [{ family: 'IPv4', address: '100.128.0.1', internal: false }] }),
+    [{ ip: '100.128.0.1', label: 'LAN' }]);
+  assert.deepEqual(localAddressPlan({ tun0: [{ family: 'IPv4', address: '10.8.0.2', internal: false }] }), []);
+  // Two real interfaces (Wi-Fi and Ethernet) are both legitimate and both offered.
+  assert.deepEqual(localAddressPlan({
+    en0: [{ family: 'IPv4', address: '192.168.0.144', internal: false }],
+    en1: [{ family: 'IPv4', address: '10.0.0.5', internal: false }],
+  }).map((a) => a.ip), ['192.168.0.144', '10.0.0.5']);
+  // The CLI's answer is accepted for a tailnet whose address is outside the usual range, and it
+  // still comes first.
+  assert.deepEqual(localAddressPlan({ en0: [{ family: 'IPv4', address: '192.168.0.9', internal: false }] }, ['100.99.1.2']),
+    [{ ip: '100.99.1.2', label: 'tailnet' }, { ip: '192.168.0.9', label: 'LAN' }]);
+  // Total on junk: no argument, IPv6, a malformed address, a duplicate across two interfaces.
+  assert.deepEqual(localAddressPlan(), []);
+  assert.deepEqual(localAddressPlan({ en0: [{ family: 'IPv6', address: 'fe80::1', internal: false }] }), []);
+  assert.deepEqual(localAddressPlan({ en0: [{ family: 'IPv4', address: 'nonsense', internal: false }] }), []);
+  assert.deepEqual(localAddressPlan({
+    en0: [{ family: 'IPv4', address: '192.168.0.9', internal: false }],
+    en1: [{ family: 'IPv4', address: '192.168.0.9', internal: false }],
+  }).length, 1);
+  assert.deepEqual(localAddressPlan({ en0: null, en1: [null] }), []);
 });
 
 // v0.24.2: `--attach --tmux NAME` with no --port looked on the DEFAULT port's socket, so a jam on

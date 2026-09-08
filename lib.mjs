@@ -2815,6 +2815,45 @@ export function attachTargetFor(rows = [], name = '') {
       + '  `claude-jam sessions` lists claude-jam\'s own; `claude-jam host` starts one.' };
 }
 
+// 0.24.2b: which of this machine's addresses is worth GIVING somebody, and what to call it.
+//
+// Measured on the machine that found it: `os.networkInterfaces()` reported four non-internal IPv4
+// addresses — `utun4` 100.86.8.97 (Tailscale), `en8` 192.168.0.144 (the real LAN), and `utun5` /
+// `utun6` on 192.168.247.24 and 192.168.220.5, which are a corporate VPN's point-to-point
+// tunnels. The first version of this labelled anything outside 100.64/10 as "LAN", so the join
+// block offered a guest three LAN lines, two of which nothing on their network can reach.
+//
+// The interface NAME is the signal, and it needs no subprocess: utun/tun/tap/wg/ppp/ipsec are
+// tunnels everywhere it matters, en/eth/wl are real. Tailscale is the one tunnel worth handing
+// out — it is a real address for anybody on the tailnet — and it identifies itself by living in
+// 100.64/10, so it is matched on the RANGE and not on the interface it happens to use.
+//
+// A VPN address is dropped rather than labelled, deliberately: it is not reachable by a guest, and
+// a link that carries it spends one 3-second connect timeout on the way to the address that works.
+// A host who really wants to be reached over their VPN can hand the address over by themselves.
+export const TAILNET_V4_RE = /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./;
+export const TUNNEL_IFACE_RE = /^(?:utun|tun|tap|wg|ppp|ipsec|gpd|nordlynx)\d*$/i;
+export function localAddressPlan(interfaces = {}, tailnetIps = []) {
+  const out = [];
+  const push = (ip, label) => {
+    const v = String(ip ?? '').trim();
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) return;
+    if (!out.some((a) => a.ip === v)) out.push({ ip: v, label });
+  };
+  for (const ip of Array.isArray(tailnetIps) ? tailnetIps : []) push(ip, 'tailnet');
+  for (const [name, list] of Object.entries(interfaces || {})) {
+    for (const n of list || []) {
+      if (!n || n.family !== 'IPv4' || n.internal) continue;
+      if (TAILNET_V4_RE.test(n.address)) { push(n.address, 'tailnet'); continue; }
+      if (TUNNEL_IFACE_RE.test(name)) continue; // a VPN tunnel: not a guest's route in
+      push(n.address, 'LAN');
+    }
+  }
+  // Tailnet first: it is the address that survives the laptop moving networks. The LAN line is
+  // printed under it rather than lost, which is the whole point of 0.24.2's change.
+  return out.sort((a, b) => (a.label === 'tailnet' ? 0 : 1) - (b.label === 'tailnet' ? 0 : 1));
+}
+
 export function reattachLines({ tmux = DEFAULT_TMUX, port = 7777, clientCmd = 'node client.mjs', name = 'Host',
   token = null, socket = TMUX_DEFAULT_SOCKET, adopt = null, state = null } = {}) {
   return [
