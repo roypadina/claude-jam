@@ -8,6 +8,23 @@
   number is read from `package.json` at runtime, which every install path ships, rather than kept
   as a constant that would drift. Added ahead of the Windows testing phase, where telling one
   install from another is the whole game.
+- **Two corrections to this release's own address change, both caught by the release gate.** The
+  first is the more instructive: making the Tailscale probe resolve properly also made it *run*,
+  and it ran inside `localAddresses()`, which `joinInfo()` reaches from the welcome and every
+  access push. `spawnSync` blocks node's entire event loop — websocket reads and pane polling
+  included — and the App Store Tailscale CLI talks to the GUI over IPC. That was enough to time
+  out a paste at 15 s: `smoke-answer` failed five steps, one with a pane that had received 723 of
+  16977 bytes. Found by `git bisect run` over this release's own commits, and confirmed by
+  `JAM_TAILSCALE=/nonexistent` turning the suite green. Interfaces are read first now (a syscall,
+  and Tailscale's `100.64/10` range names a tailnet address by itself, so the CLI is asked only
+  when nothing looks like one), and the answer is cached for 30 s. **Nothing on a frame path may
+  spawn a process synchronously.**
+  The second: a **VPN tunnel is not an address to hand a guest.** Labelling anything outside
+  `100.64/10` as "LAN" printed a corporate VPN's two point-to-point tunnels (`utun5`, `utun6`) as
+  join lines nothing on a guest's network can reach. Classification is by interface name now —
+  `utun/tun/tap/wg/ppp/ipsec` are tunnels, and Tailscale, the one tunnel worth handing out, is
+  matched on its range instead. `localAddressPlan()` in `lib.mjs`, unit-tested against the exact
+  four-interface shape that produced the bug.
 - **`claude-jam host --attach --tmux <name>` could not find a jam that was not on the default
   port.** Each jam runs on its own tmux server, socket `claude-jam-<port>`, so the socket is a
   function of the port — and `--attach` never had one, so it fell back to 7777 and reported
