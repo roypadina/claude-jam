@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.3
+
+- **Ko-fi / About.** README badge and Support section, `.github/FUNDING.yml`, and a "Made by Roy Padina"
+  footer on the `--help` text. No behaviour change.
+
 ## 0.24.2
 
 - **`claude-jam --version`** (`-v`, `-V`, `version`) prints the build. It used to fall through to

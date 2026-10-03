@@ -1,5 +1,7 @@
 # claude-jam
 
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-F16061?logo=ko-fi&logoColor=white)](https://ko-fi.com/roypadina)
+
 Share **one real, interactive Claude Code session** with other humans on other machines.
 
 The host keeps the native `claude` TUI — their own plugins, skills, MCP servers, `CLAUDE.md`,
@@ -1036,6 +1038,16 @@ and the closest work is worth your time:
 
 Ideas borrowed from them are credited in `PRIOR-ART.md` §4.
 
+## Support
+
+If claude-jam lets you share a Claude Code session with the people you work with, you can support its development — it's optional and always appreciated.
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/roypadina)
+
+A ⭐ on the repo helps just as much.
+
 ## License
 
 MIT — see `LICENSE`.
+
+Made by Roy Padina · [Support on Ko-fi ☕](https://ko-fi.com/roypadina)
