@@ -88,6 +88,12 @@ usage() {
   echo "       claude-jam remote <off|tunnel|funnel> [--jam NAME]"
   echo "         put a running jam on a public relay, or take it back off. Same thing"
   echo "         /menu -> Access -> Remote does, over the loopback control endpoint."
+  echo
+  echo "Made by Roy Padina"
+  echo "I'm a software engineer from Israel who builds small, focused Mac tools to fix the"
+  echo "little annoyances in my own day — then shares them free and open source."
+  echo "If this tool saves you time, a coffee on Ko-fi keeps the next one coming. ☕"
+  echo "Support on Ko-fi: https://ko-fi.com/roypadina"
   exit "${1:-2}"
 }
 
