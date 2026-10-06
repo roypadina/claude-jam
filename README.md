@@ -102,14 +102,14 @@ npm installs the same thing anywhere node ≥ 22 runs, and it is the only path o
 npm i -g @roypadina/claude-jam
 ```
 
-Published as of 0.24.2. The **scope is only how npm names the package** — the commands it installs
+Published on npm. The **scope is only how npm names the package** — the commands it installs
 are still `claude-jam` and `jam`. Upgrade with `@latest`, remove with `npm rm -g`. A local tarball
 still works if you want to install a checkout rather than a release:
 
 ```sh
 git clone https://github.com/roypadina/claude-jam && cd claude-jam
-npm install && npm pack        # → roypadina-claude-jam-0.24.2.tgz
-npm i -g ./roypadina-claude-jam-0.24.2.tgz
+npm install && npm pack        # → roypadina-claude-jam-<version>.tgz
+npm i -g ./roypadina-claude-jam-<version>.tgz
 ```
 
 Or from source:
