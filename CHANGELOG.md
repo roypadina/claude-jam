@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.24.4
+
+- **Public-clean pass.** Placeholder hostnames, addresses and paths in docs, tests and fixtures
+  (git history rewritten to match); `MANUAL.md`, which ships in the npm package, no longer carries
+  personal examples.
+- **README is a landing page now** (GIF, quickstart, platform table); the long guide moved to the
+  wiki's Full Guide. Platform claims reconciled with `docs/COMPATIBILITY.md`.
+- One description everywhere; npm keywords, homepage and `publishConfig`. No behaviour change.
+
 ## 0.24.3
 
 - **Ko-fi / About.** README badge and Support section, `.github/FUNDING.yml`, and a "Made by Roy Padina"

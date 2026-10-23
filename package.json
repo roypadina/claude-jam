@@ -1,7 +1,7 @@
 {
   "name": "@roypadina/claude-jam",
-  "version": "0.24.3",
-  "description": "Two or more humans, one real interactive Claude Code session",
+  "version": "0.24.4",
+  "description": "Share one real Claude Code session with other humans, live over WebSockets",
   "license": "MIT",
   "author": "Roy Padina",
   "repository": "github:roypadina/claude-jam",
@@ -32,5 +32,22 @@
     "ink-text-input": "^6.0.0",
     "react": "^18.3.1",
     "ws": "^8.21.3"
+  },
+  "homepage": "https://github.com/roypadina/claude-jam/wiki",
+  "bugs": "https://github.com/roypadina/claude-jam/issues",
+  "keywords": [
+    "claude-code",
+    "claude",
+    "tmux",
+    "collaboration",
+    "pair-programming",
+    "websocket",
+    "multiplayer",
+    "terminal",
+    "ai-agents",
+    "shared-session"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

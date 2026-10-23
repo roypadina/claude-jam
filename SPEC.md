@@ -39,7 +39,7 @@ host types straight into claude TUI (pane 1) as well → shows up unprefixed in 
 
 ### `host.mjs` (daemon) — node ≥ 22, single dependency `ws`
 
-CLI: `node host.mjs [--port 7777] [--host 0.0.0.0] [--name Roy] [--token <auto>] [--cwd <dir>] [--tmux jam] [-- <extra claude args>]`
+CLI: `node host.mjs [--port 7777] [--host 0.0.0.0] [--name Alice] [--token <auto>] [--cwd <dir>] [--tmux jam] [-- <extra claude args>]`
 
 Startup:
 1. Generate `session-id` (uuid v4) and `token` (16 random url-safe chars) unless given.
@@ -96,7 +96,7 @@ CLI: `node client.mjs <ws-url> --name <Name> --token <token> [--host]`
 
 - IRC-style TUI: scrolling log above, one status line, `readline` prompt at the bottom
   (redraw pattern: clear current line, print event, re-prompt with preserved buffer).
-- Rendering: `Roy ▸ text` for human→agent messages (own name highlighted), `claude ▸ text`
+- Rendering: `Alice ▸ text` for human→agent messages (own name highlighted), `claude ▸ text`
   for agent text, dim `⚙ Bash: …` for tool calls, `(chat) Dana: text` for human-only,
   `* Dana joined/left`. Status line: `Dana is typing… · claude is working… · ⚠ waiting for
   host permission`. Typing indicators expire 4 s after the last `typing` event.

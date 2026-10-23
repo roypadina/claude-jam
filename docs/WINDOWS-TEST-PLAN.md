@@ -267,9 +267,9 @@ are the point.
 
 | # | who | step | expected |
 | --- | --- | --- | --- |
-| 5.1 | W, WSL | `claude-jam host --port 7802 --name Roy-Win --jam-name wsltest --cwd ~` (knock-only again — M knocks, Roy accepts at W) | it starts. **Record the whole join block**: it must carry the `from Windows on this PC:` line and the WSL2 explanation |
+| 5.1 | W, WSL | `claude-jam host --port 7802 --name Alice-Win --jam-name wsltest --cwd ~` (knock-only again — M knocks, Roy accepts at W) | it starts. **Record the whole join block**: it must carry the `from Windows on this PC:` line and the WSL2 explanation |
 | 5.2 | W, PowerShell | `curl.exe -s -m 3 http://localhost:7802/health` | `{"ok":true,…}`. This is WSL2 localhost forwarding, and it is a claim until it runs |
-| 5.3 | W, Git Bash | `claude-jam join ws://localhost:7802 --name Roy2` | a Windows client on a WSL host — the same machine twice, two stacks |
+| 5.3 | W, Git Bash | `claude-jam join ws://localhost:7802 --name Alice2` | a Windows client on a WSL host — the same machine twice, two stacks |
 | 5.4 | M | `curl -s -m 3 http://192.168.1.136:7802/health` | **the expectation changed on 2026-09-02: W runs `networkingMode=mirrored`**, so this may well SUCCEED with no portproxy at all. Measure it — a success proves mirrored networking end to end, a timeout means the firewall is the gate. Do not assume either |
 | 5.5 | M | `curl -s -m 3 http://100.64.0.2:7802/health` | under mirrored networking the VM shares Windows' interfaces, so the tailnet address may reach it — which would make Tailscale the whole answer for a Windows host and retire the portproxy. Measure it |
 | 5.6 | W, PowerShell **as Administrator** | ONLY IF 5.4 failed: the portproxy + firewall rule from the wiki's §4. Roy is not at that keyboard, so an elevation prompt blocks — report it rather than working around it | then 5.4 again — M should get through, and M then **joins the jam over the LAN** |

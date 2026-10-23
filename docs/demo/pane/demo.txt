@@ -1,0 +1,28 @@
+
+❯ [Alice]: the webhook handler drops events when Stripe retries. Can you take a look at
+  src/webhooks/handler.ts?
+
+⏺ Read 1 file
+
+⏺ Found it. The handler acknowledges the request before it writes the event, so a retry that
+  arrives mid-write is processed twice, and a crash after the ack loses the event entirely.
+  I would store the Stripe event id first and make the write idempotent.
+
+✻ Churned for 6s
+
+❯ [Dana]: should we key the dedupe on the event id or on the payment intent?
+
+⏺ The event id. One payment intent produces several events (created, succeeded, refunded), and
+  keying on the intent would swallow the later ones. I will add a unique index on event_id and
+  an upsert in handler.ts.
+
+⏺ Update(src/webhooks/handler.ts)
+  ⎿  Added 14 lines, removed 3 lines
+
+✻ Brewed for 9s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  [claude] | Sonnet | ~/code/payments-api |  main
+  ⏸ manual mode on · ← for agents
