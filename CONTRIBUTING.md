@@ -94,9 +94,16 @@ No `claude` login handy? The smokes use `scripts/fake-claude.mjs` as a stand-in;
 `main` is protected: it is merged by the maintainer, squashed. Do not worry about commit history inside
 your PR.
 
-## Reporting bugs and security issues
+## Feature requests and bugs
 
-- Bugs: open an issue with `claude-jam --version`, OS, Node version, and the exact command and output.
+- **Feature requests:** [open one](https://github.com/roypadina/claude-jam/issues/new?template=feature_request.yml) and say what you're trying to do; that matters more than the exact feature. Search the [open requests](https://github.com/roypadina/claude-jam/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement) first and 👍 an existing one if it's there.
+- **Bugs:** [open an issue](https://github.com/roypadina/claude-jam/issues/new) with `claude-jam --version`, OS, Node version, and the exact command and output.
+- **Ko-fi supporters:** add your Ko-fi name to the request and it goes to the front of my queue. It's a thank-you, not a purchase: no promise on what ships or when.
+- **Bigger changes:** open an issue before the PR so we agree on the shape first. Small, focused PRs can come straight in.
+- Replies are best effort, evenings and weekends. I read everything.
+
+## Security issues
+
 - Security problems: use GitHub's private vulnerability reporting, not a public issue.
 
 ## License

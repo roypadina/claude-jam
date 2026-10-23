@@ -90,6 +90,8 @@ claude-jam needs people on platforms the maintainer cannot test. You do not have
    [help wanted](https://github.com/roypadina/claude-jam/labels/help%20wanted).
 3. See where the project is going: [docs/ROADMAP.md](docs/ROADMAP.md).
 4. Questions or ideas: [Discussions](https://github.com/roypadina/claude-jam/discussions).
+5. Missing something? [Request a feature](https://github.com/roypadina/claude-jam/issues/new?template=feature_request.yml), or better, help finish it: most alpha gaps are in the [roadmap](docs/ROADMAP.md) and open for a PR.
+6. Tipped on [Ko-fi](https://ko-fi.com/roypadina)? Add your Ko-fi name to the request and it goes to the front of my queue. It's a thank-you, not a purchase: no promise on what ships or when.
 
 Running it on Windows, WSL2 or a Linux desktop and reporting what happened is a real contribution.
 
