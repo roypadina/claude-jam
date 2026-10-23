@@ -16,11 +16,25 @@ channel the agent never sees.
 [![CI: macOS, Linux, Windows](https://img.shields.io/badge/CI-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-informational)](https://github.com/roypadina/claude-jam/actions/workflows/tests.yml)
 [![Node](https://img.shields.io/badge/Node-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status: alpha](https://img.shields.io/badge/status-alpha-orange)](docs/ROADMAP.md)
+[![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen)](CONTRIBUTING.md)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-support-F16061?logo=ko-fi&logoColor=white)](https://ko-fi.com/roypadina)
 
 </div>
 
 ---
+
+## Status: alpha
+
+> **claude-jam is alpha software, and it is looking for contributors.**
+>
+> - **Works:** hosting on macOS (verified every release), joining from macOS, Linux and Windows terminals,
+>   attributed messages, the side channel, invites and approvals, tunnels via cloudflared, a 479-test unit suite plus CI on macOS, Linux and Windows.
+> - **Rough:** the Linux host and the WSL2 host are thinly proven or never run on a real machine; Windows
+>   keys, toasts and sounds are unverified; `--funnel` is unverified; discovery (`find`) is macOS-only.
+> - **Expect breaking changes** to flags, invite links and the wire protocol until 1.0.
+>
+> Details, with dates, in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Plan in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quickstart
 
@@ -61,6 +75,18 @@ aware of the room.
 | Windows | via WSL2 only, integrated but not yet run on a real WSL install | native client CI-tested; a jam has been joined from a WSL2 client |
 
 Row-by-row evidence, with dates, is in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+## Help build it
+
+claude-jam needs people on platforms the maintainer cannot test. You do not have to write code.
+
+1. Read [CONTRIBUTING.md](CONTRIBUTING.md) (setup, tests, layout, PR flow).
+2. Pick an issue: [good first issue](https://github.com/roypadina/claude-jam/labels/good%20first%20issue) ·
+   [help wanted](https://github.com/roypadina/claude-jam/labels/help%20wanted).
+3. See where the project is going: [docs/ROADMAP.md](docs/ROADMAP.md).
+4. Questions or ideas: [Discussions](https://github.com/roypadina/claude-jam/discussions).
+
+Running it on Windows, WSL2 or a Linux desktop and reporting what happened is a real contribution.
 
 ## Documentation
 
