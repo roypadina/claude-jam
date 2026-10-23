@@ -19,6 +19,7 @@ channel the agent never sees.
 [![CI](https://github.com/roypadina/claude-jam/actions/workflows/tests.yml/badge.svg)](https://github.com/roypadina/claude-jam/actions/workflows/tests.yml)
 [![CI: macOS, Linux, Windows](https://img.shields.io/badge/CI-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-informational)](https://github.com/roypadina/claude-jam/actions/workflows/tests.yml)
 [![Node](https://img.shields.io/badge/Node-22%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Website](https://img.shields.io/badge/website-apps.roypadina-2F62E6)](https://apps.roypadina.synology.me/apps/claude-jam/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange)](docs/ROADMAP.md)
 [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen)](CONTRIBUTING.md)
@@ -101,6 +102,14 @@ The full guide (every command, access mode, peer tasks, internals) lives in the
 [Security Model](https://github.com/roypadina/claude-jam/wiki/Security-Model).
 Contributors: [AGENTS.md](AGENTS.md), [SPEC.md](SPEC.md), [TESTING.md](TESTING.md),
 [PRIOR-ART.md](PRIOR-ART.md).
+
+## More Mac apps by Roy
+
+Free, open-source Mac menu-bar apps and terminal tools, all on one site: **[apps.roypadina.synology.me](https://apps.roypadina.synology.me/)**.
+
+- [Agents Monitor](https://apps.roypadina.synology.me/apps/agents-monitor/) — See your Claude Code and Codex usage limits before you hit them.
+- [AgentsSessionHopper](https://apps.roypadina.synology.me/apps/agents-session-hopper/) — Profiles for Claude Code. One conversation, any of your accounts.
+- [agentctl](https://apps.roypadina.synology.me/apps/agentctl/) — Find and resume any Claude Code or Codex session from one terminal menu.
 
 ## Support
 
