@@ -1,8 +1,12 @@
 <div align="center">
 
+<img src="docs/brand/icon-alpha.png" alt="claude-jam icon with an ALPHA ribbon" width="160">
+
 <img src="docs/demo/demo.gif" alt="A guest joins a shared Claude Code session: the host's live claude TUI, attributed [Name] messages, and a human-only side channel." width="860">
 
 # claude-jam
+
+**⚠️ ALPHA — not fully tested, and not everything works yet. Expect bugs and breaking changes. [Help build it →](CONTRIBUTING.md)**
 
 ### Share one real Claude Code session with other humans, live over WebSockets.
 
